@@ -94,6 +94,15 @@ def create_schema(db_path: Path) -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
             );
+            CREATE TABLE task_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id TEXT NOT NULL,
+                artifact_type TEXT NOT NULL,
+                path TEXT NOT NULL,
+                downloadable INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+            );
             CREATE TABLE collector_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
@@ -405,3 +414,47 @@ def test_attach_task_to_run_loads_run_with_lock_hook(tmp_path: Path) -> None:
     store.attach_task_to_run("task_2", run.run_id)
 
     assert calls == [run.run_id]
+
+
+def test_publish_full_result_persists_comparison_snapshot_and_artifacts(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    final_report = tmp_path / "final_report.json"
+    analysis_facts = tmp_path / "analysis_facts.jsonl"
+    final_report.write_text('{"headline":"ok"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"fallback"}\n', encoding="utf-8")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+
+    store.publish_full_result(
+        "task_1",
+        {
+            "task": {"vehicles": [{"model_name": "测试车", "query": "测试车"}]},
+            "postprocess_result": {"artifact_paths": [str(analysis_facts)]},
+            "report_result": {"artifact_paths": [str(final_report)]},
+        },
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        artifact_rows = connection.execute(
+            "SELECT artifact_type, path FROM task_artifacts WHERE task_id = ? ORDER BY id ASC",
+            ("task_1",),
+        ).fetchall()
+        snapshot_json = connection.execute(
+            "SELECT result_snapshot_json FROM task_vehicles WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    snapshot = json.loads(snapshot_json)["comparison_snapshot"]
+    assert artifact_rows == [
+        ("jsonl", str(analysis_facts)),
+        ("json", str(final_report)),
+    ]
+    assert snapshot["model_name"] == "测试车"
+    assert snapshot["source_job_id"] == "task_1"
+    assert snapshot["final_report_path"] == str(final_report)
+    assert snapshot["analysis_facts_path"] == str(analysis_facts)

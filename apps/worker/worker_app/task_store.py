@@ -64,6 +64,36 @@ def _candidate_series_id(vehicle: dict[str, Any], platform: str) -> str:
     return str(vehicle.get("dcd_series_id") or vehicle.get("dongchedi_series_id") or "")
 
 
+def _artifact_type(path: str) -> str:
+    lowered = path.lower()
+    if lowered.endswith(".jsonl"):
+        return "jsonl"
+    if lowered.endswith(".json"):
+        return "json"
+    if lowered.endswith(".xlsx"):
+        return "excel"
+    if lowered.endswith(".png"):
+        return "image_png"
+    return "artifact"
+
+
+def _first_path_with_suffix(paths: list[str], suffix: str) -> str | None:
+    for path in paths:
+        if path.endswith(suffix):
+            return path
+    return None
+
+
+def _payload_artifact_paths(payload: dict[str, Any]) -> list[str]:
+    paths: list[str] = []
+    for key in ("import_result", "export_result", "postprocess_result", "report_result"):
+        result = payload.get(key)
+        if not isinstance(result, dict):
+            continue
+        paths.extend(str(path) for path in result.get("artifact_paths") or [] if path)
+    return paths
+
+
 @dataclass(frozen=True)
 class TaskVehicleRecord:
     id: int
@@ -347,9 +377,80 @@ class TaskStore:
                     "updated_at": now,
                 },
             )
+            self._persist_comparison_snapshot(conn, task_id=task_id, payload=payload, updated_at=now)
         if was_degraded and not already_upgraded:
             self.append_task_event(task_id, "upgraded_to_full", payload)
         self.append_task_event(task_id, "full_result_published", payload)
+
+    def _persist_comparison_snapshot(self, conn: Any, *, task_id: str, payload: dict[str, Any], updated_at: str) -> None:
+        paths = _payload_artifact_paths(payload)
+        final_report_path = _first_path_with_suffix(paths, "final_report.json")
+        analysis_facts_path = _first_path_with_suffix(paths, "analysis_facts.jsonl")
+        if not final_report_path or not analysis_facts_path:
+            return
+
+        if _table_exists(self.engine, "task_artifacts"):
+            for path in paths:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO task_artifacts (task_id, artifact_type, path, downloadable, created_at)
+                        VALUES (:task_id, :artifact_type, :path, :downloadable, :created_at)
+                        """
+                    ),
+                    {
+                        "task_id": task_id,
+                        "artifact_type": _artifact_type(path),
+                        "path": path,
+                        "downloadable": True,
+                        "created_at": updated_at,
+                    },
+                )
+
+        task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+        vehicles = task.get("vehicles") if isinstance(task, dict) else []
+        vehicle = vehicles[0] if isinstance(vehicles, list) and vehicles and isinstance(vehicles[0], dict) else {}
+        row = conn.execute(
+            text(
+                """
+                SELECT id, result_snapshot_json, model_name, query
+                FROM task_vehicles
+                WHERE task_id = :task_id
+                ORDER BY position ASC, id ASC
+                LIMIT 1
+                """
+            ),
+            {"task_id": task_id},
+        ).mappings().first()
+        if row is None:
+            return
+        existing = _json_value(row["result_snapshot_json"], {})
+        existing = existing if isinstance(existing, dict) else {}
+        snapshot = {
+            "model_name": str(vehicle.get("model_name") or row["model_name"] or vehicle.get("query") or row["query"] or task_id),
+            "source_job_id": task_id,
+            "final_report_path": final_report_path,
+            "analysis_facts_path": analysis_facts_path,
+        }
+        llm_metrics_path = _first_path_with_suffix(paths, "llm_metrics.json")
+        if llm_metrics_path:
+            snapshot["llm_metrics_path"] = llm_metrics_path
+        existing["comparison_snapshot"] = snapshot
+        conn.execute(
+            text(
+                """
+                UPDATE task_vehicles
+                SET result_snapshot_json = :result_snapshot_json,
+                    updated_at = :updated_at
+                WHERE id = :vehicle_id
+                """
+            ).bindparams(bindparam("result_snapshot_json", type_=SAJSON)),
+            {
+                "result_snapshot_json": existing,
+                "updated_at": updated_at,
+                "vehicle_id": int(row["id"]),
+            },
+        )
 
     def schedule_retry(self, task_id: str, payload: dict[str, Any]) -> None:
         self.append_task_event(task_id, "retry_scheduled", payload)

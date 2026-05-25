@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,11 @@ def _safe_filename_part(value: str) -> str:
 def _comparison_output_dir(comparison_id: str) -> Path:
     artifact_root = os.getenv("ARTIFACT_ROOT", "/srv/koubei/jobs")
     return Path(artifact_root).expanduser().resolve() / comparison_id / "comparisons"
+
+
+def _task_output_dir(task_id: str) -> Path:
+    artifact_root = os.getenv("ARTIFACT_ROOT", "/srv/koubei/jobs")
+    return Path(artifact_root).expanduser().resolve() / task_id / "outputs" / "ai"
 
 
 def _comparison_vehicle_to_dict(vehicle: ComparisonVehicleInputs) -> dict[str, Any]:
@@ -919,11 +925,67 @@ class TaskActivities:
 
     @activity.defn
     async def run_postprocess(self, payload: dict[str, Any]) -> dict:
-        return {"artifact_paths": [], "skipped": True, "reason": "postprocess bridge integration deferred"}
+        task_id = str(payload["task_id"])
+        task = payload.get("task") or {}
+        vehicle = _first_vehicle(task) or {}
+        output_dir = _task_output_dir(task_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        facts_path = output_dir / "analysis_facts.jsonl"
+        fact = {
+            "comment_id": f"{task_id}:fallback",
+            "task_id": task_id,
+            "model_name": str(vehicle.get("model_name") or vehicle.get("query") or task_id),
+            "source": "temporal_fallback_postprocess",
+            "fallback": True,
+            "date": datetime.now(UTC).date().isoformat(),
+            "section_facts": {
+                "positive": "",
+                "negative": "",
+            },
+            "results_summary": {
+                "successful_platforms": list((payload.get("results") or {}).get("successful_platforms") or []),
+                "failed_platforms": list((payload.get("results") or {}).get("failed_platforms") or []),
+            },
+        }
+        facts_path.write_text(json.dumps(fact, ensure_ascii=False) + "\n", encoding="utf-8")
+        return {
+            "artifact_paths": [str(facts_path)],
+            "skipped": False,
+            "fallback": True,
+            "source": "temporal_fallback_postprocess",
+        }
 
     @activity.defn
     async def run_llm_report(self, payload: dict[str, Any]) -> dict:
-        return {"artifact_paths": [], "skipped": True, "reason": "llm report integration deferred"}
+        task_id = str(payload["task_id"])
+        task = payload.get("task") or {}
+        vehicle = _first_vehicle(task) or {}
+        results = payload.get("results") or {}
+        output_dir = _task_output_dir(task_id)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        report_path = output_dir / "final_report.json"
+        model_name = str(vehicle.get("model_name") or vehicle.get("query") or task_id)
+        report = {
+            "headline": f"{model_name} 口碑摘要",
+            "task_id": task_id,
+            "model_name": model_name,
+            "source": "temporal_fallback_report",
+            "fallback": True,
+            "generated_at": datetime.now(UTC).isoformat(),
+            "summary": "基础口碑结果已生成，完整 LLM 摘要待后续增强。",
+            "platform_counts": {
+                "successful": len(list(results.get("successful_platforms") or [])),
+                "failed": len(list(results.get("failed_platforms") or [])),
+            },
+        }
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {
+            "artifact_paths": [str(report_path)],
+            "skipped": False,
+            "fallback": True,
+            "report_json": report,
+            "source": "temporal_fallback_report",
+        }
 
     @activity.defn
     async def publish_degraded_result(self, payload: dict[str, Any]) -> dict:
