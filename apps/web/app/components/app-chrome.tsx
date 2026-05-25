@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
@@ -111,6 +112,10 @@ export function AppChrome({ children }: { children: ReactNode }) {
           </div>
         </div>
       </header>
+
+      <nav className="utility-nav" aria-label="全局导航">
+        <Link href="/tasks">任务中心</Link>
+      </nav>
 
       <StepRail activeStep={activeStep} />
 

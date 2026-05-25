@@ -299,3 +299,70 @@ export type QaResponse = {
 export type QaRequest = {
   question: string;
 };
+
+export type TaskVehicle = {
+  task_vehicle_id: number;
+  position: number;
+  query: string;
+  model_name: string | null;
+  autohome_series_id: string | null;
+  dcd_series_id: string | null;
+  status: string;
+};
+
+export type TaskEvent = {
+  event_id: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string | null;
+};
+
+export type TaskArtifact = {
+  artifact_id: number;
+  artifact_type: string;
+  path: string;
+  downloadable: boolean;
+  created_at: string | null;
+};
+
+export type TaskListItem = {
+  task_id: string;
+  task_type: "single" | "comparison";
+  display_name: string;
+  status: string;
+  current_stage: string;
+  degraded: boolean;
+  upgraded_to_full: boolean;
+  eta_seconds: number | null;
+  eta_reason: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type TaskDetailResponse = TaskListItem & {
+  vehicles: TaskVehicle[];
+  events: TaskEvent[];
+  artifacts: TaskArtifact[];
+};
+
+export type TaskCreateVehicle = {
+  query: string;
+};
+
+export type TaskCreateRequest = {
+  task_type: "single" | "comparison";
+  vehicles: TaskCreateVehicle[];
+};
+
+export type TaskCreateResponse = {
+  task_id: string;
+  status: string;
+  view_url: string;
+  manage_url: string;
+};
+
+export type TaskLoadResponse = {
+  running_task_count: number;
+  queued_task_count: number;
+  platforms: Record<string, { available: number; total: number }>;
+};
