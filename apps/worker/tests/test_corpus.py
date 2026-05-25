@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import worker_app.corpus as corpus_module
 from worker_app.corpus import (
     AUTOHOME_HEADERS,
     dedupe_key_for_row,
@@ -104,3 +106,66 @@ def test_corpus_upserts_new_rows_and_exports_full_platform_workbook(tmp_path: Pa
     assert header[:4] == AUTOHOME_HEADERS[:4]
     source_link_index = header.index("来源链接")
     assert exported[0][source_link_index] == "https://k.autohome.com.cn/detail/view_01abc.html"
+
+
+def test_sync_vehicle_corpus_files_writes_manifest_workbooks_and_known_links(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'corpus.db'}"
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="autohome",
+        series_id="8089",
+        job_id="job_first",
+        rows=[
+            {
+                "用户名": "车主A",
+                "发表日期": "2026-05-01",
+                "车型": "测试车 2026款",
+                "评价详情": "汽车之家评论",
+                "来源链接": "https://k.autohome.com.cn/detail/view_01abc.html",
+            }
+        ],
+    )
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="dongchedi",
+        series_id="25398",
+        job_id="job_first",
+        rows=[
+            {
+                "用户名": "车主B",
+                "发布时间": "2026-05-02",
+                "评价车型": "测试车 2026款",
+                "评价全文": "懂车帝评论",
+                "来源链接": "https://www.dongchedi.com/koubei/123",
+            }
+        ],
+    )
+
+    summary = corpus_module.sync_vehicle_corpus_files(
+        database_url=database_url,
+        corpus_root=tmp_path / "corpus",
+        query="测试车",
+        model_name="测试车",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+    )
+
+    vehicle_dir = tmp_path / "corpus" / "测试车__autohome-8089__dcd-25398"
+    assert summary["vehicle_dir"] == str(vehicle_dir)
+    manifest = json.loads((vehicle_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["model_name"] == "测试车"
+    assert manifest["series_ids"] == {"autohome": "8089", "dongchedi": "25398"}
+    assert manifest["platforms"]["autohome"]["row_count"] == 1
+    assert manifest["platforms"]["dongchedi"]["row_count"] == 1
+    assert (vehicle_dir / "autohome" / "raw.xlsx").exists()
+    assert (vehicle_dir / "dongchedi" / "raw.xlsx").exists()
+    assert (vehicle_dir / "autohome" / "known-links.txt").read_text(encoding="utf-8").splitlines() == [
+        "https://k.autohome.com.cn/detail/view_01abc.html"
+    ]
+    assert (vehicle_dir / "dongchedi" / "known-links.txt").read_text(encoding="utf-8").splitlines() == [
+        "https://www.dongchedi.com/koubei/123"
+    ]

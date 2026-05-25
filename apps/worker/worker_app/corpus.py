@@ -111,6 +111,27 @@ def query_key(query: str) -> str:
     return re.sub(r"\s+", " ", query).strip().lower()
 
 
+def _safe_folder_part(value: str) -> str:
+    cleaned = re.sub(r"[\\/:\*\?\"<>\|\x00-\x1f]", "_", value.strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or "vehicle"
+
+
+def vehicle_corpus_dir(
+    corpus_root: str | Path,
+    *,
+    model_name: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+) -> Path:
+    folder_name = (
+        f"{_safe_folder_part(model_name)}"
+        f"__autohome-{_safe_folder_part(str(autohome_series_id))}"
+        f"__dcd-{_safe_folder_part(str(dongchedi_series_id))}"
+    )
+    return Path(corpus_root).expanduser().resolve() / folder_name
+
+
 def _clean(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
 
@@ -388,6 +409,68 @@ def export_vehicle_merged_raw_workbook(
 def write_known_links_file(path: Path, links: set[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(sorted(links)) + ("\n" if links else ""), encoding="utf-8")
+
+
+def sync_vehicle_corpus_files(
+    *,
+    database_url: str,
+    corpus_root: str | Path,
+    query: str,
+    model_name: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+) -> dict[str, Any]:
+    vehicle_dir = vehicle_corpus_dir(
+        corpus_root,
+        model_name=model_name,
+        autohome_series_id=str(autohome_series_id),
+        dongchedi_series_id=str(dongchedi_series_id),
+    )
+    platform_series = {
+        "autohome": str(autohome_series_id),
+        "dongchedi": str(dongchedi_series_id),
+    }
+    platform_summary: dict[str, dict[str, Any]] = {}
+    for platform, series_id in platform_series.items():
+        platform_dir = vehicle_dir / platform
+        raw_path = platform_dir / "raw.xlsx"
+        known_links_path = platform_dir / "known-links.txt"
+        row_count = export_platform_workbook(
+            database_url=database_url,
+            query=query,
+            platform=platform,
+            series_id=series_id,
+            output_path=raw_path,
+            headers=PLATFORM_HEADERS[platform],
+        )
+        state = load_platform_state(database_url, query=query, platform=platform, series_id=series_id)
+        write_known_links_file(known_links_path, state.known_links)
+        platform_summary[platform] = {
+            "series_id": series_id,
+            "row_count": row_count,
+            "known_links_count": len(state.known_links),
+            "raw_path": str(raw_path),
+            "known_links_path": str(known_links_path),
+        }
+
+    manifest = {
+        "query": query,
+        "model_name": model_name,
+        "series_ids": {
+            "autohome": str(autohome_series_id),
+            "dongchedi": str(dongchedi_series_id),
+        },
+        "updated_at": datetime.now(UTC).isoformat(),
+        "platforms": platform_summary,
+    }
+    manifest_path = vehicle_dir / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "vehicle_dir": str(vehicle_dir),
+        "manifest_path": str(manifest_path),
+        "platforms": platform_summary,
+    }
 
 
 def read_validation_incremental_stats(validation_path: Path) -> dict[str, Any]:
