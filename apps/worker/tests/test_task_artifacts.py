@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+import os
 from pathlib import Path
+import subprocess
 import sys
 import zipfile
 
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import create_engine, select
+import pytest
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 WORKER_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +22,7 @@ for root in (WORKER_ROOT, API_ROOT):
 from app.models import Base, Task, TaskArtifact
 from worker_app.corpus import export_vehicle_merged_raw_workbook, upsert_platform_rows
 from worker_app.task_artifacts import (
+    TaskArtifactRecord,
     create_comparison_downloads,
     create_single_task_downloads,
     record_task_artifacts,
@@ -54,6 +58,35 @@ def _write_workbook(path: Path, sheet_name: str = "raw") -> None:
     sheet.append(["车型", "评价"])
     sheet.append(["测试车", path.stem])
     workbook.save(path)
+
+
+def _seed_worker_task_artifact_session(tmp_path: Path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'worker-tasks.db'}", future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE task_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    downloadable INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO task_artifacts (task_id, artifact_type, path, downloadable, created_at)
+                VALUES ('other_task', 'business_zip', '/tmp/other.zip', 1, '2026-05-26T00:00:00+00:00')
+                """
+            )
+        )
+    session_local = sessionmaker(bind=engine, future=True)
+    return session_local()
 
 
 def test_export_vehicle_merged_raw_workbook_writes_two_platform_sheets(tmp_path: Path) -> None:
@@ -170,3 +203,112 @@ def test_comparison_downloads_zip_raw_workbooks_and_business_files_as_downloadab
         assert [row.artifact_type for row in rows] == ["business_zip", "vehicle_raw_excel", "vehicle_raw_excel"]
     finally:
         session.close()
+
+
+def test_record_task_artifacts_is_idempotent_with_worker_schema_without_app_models(tmp_path: Path) -> None:
+    session = _seed_worker_task_artifact_session(tmp_path)
+    records = [
+        TaskArtifactRecord("task_1", "business_zip", "/tmp/task_1.zip"),
+        TaskArtifactRecord("task_1", "merged_raw_excel", "/tmp/task_1_raw.xlsx"),
+    ]
+
+    try:
+        record_task_artifacts(session, records)
+        record_task_artifacts(session, records)
+        rows = session.execute(
+            text("SELECT task_id, artifact_type, path, downloadable FROM task_artifacts ORDER BY task_id, artifact_type")
+        ).all()
+    finally:
+        session.close()
+
+    assert rows == [
+        ("other_task", "business_zip", "/tmp/other.zip", 1),
+        ("task_1", "business_zip", "/tmp/task_1.zip", 1),
+        ("task_1", "merged_raw_excel", "/tmp/task_1_raw.xlsx", 1),
+    ]
+
+
+def test_task_artifacts_module_imports_and_records_with_worker_pythonpath_only(tmp_path: Path) -> None:
+    worker_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "worker-only.db"
+    script = f"""
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
+from worker_app.task_artifacts import TaskArtifactRecord, record_task_artifacts
+
+engine = create_engine("sqlite+pysqlite:///{db_path}", future=True)
+with engine.begin() as connection:
+    connection.execute(text('''
+        CREATE TABLE task_artifacts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            path TEXT NOT NULL,
+            downloadable INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+    '''))
+session = sessionmaker(bind=engine, future=True)()
+record_task_artifacts(session, [TaskArtifactRecord("task_1", "business_zip", "/tmp/task.zip")])
+session.close()
+"""
+
+    env = {**os.environ, "PYTHONPATH": str(worker_root)}
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=worker_root,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}", future=True)
+    with engine.begin() as connection:
+        rows = connection.execute(text("SELECT task_id, artifact_type, path, downloadable FROM task_artifacts")).all()
+    assert rows == [("task_1", "business_zip", "/tmp/task.zip", 1)]
+
+
+def test_single_task_downloads_reject_missing_files_without_partial_zip(tmp_path: Path) -> None:
+    merged_raw = tmp_path / "missing_raw.xlsx"
+    business_file = tmp_path / "business" / "summary.xlsx"
+    business_file.parent.mkdir(parents=True, exist_ok=True)
+    business_file.write_text("summary", encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match=str(merged_raw)):
+        create_single_task_downloads("task_1", tmp_path / "downloads", merged_raw, [business_file])
+    assert not (tmp_path / "downloads" / "task_1_business.zip").exists()
+
+    _write_workbook(merged_raw)
+    missing_business = tmp_path / "business" / "missing.xlsx"
+    with pytest.raises(FileNotFoundError, match=str(missing_business)):
+        create_single_task_downloads("task_1", tmp_path / "downloads", merged_raw, [missing_business])
+    assert not (tmp_path / "downloads" / "task_1_business.zip").exists()
+
+
+def test_comparison_downloads_reject_missing_files_without_partial_zip(tmp_path: Path) -> None:
+    first_raw = tmp_path / "vehicle_a" / "raw.xlsx"
+    missing_raw = tmp_path / "vehicle_b" / "raw.xlsx"
+    business_file = tmp_path / "business" / "comparison_summary.xlsx"
+    _write_workbook(first_raw)
+    _write_workbook(business_file)
+
+    with pytest.raises(FileNotFoundError, match=str(missing_raw)):
+        create_comparison_downloads(
+            task_id="task_1",
+            output_dir=tmp_path / "downloads",
+            vehicle_raw_paths={"车辆A": first_raw, "车辆B": missing_raw},
+            business_files=[business_file],
+        )
+    assert not (tmp_path / "downloads" / "task_1_business.zip").exists()
+
+    missing_business = tmp_path / "business" / "missing.xlsx"
+    with pytest.raises(FileNotFoundError, match=str(missing_business)):
+        create_comparison_downloads(
+            task_id="task_1",
+            output_dir=tmp_path / "downloads",
+            vehicle_raw_paths={"车辆A": first_raw},
+            business_files=[missing_business],
+        )
+    assert not (tmp_path / "downloads" / "task_1_business.zip").exists()

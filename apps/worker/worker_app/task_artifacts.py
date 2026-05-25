@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 import re
+import uuid
 import zipfile
+
+from sqlalchemy import text
 
 
 @dataclass(frozen=True)
@@ -38,13 +42,34 @@ def _unique_arcname(used: set[str], arcname: str) -> str:
         index += 1
 
 
-def _write_business_zip(output_path: Path, files: Iterable[str | Path]) -> None:
+def _existing_file(path: str | Path) -> Path:
+    candidate = Path(path)
+    if not candidate.is_file():
+        raise FileNotFoundError(f"task artifact file does not exist: {candidate}")
+    return candidate
+
+
+def _existing_files(paths: Iterable[str | Path]) -> list[Path]:
+    return [_existing_file(path) for path in paths]
+
+
+def _write_zip_atomic(output_path: Path, entries: Iterable[tuple[Path, str]]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_name(f".{output_path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for file_path, arcname in entries:
+                archive.write(file_path, arcname)
+        temp_path.replace(output_path)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
+def _write_business_zip(output_path: Path, files: Iterable[Path]) -> None:
     used: set[str] = set()
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file_path in files:
-            path = Path(file_path)
-            archive.write(path, _unique_arcname(used, path.name))
+    entries = [(path, _unique_arcname(used, path.name)) for path in files]
+    _write_zip_atomic(output_path, entries)
 
 
 def _normalise_vehicle_raw_paths(vehicle_raw_paths: Mapping[str, str | Path] | Iterable[str | Path]) -> list[tuple[str, Path]]:
@@ -59,11 +84,13 @@ def create_single_task_downloads(
     merged_raw_path: str | Path,
     business_files: Iterable[str | Path],
 ) -> list[TaskArtifactRecord]:
+    merged_raw = _existing_file(merged_raw_path)
+    business_paths = _existing_files(business_files)
     business_zip_path = Path(output_dir) / f"{task_id}_business.zip"
-    _write_business_zip(business_zip_path, business_files)
+    _write_business_zip(business_zip_path, business_paths)
     return [
         TaskArtifactRecord(task_id=task_id, artifact_type="business_zip", path=str(business_zip_path)),
-        TaskArtifactRecord(task_id=task_id, artifact_type="merged_raw_excel", path=str(Path(merged_raw_path))),
+        TaskArtifactRecord(task_id=task_id, artifact_type="merged_raw_excel", path=str(merged_raw)),
     ]
 
 
@@ -74,17 +101,15 @@ def create_comparison_downloads(
     business_files: Iterable[str | Path],
 ) -> list[TaskArtifactRecord]:
     output_path = Path(output_dir) / f"{task_id}_business.zip"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    raw_paths = _normalise_vehicle_raw_paths(vehicle_raw_paths)
+    raw_paths = [(label, _existing_file(path)) for label, path in _normalise_vehicle_raw_paths(vehicle_raw_paths)]
+    business_paths = _existing_files(business_files)
     used: set[str] = set()
-
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for file_path in business_files:
-            path = Path(file_path)
-            archive.write(path, _unique_arcname(used, path.name))
-        for label, file_path in raw_paths:
-            safe_label = _safe_zip_part(label)
-            archive.write(file_path, _unique_arcname(used, f"vehicle_raw/{safe_label}_{file_path.name}"))
+    entries = [(path, _unique_arcname(used, path.name)) for path in business_paths]
+    entries.extend(
+        (path, _unique_arcname(used, f"vehicle_raw/{_safe_zip_part(label)}_{path.name}"))
+        for label, path in raw_paths
+    )
+    _write_zip_atomic(output_path, entries)
 
     return [
         TaskArtifactRecord(task_id=task_id, artifact_type="business_zip", path=str(output_path)),
@@ -96,17 +121,36 @@ def create_comparison_downloads(
 
 
 def record_task_artifacts(session, records: Iterable[TaskArtifactRecord]) -> None:
-    from app.models import TaskArtifact
-
-    session.add_all(
-        [
-            TaskArtifact(
-                task_id=record.task_id,
-                artifact_type=record.artifact_type,
-                path=record.path,
-                downloadable=record.downloadable,
-            )
-            for record in records
-        ]
-    )
+    unique_records = list(dict.fromkeys(records))
+    now = datetime.now(UTC).isoformat()
+    for record in unique_records:
+        params = {
+            "task_id": record.task_id,
+            "artifact_type": record.artifact_type,
+            "path": record.path,
+        }
+        session.execute(
+            text(
+                """
+                DELETE FROM task_artifacts
+                WHERE task_id = :task_id
+                  AND artifact_type = :artifact_type
+                  AND path = :path
+                """
+            ),
+            params,
+        )
+        session.execute(
+            text(
+                """
+                INSERT INTO task_artifacts (task_id, artifact_type, path, downloadable, created_at)
+                VALUES (:task_id, :artifact_type, :path, :downloadable, :created_at)
+                """
+            ),
+            {
+                **params,
+                "downloadable": record.downloadable,
+                "created_at": now,
+            },
+        )
     session.commit()
