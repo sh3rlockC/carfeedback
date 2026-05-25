@@ -155,6 +155,7 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       ARTIFACT_ROOT: ${ARTIFACT_ROOT:-/srv/koubei/jobs}
       CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
+      KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
       TEMPORAL_ADDRESS: ${TEMPORAL_ADDRESS:-temporal:7233}
       TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
@@ -189,13 +190,13 @@ services:
       redis:
         condition: service_healthy
       temporal:
-        condition: service_started
+        condition: service_healthy
       autohome-collector:
         condition: service_healthy
       dongchedi-collector:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os; from redis import Redis; Redis.from_url(os.environ['REDIS_URL']).ping()\""]
+      test: ["CMD-SHELL", "python -c \"import asyncio, os; from temporalio.client import Client; asyncio.run(Client.connect(os.environ['TEMPORAL_ADDRESS'], namespace=os.environ.get('TEMPORAL_NAMESPACE', 'default')))\""]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -235,10 +236,18 @@ services:
       POSTGRES_SEEDS: postgres
       POSTGRES_USER: ${POSTGRES_USER:-koubei}
       POSTGRES_PWD: ${POSTGRES_PASSWORD:-koubei}
+      DBNAME: ${TEMPORAL_DBNAME:-temporal}
+      VISIBILITY_DBNAME: ${TEMPORAL_VISIBILITY_DBNAME:-temporal_visibility}
       TEMPORAL_ADDRESS: temporal:7233
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address 127.0.0.1:7233 --namespace default --command-timeout 5s >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   redis:
