@@ -20,7 +20,9 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 def _has_passphrase_session(request: Request, settings: Settings) -> bool:
     try:
         require_passphrase_session(request, settings)
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_401_UNAUTHORIZED:
+            raise
         return False
     return True
 
@@ -98,7 +100,23 @@ def create_task(
     db.commit()
     db.refresh(task)
 
-    workflow_client.start_task(task.task_id)
+    try:
+        workflow_client.start_task(task.task_id)
+    except Exception as exc:
+        task.status = "failed"
+        task.current_stage = "workflow_start_failed"
+        db.add(
+            TaskEvent(
+                task_id=task.task_id,
+                event_type="workflow_start_failed",
+                payload_json={"error": str(exc)},
+            )
+        )
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="task workflow unavailable",
+        ) from exc
 
     return TaskCreateResponse(
         task_id=task.task_id,

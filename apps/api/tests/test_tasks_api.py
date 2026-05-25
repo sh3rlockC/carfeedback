@@ -30,7 +30,17 @@ class FakeTaskWorkflowClient:
         self.started.append(task_id)
 
 
-def make_client(tmp_path: Path) -> tuple[TestClient, FakeTaskWorkflowClient]:
+class FailingTaskWorkflowClient:
+    def start_task(self, task_id: str) -> None:
+        raise RuntimeError("temporal unavailable")
+
+
+def make_client(
+    tmp_path: Path,
+    workflow_client: FakeTaskWorkflowClient | FailingTaskWorkflowClient | None = None,
+    *,
+    raise_server_exceptions: bool = True,
+) -> tuple[TestClient, FakeTaskWorkflowClient | FailingTaskWorkflowClient]:
     reset_engine_cache()
     settings = Settings(
         app_env="test",
@@ -42,9 +52,9 @@ def make_client(tmp_path: Path) -> tuple[TestClient, FakeTaskWorkflowClient]:
         workspace_root="/Users/xyc/Documents/codexwork",
     )
     app = create_app(settings)
-    fake_workflow = FakeTaskWorkflowClient()
+    fake_workflow = workflow_client or FakeTaskWorkflowClient()
     app.dependency_overrides[get_task_workflow_client] = lambda: fake_workflow
-    return TestClient(app), fake_workflow
+    return TestClient(app, raise_server_exceptions=raise_server_exceptions), fake_workflow
 
 
 def authenticate(client: TestClient) -> None:
@@ -126,6 +136,37 @@ def test_get_tasks_returns_list_after_passphrase_access(tmp_path: Path) -> None:
     assert items[0]["display_name"] == "风云X3 PLUS"
     assert "view_token_hash" not in items[0]
     assert "manage_token_hash" not in items[0]
+
+
+def test_post_tasks_marks_task_failed_when_workflow_start_fails(tmp_path: Path) -> None:
+    client, _ = make_client(
+        tmp_path,
+        workflow_client=FailingTaskWorkflowClient(),
+        raise_server_exceptions=False,
+    )
+    authenticate(client)
+
+    response = client.post(
+        "/api/tasks",
+        json={"task_type": "single", "vehicles": [{"query": "风云X3 PLUS"}]},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "task workflow unavailable"
+
+    session = get_session_local()()
+    try:
+        tasks = session.query(Task).all()
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.status == "failed"
+        assert task.current_stage == "workflow_start_failed"
+        events = [event.event_type for event in task.events]
+        assert events == ["created", "workflow_start_failed"]
+        failure_event = task.events[-1]
+        assert failure_event.payload_json == {"error": "temporal unavailable"}
+    finally:
+        session.close()
 
 
 def test_get_task_detail_accepts_view_token_without_passphrase(tmp_path: Path) -> None:
