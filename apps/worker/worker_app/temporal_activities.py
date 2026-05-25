@@ -20,7 +20,7 @@ SUCCESS_STATUSES = {"completed", "succeeded", "success"}
 FAILED_STATUSES = {"failed", "cancelled", "cancel_requested"}
 ACTIVE_STATUSES = {"queued", "waiting_agent", "running", "retry_wait"}
 DEFAULT_COLLECTOR_WAIT_POLL_SECONDS = 5.0
-DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS = 2700.0
+DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS = 2400.0
 
 
 def _env_float(name: str, default: float) -> float:

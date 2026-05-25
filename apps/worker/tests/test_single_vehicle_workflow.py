@@ -14,7 +14,11 @@ if str(ROOT) not in sys.path:
 
 from test_task_store import create_schema, seed_task
 from worker_app.task_store import TaskStore
-from worker_app.temporal_activities import TaskActivities
+from worker_app.temporal_activities import (
+    DEFAULT_COLLECTOR_WAIT_POLL_SECONDS,
+    DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS,
+    TaskActivities,
+)
 from worker_app.temporal_workflows import SingleVehicleTaskWorkflow, run_single_vehicle_task
 import worker_app.temporal_activities as temporal_activities
 
@@ -160,6 +164,11 @@ def test_both_platforms_succeed_completes_full_result() -> None:
         "run_llm_report",
         "publish_full_result",
     ]
+
+
+def test_default_collector_wait_timeout_is_below_activity_timeout() -> None:
+    assert DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS < 45 * 60
+    assert DEFAULT_COLLECTOR_WAIT_POLL_SECONDS > 0
 
 
 def test_one_retryable_platform_failure_publishes_degraded_and_schedules_retry() -> None:
