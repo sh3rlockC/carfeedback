@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,3 +25,11 @@ def test_task_activities_exposes_load_task() -> None:
 
 def test_temporal_worker_exposes_main_without_connecting() -> None:
     assert hasattr(temporal_worker, "main")
+
+
+def test_pyproject_includes_temporal_worker_dependencies() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+
+    assert "temporalio>=1.9,<2.0" in dependencies
+    assert "httpx>=0.28,<0.29" in dependencies
