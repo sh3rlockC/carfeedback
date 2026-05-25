@@ -216,7 +216,7 @@ OPENCLAW_AGENT_POOL_WAIT_SECONDS=1800
 
 Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内置 `temporal` 服务；生产环境如果接入外部 Temporal 集群，只需要把 `TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE` 和 `TEMPORAL_TASK_QUEUE` 指向目标集群，不需要改业务代码。
 
-新任务中心依赖 `autohome-collector` 和 `dongchedi-collector` 两个 collector service。它们是采集执行入口；API 和 Temporal worker 只通过 service URL 调用，不直接在 API 容器里跑采集。
+新任务中心依赖 `autohome-collector` 和 `dongchedi-collector` 两个 collector service。它们是采集执行入口；生产启用新任务前，必须确认 API 已真正启动 Temporal workflow，且 Temporal activities 已通过 `AUTOHOME_COLLECTOR_SERVICE_URL`、`DCD_COLLECTOR_SERVICE_URL` 调用 collector HTTP API，不应直接在 API 容器里跑采集。
 
 ## 首次启动步骤
 
@@ -320,7 +320,7 @@ docker compose logs --tail=200
 
 ## Sandbox 验证与生产切换
 
-生产切换前必须先用 sandbox 环境跑通过模拟负载，至少覆盖：
+生产切换前必须先用 sandbox 环境跑通过模拟负载。当前仓库内的 fake integration 测试覆盖 workflow 状态机、共享 run、拥挤调度和降级后升级；正式切换前还需要用实际 collector service 路径再跑一次。至少覆盖：
 
 - 1 个单车型增量任务。
 - 1 个 2 车型以上对比任务。
