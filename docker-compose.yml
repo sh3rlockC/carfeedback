@@ -243,7 +243,7 @@ services:
       postgres:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "temporal operator cluster health --address 127.0.0.1:7233 --namespace default --command-timeout 5s >/dev/null 2>&1"]
+      test: ["CMD-SHELL", "temporal operator cluster health --address \"$${TEMPORAL_ADDRESS:-temporal:7233}\" --namespace default --command-timeout 5s >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12

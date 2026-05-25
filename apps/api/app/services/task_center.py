@@ -23,6 +23,21 @@ def _datetime_desc_key(value):
     )
 
 
+def _datetime_asc_key(value):
+    if value is None:
+        return (1, 0, 0, 0, 0, 0, 0)
+    return (
+        0,
+        value.year,
+        value.month,
+        value.day,
+        value.hour,
+        value.minute,
+        value.second,
+        value.microsecond,
+    )
+
+
 def _task_sort_key(task: Task):
     return (task.created_at is None, _datetime_desc_key(task.created_at), task.task_id)
 
@@ -32,7 +47,7 @@ def _position_sort_key(item):
 
 
 def _created_at_sort_key(item):
-    return (item.created_at is None, item.created_at or datetime.min, item.id or 0)
+    return (*_datetime_asc_key(item.created_at), item.id or 0)
 
 
 def _task_base(task: Task) -> dict:
