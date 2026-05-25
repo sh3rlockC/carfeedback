@@ -10,8 +10,8 @@ class QueuedRun:
     run_id: str
     task_id: str
     task_type: str
-    waited_seconds: int
     platform: str = ""
+    waited_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ def available_agent_counts(
     leased_agent_ids = set(leases.keys() if isinstance(leases, Mapping) else leases)
 
     return {
-        platform: max(len(ids) - len(set(ids) & leased_agent_ids), 0)
+        platform: len(set(ids) - leased_agent_ids)
         for platform, ids in agent_ids.items()
     }
 

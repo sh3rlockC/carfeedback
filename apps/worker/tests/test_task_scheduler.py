@@ -41,6 +41,36 @@ def test_available_agent_counts_accepts_mapping_leases() -> None:
     }
 
 
+def test_available_agent_counts_deduplicates_configured_agent_ids() -> None:
+    agent_ids = {
+        "autohome": ["autohome_1", "autohome_1", "autohome_2"],
+        "dongchedi": ["dongchedi_1", "dongchedi_1"],
+    }
+    leases = {"autohome_1": "run_a", "dongchedi_1": "run_b"}
+
+    assert available_agent_counts(agent_ids, leases) == {
+        "autohome": 1,
+        "dongchedi": 0,
+    }
+
+
+def test_queued_run_supports_plan_positional_constructor_order() -> None:
+    run = QueuedRun("run_a", "task_big", "comparison", "autohome", 60)
+
+    assert run.platform == "autohome"
+    assert run.waited_seconds == 60
+
+    order = plan_dispatch_order(
+        platform_queues={"autohome": [run]},
+        agent_capacity={"autohome": 1},
+        active_lanes_by_task={},
+        single_task_priority_weight=0.1,
+    )
+
+    assert order[0].platform == "autohome"
+    assert order[0].run_id == "run_a"
+
+
 def test_is_crowded_when_queue_length_reaches_agent_count() -> None:
     assert is_crowded(
         platform_queue_lengths={"autohome": 2, "dongchedi": 0},
