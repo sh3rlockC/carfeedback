@@ -62,6 +62,8 @@ class TaskRecord:
     status: str
     current_stage: str
     collection_mode: str
+    degraded: bool
+    upgraded_to_full: bool
     vehicles: list[TaskVehicleRecord]
 
 
@@ -75,6 +77,8 @@ class CollectionRunRecord:
     status: str
     mode: str
     shared_by_task_ids: list[str]
+    failure_category: str | None = None
+    output_path: str | None = None
 
 
 class TaskStore:
@@ -86,7 +90,8 @@ class TaskStore:
             task_row = conn.execute(
                 text(
                     """
-                    SELECT task_id, task_type, display_name, status, current_stage, collection_mode
+                    SELECT task_id, task_type, display_name, status, current_stage, collection_mode,
+                           degraded, upgraded_to_full
                     FROM tasks
                     WHERE task_id = :task_id
                     """
@@ -129,6 +134,8 @@ class TaskStore:
             status=str(task_row["status"]),
             current_stage=str(task_row["current_stage"]),
             collection_mode=str(task_row["collection_mode"]),
+            degraded=bool(task_row["degraded"]),
+            upgraded_to_full=bool(task_row["upgraded_to_full"]),
             vehicles=vehicles,
         )
 
@@ -165,6 +172,165 @@ class TaskStore:
                     "created_at": utc_now_iso(),
                 },
             )
+
+    def publish_degraded_result(self, task_id: str, payload: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = 'completed_degraded',
+                        status = 'completed_degraded',
+                        degraded = :degraded,
+                        upgraded_to_full = :upgraded_to_full,
+                        completed_at = COALESCE(completed_at, :completed_at),
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "degraded": True,
+                    "upgraded_to_full": False,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            )
+        self.append_task_event(task_id, "degraded_published", payload)
+
+    def publish_full_result(self, task_id: str, payload: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT degraded, upgraded_to_full FROM tasks WHERE task_id = :task_id"),
+                {"task_id": task_id},
+            ).mappings().first()
+            if row is None:
+                raise RuntimeError(f"task not found: {task_id}")
+            was_degraded = bool(row["degraded"])
+            already_upgraded = bool(row["upgraded_to_full"])
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = 'completed',
+                        status = 'completed',
+                        degraded = :degraded,
+                        upgraded_to_full = :upgraded_to_full,
+                        completed_at = COALESCE(completed_at, :completed_at),
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "degraded": was_degraded,
+                    "upgraded_to_full": was_degraded or already_upgraded,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            )
+        if was_degraded and not already_upgraded:
+            self.append_task_event(task_id, "upgraded_to_full", payload)
+        self.append_task_event(task_id, "full_result_published", payload)
+
+    def schedule_retry(self, task_id: str, payload: dict[str, Any]) -> None:
+        self.append_task_event(task_id, "retry_scheduled", payload)
+
+    def mark_task_failed(self, task_id: str, payload: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = 'failed',
+                        status = 'failed',
+                        completed_at = COALESCE(completed_at, :completed_at),
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {"task_id": task_id, "completed_at": now, "updated_at": now},
+            )
+        self.append_task_event(task_id, "task_failed", payload)
+
+    def cancel_task_and_detach_runs(self, task_id: str) -> dict[str, Any]:
+        now = utc_now_iso()
+        detached_runs: list[dict[str, Any]] = []
+        cancelled_run_ids: list[str] = []
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = 'cancelled',
+                        status = 'cancelled',
+                        completed_at = COALESCE(completed_at, :completed_at),
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {"task_id": task_id, "completed_at": now, "updated_at": now},
+            )
+            run_rows = conn.execute(
+                text(
+                    """
+                    SELECT cr.run_id, cr.shared_by_task_ids
+                    FROM collection_runs cr
+                    JOIN collection_run_tasks crt ON crt.run_id = cr.run_id
+                    WHERE crt.task_id = :task_id
+                      AND cr.status IN ('queued', 'waiting_agent', 'running', 'retry_wait')
+                    ORDER BY cr.created_at ASC, cr.run_id ASC
+                    """
+                ),
+                {"task_id": task_id},
+            ).mappings().all()
+
+            for row in run_rows:
+                run_id = str(row["run_id"])
+                remaining_task_ids = [
+                    existing_task_id
+                    for existing_task_id in self._shared_task_ids(row)
+                    if existing_task_id != task_id
+                ]
+                self._update_shared_task_ids(conn, run_id, remaining_task_ids)
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM collection_run_tasks
+                        WHERE run_id = :run_id AND task_id = :task_id
+                        """
+                    ),
+                    {"run_id": run_id, "task_id": task_id},
+                )
+                cancelled = not remaining_task_ids
+                if cancelled:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE collection_runs
+                            SET status = 'cancelled',
+                                finished_at = COALESCE(finished_at, :finished_at),
+                                updated_at = :updated_at
+                            WHERE run_id = :run_id
+                            """
+                        ),
+                        {"run_id": run_id, "finished_at": now, "updated_at": now},
+                    )
+                    cancelled_run_ids.append(run_id)
+                detached_runs.append(
+                    {
+                        "run_id": run_id,
+                        "remaining_task_ids": remaining_task_ids,
+                        "cancelled": cancelled,
+                    }
+                )
+
+        event_payload = {"detached_runs": detached_runs, "cancelled_run_ids": cancelled_run_ids}
+        self.append_task_event(task_id, "task_cancelled", event_payload)
+        return event_payload
 
     def create_or_join_collection_run(
         self,
@@ -244,6 +410,13 @@ class TaskStore:
             self._insert_run_task_link(conn, run_id=run_id, task_id=task_id)
             return self._load_collection_run(conn, run_id)
 
+    def load_collection_run(self, run_id: str) -> CollectionRunRecord:
+        with self.engine.begin() as conn:
+            return self._load_collection_run(conn, run_id)
+
+    def load_collection_runs(self, run_ids: list[str]) -> list[CollectionRunRecord]:
+        return [self.load_collection_run(run_id) for run_id in run_ids]
+
     def record_collector_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         statement = text(
             """
@@ -270,7 +443,8 @@ class TaskStore:
         lock_clause = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
         query = text(
             f"""
-            SELECT run_id, platform, query_key, model_name, series_id, status, mode, shared_by_task_ids
+            SELECT run_id, platform, query_key, model_name, series_id, status, mode,
+                   shared_by_task_ids, failure_category, output_path
             FROM collection_runs
             WHERE platform = :platform
               AND query_key = :query_key
@@ -334,7 +508,8 @@ class TaskStore:
         return conn.execute(
             text(
                 """
-                SELECT run_id, platform, query_key, model_name, series_id, status, mode, shared_by_task_ids
+                SELECT run_id, platform, query_key, model_name, series_id, status, mode,
+                       shared_by_task_ids, failure_category, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id
                 """
@@ -347,7 +522,8 @@ class TaskStore:
         return conn.execute(
             text(
                 f"""
-                SELECT run_id, platform, query_key, model_name, series_id, status, mode, shared_by_task_ids
+                SELECT run_id, platform, query_key, model_name, series_id, status, mode,
+                       shared_by_task_ids, failure_category, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id{lock_clause}
                 """
@@ -368,6 +544,8 @@ class TaskStore:
             status=str(row["status"]),
             mode=str(row["mode"]),
             shared_by_task_ids=self._shared_task_ids(row),
+            failure_category=str(row["failure_category"]) if row["failure_category"] else None,
+            output_path=str(row["output_path"]) if row["output_path"] else None,
         )
 
     def _shared_task_ids(self, row: Any) -> list[str]:

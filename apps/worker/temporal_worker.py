@@ -22,7 +22,23 @@ async def main() -> None:
         client,
         task_queue=temporal_task_queue,
         workflows=[SingleVehicleTaskWorkflow, ComparisonTaskWorkflow],
-        activities=[activities.load_task],
+        activities=[
+            activities.load_task,
+            activities.resolve_vehicle_inputs,
+            activities.create_or_join_collection_run,
+            activities.wait_for_collection_run,
+            activities.wait_for_collection_runs,
+            activities.import_run_rows_to_corpus,
+            activities.export_vehicle_workbooks,
+            activities.run_postprocess,
+            activities.run_llm_report,
+            activities.publish_degraded_result,
+            activities.publish_full_result,
+            activities.schedule_retry,
+            activities.retry_failed_platforms,
+            activities.mark_task_failed,
+            activities.cancel_task,
+        ],
     )
     await worker.run()
 
