@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -60,6 +60,7 @@ class Task(Base):
     vehicles: Mapped[list["TaskVehicle"]] = relationship(back_populates="task", cascade="all, delete-orphan")
     events: Mapped[list["TaskEvent"]] = relationship(back_populates="task", cascade="all, delete-orphan")
     artifacts: Mapped[list["TaskArtifact"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    collection_run_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="task", cascade="all, delete-orphan")
 
 
 class TaskVehicle(Base):
@@ -78,12 +79,21 @@ class TaskVehicle(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
     task: Mapped[Task] = relationship(back_populates="vehicles")
+    collection_run_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="task_vehicle")
 
 
 class CollectionRun(Base):
     __tablename__ = "collection_runs"
     __table_args__ = (
-        UniqueConstraint("platform", "query_key", "series_id", "status", name="uq_collection_run_identity_status"),
+        Index(
+            "uq_collection_run_active_identity",
+            "platform",
+            "query_key",
+            "series_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
+            sqlite_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
+        ),
     )
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_collection_run_id)
@@ -105,6 +115,22 @@ class CollectionRun(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
     collector_events: Mapped[list["CollectorEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    task_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class CollectionRunTask(Base):
+    __tablename__ = "collection_run_tasks"
+    __table_args__ = (UniqueConstraint("run_id", "task_id", name="uq_collection_run_task"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("collection_runs.run_id", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    task_vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("task_vehicles.id", ondelete="CASCADE"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[CollectionRun] = relationship(back_populates="task_links")
+    task: Mapped[Task] = relationship(back_populates="collection_run_links")
+    task_vehicle: Mapped[TaskVehicle | None] = relationship(back_populates="collection_run_links")
 
 
 class TaskEvent(Base):
