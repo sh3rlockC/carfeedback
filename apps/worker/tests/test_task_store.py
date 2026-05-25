@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -108,7 +110,7 @@ def create_schema(db_path: Path) -> None:
         connection.close()
 
 
-def seed_task(db_path: Path, task_id: str = "task_1") -> None:
+def seed_task(db_path: Path, task_id: str = "task_1", collection_mode: str = "incremental") -> None:
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(
@@ -116,11 +118,11 @@ def seed_task(db_path: Path, task_id: str = "task_1") -> None:
             INSERT INTO tasks (
                 task_id, task_type, display_name, status, current_stage,
                 view_token_hash, manage_token_hash, manage_token_expires_at,
-                created_at, updated_at
+                collection_mode, created_at, updated_at
             )
-            VALUES (?, 'single_vehicle', ?, 'queued', 'queued', 'view', 'manage', '2030-01-01T00:00:00+00:00', datetime('now'), datetime('now'))
+            VALUES (?, 'single_vehicle', ?, 'queued', 'queued', 'view', 'manage', '2030-01-01T00:00:00+00:00', ?, datetime('now'), datetime('now'))
             """,
-            (task_id, f"Task {task_id}"),
+            (task_id, f"Task {task_id}", collection_mode),
         )
         connection.commit()
     finally:
@@ -148,7 +150,7 @@ def seed_vehicle(db_path: Path, *, task_id: str, position: int, query: str, mode
 def test_load_task_returns_task_with_sorted_vehicles(tmp_path: Path) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)
-    seed_task(db_path)
+    seed_task(db_path, collection_mode="full")
     seed_vehicle(db_path, task_id="task_1", position=2, query="测试车 B", model_name="测试车 B")
     seed_vehicle(db_path, task_id="task_1", position=1, query="测试车 A", model_name="测试车 A")
 
@@ -160,6 +162,7 @@ def test_load_task_returns_task_with_sorted_vehicles(tmp_path: Path) -> None:
     assert task.display_name == "Task task_1"
     assert task.status == "queued"
     assert task.current_stage == "queued"
+    assert task.collection_mode == "full"
     assert [vehicle.position for vehicle in task.vehicles] == [1, 2]
     assert task.vehicles[0].query == "测试车 A"
     assert task.vehicles[0].result_snapshot_json == {"position": 1}
@@ -280,7 +283,103 @@ def test_create_or_join_collection_run_ignores_completed_historical_run(tmp_path
     assert run.shared_by_task_ids == ["task_1"]
 
 
-def test_attach_task_to_run_is_idempotent_and_records_collector_events(tmp_path: Path) -> None:
+def test_create_or_join_collection_run_retries_insert_conflict_and_joins_winner(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_task(db_path, "task_2")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    calls = 0
+
+    def insert_conflicting_winner_once(conn, *, platform, query_key, model_name, series_id, mode, task_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raw = sqlite3.connect(db_path)
+            try:
+                raw.execute(
+                    """
+                    INSERT INTO collection_runs (
+                        run_id, platform, query_key, model_name, series_id, status, mode,
+                        shared_by_task_ids, retry_count, resume_cursor, created_at, updated_at
+                    )
+                    VALUES ('run_winner', ?, ?, ?, ?, 'queued', ?, ?, 0, '{}', datetime('now'), datetime('now'))
+                    """,
+                    (platform, query_key, model_name, series_id, mode, json.dumps(["task_1"])),
+                )
+                raw.execute(
+                    """
+                    INSERT INTO collection_run_tasks (run_id, task_id, task_vehicle_id, created_at)
+                    VALUES ('run_winner', 'task_1', NULL, datetime('now'))
+                    """
+                )
+                raw.commit()
+            finally:
+                raw.close()
+            raise IntegrityError("active identity conflict", {}, Exception("unique constraint"))
+        raise AssertionError("retry should join the winner instead of inserting again")
+
+    monkeypatch.setattr(store, "_insert_collection_run", insert_conflicting_winner_once)
+
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_2",
+    )
+
+    assert calls == 1
+    assert run.run_id == "run_winner"
+    assert run.shared_by_task_ids == ["task_1", "task_2"]
+
+
+def test_attach_task_to_run_is_idempotent_preserves_shared_tasks_and_records_collector_events(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_task(db_path, "task_2")
+    seed_task(db_path, "task_3")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+
+    updated = store.attach_task_to_run("task_2", run.run_id)
+    with_third = store.attach_task_to_run("task_3", run.run_id)
+    repeated = store.attach_task_to_run("task_2", run.run_id)
+    store.record_collector_event(run.run_id, "collector_started", {"agent_id": "agent-1"})
+
+    assert updated.shared_by_task_ids == ["task_1", "task_2"]
+    assert with_third.shared_by_task_ids == ["task_1", "task_2", "task_3"]
+    assert repeated.shared_by_task_ids == ["task_1", "task_2", "task_3"]
+
+    connection = sqlite3.connect(db_path)
+    try:
+        link_count = connection.execute(
+            "SELECT count(*) FROM collection_run_tasks WHERE run_id = ? AND task_id IN ('task_2', 'task_3')",
+            (run.run_id,),
+        ).fetchone()[0]
+        collector_row = connection.execute(
+            "SELECT platform, event_type, payload_json FROM collector_events WHERE run_id = ?",
+            (run.run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert link_count == 2
+    assert collector_row[0] == "autohome"
+    assert collector_row[1] == "collector_started"
+    assert json.loads(collector_row[2]) == {"agent_id": "agent-1"}
+
+
+def test_attach_task_to_run_loads_run_with_lock_hook(tmp_path: Path) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)
     seed_task(db_path, "task_1")
@@ -294,28 +393,15 @@ def test_attach_task_to_run_is_idempotent_and_records_collector_events(tmp_path:
         mode="incremental",
         task_id="task_1",
     )
+    original = store._get_collection_run_row_for_update
+    calls = []
 
-    updated = store.attach_task_to_run("task_2", run.run_id)
-    repeated = store.attach_task_to_run("task_2", run.run_id)
-    store.record_collector_event(run.run_id, "collector_started", {"agent_id": "agent-1"})
+    def tracking_locked_load(conn, run_id):
+        calls.append(run_id)
+        return original(conn, run_id)
 
-    assert updated.shared_by_task_ids == ["task_1", "task_2"]
-    assert repeated.shared_by_task_ids == ["task_1", "task_2"]
+    store._get_collection_run_row_for_update = tracking_locked_load
 
-    connection = sqlite3.connect(db_path)
-    try:
-        link_count = connection.execute(
-            "SELECT count(*) FROM collection_run_tasks WHERE run_id = ? AND task_id = ?",
-            (run.run_id, "task_2"),
-        ).fetchone()[0]
-        collector_row = connection.execute(
-            "SELECT platform, event_type, payload_json FROM collector_events WHERE run_id = ?",
-            (run.run_id,),
-        ).fetchone()
-    finally:
-        connection.close()
+    store.attach_task_to_run("task_2", run.run_id)
 
-    assert link_count == 1
-    assert collector_row[0] == "autohome"
-    assert collector_row[1] == "collector_started"
-    assert json.loads(collector_row[2]) == {"agent_id": "agent-1"}
+    assert calls == [run.run_id]

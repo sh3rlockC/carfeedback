@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import JSON as SAJSON
 from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy.exc import IntegrityError
 
 
 ACTIVE_COLLECTION_STATUSES = ("queued", "waiting_agent", "running", "retry_wait")
@@ -60,6 +61,7 @@ class TaskRecord:
     display_name: str
     status: str
     current_stage: str
+    collection_mode: str
     vehicles: list[TaskVehicleRecord]
 
 
@@ -84,7 +86,7 @@ class TaskStore:
             task_row = conn.execute(
                 text(
                     """
-                    SELECT task_id, task_type, display_name, status, current_stage
+                    SELECT task_id, task_type, display_name, status, current_stage, collection_mode
                     FROM tasks
                     WHERE task_id = :task_id
                     """
@@ -126,6 +128,7 @@ class TaskStore:
             display_name=str(task_row["display_name"]),
             status=str(task_row["status"]),
             current_stage=str(task_row["current_stage"]),
+            collection_mode=str(task_row["collection_mode"]),
             vehicles=vehicles,
         )
 
@@ -173,7 +176,35 @@ class TaskStore:
         mode: str,
         task_id: str,
     ) -> CollectionRunRecord:
-        now = utc_now_iso()
+        last_error: IntegrityError | None = None
+        for _attempt in range(2):
+            try:
+                return self._create_or_join_collection_run_once(
+                    platform=platform,
+                    query_key=query_key,
+                    model_name=model_name,
+                    series_id=series_id,
+                    mode=mode,
+                    task_id=task_id,
+                )
+            except IntegrityError as exc:
+                if not self._is_active_identity_integrity_error(exc):
+                    raise
+                last_error = exc
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("failed to create or join collection run")
+
+    def _create_or_join_collection_run_once(
+        self,
+        *,
+        platform: str,
+        query_key: str,
+        model_name: str,
+        series_id: str,
+        mode: str,
+        task_id: str,
+    ) -> CollectionRunRecord:
         with self.engine.begin() as conn:
             run_row = self._find_active_run_for_update(
                 conn,
@@ -182,36 +213,14 @@ class TaskStore:
                 series_id=series_id,
             )
             if run_row is None:
-                run_id = new_collection_run_id()
-                insert_statement = text(
-                    """
-                    INSERT INTO collection_runs (
-                        run_id, platform, query_key, model_name, series_id, status, mode,
-                        shared_by_task_ids, retry_count, resume_cursor, created_at, updated_at
-                    )
-                    VALUES (
-                        :run_id, :platform, :query_key, :model_name, :series_id, 'queued', :mode,
-                        :shared_by_task_ids, 0, :resume_cursor, :created_at, :updated_at
-                    )
-                    """
-                ).bindparams(
-                    bindparam("shared_by_task_ids", type_=SAJSON),
-                    bindparam("resume_cursor", type_=SAJSON),
-                )
-                conn.execute(
-                    insert_statement,
-                    {
-                        "run_id": run_id,
-                        "platform": platform,
-                        "query_key": query_key,
-                        "model_name": model_name,
-                        "series_id": series_id,
-                        "mode": mode,
-                        "shared_by_task_ids": [task_id],
-                        "resume_cursor": {},
-                        "created_at": now,
-                        "updated_at": now,
-                    },
+                run_id = self._insert_collection_run(
+                    conn,
+                    platform=platform,
+                    query_key=query_key,
+                    model_name=model_name,
+                    series_id=series_id,
+                    mode=mode,
+                    task_id=task_id,
                 )
             else:
                 run_id = str(run_row["run_id"])
@@ -225,7 +234,7 @@ class TaskStore:
 
     def attach_task_to_run(self, task_id: str, run_id: str) -> CollectionRunRecord:
         with self.engine.begin() as conn:
-            run_row = self._get_collection_run_row(conn, run_id)
+            run_row = self._get_collection_run_row_for_update(conn, run_id)
             if run_row is None:
                 raise RuntimeError(f"collection run not found: {run_id}")
             shared_by_task_ids = self._shared_task_ids(run_row)
@@ -276,6 +285,51 @@ class TaskStore:
             {"platform": platform, "query_key": query_key, "series_id": series_id},
         ).mappings().first()
 
+    def _insert_collection_run(
+        self,
+        conn: Any,
+        *,
+        platform: str,
+        query_key: str,
+        model_name: str,
+        series_id: str,
+        mode: str,
+        task_id: str,
+    ) -> str:
+        now = utc_now_iso()
+        run_id = new_collection_run_id()
+        insert_statement = text(
+            """
+            INSERT INTO collection_runs (
+                run_id, platform, query_key, model_name, series_id, status, mode,
+                shared_by_task_ids, retry_count, resume_cursor, created_at, updated_at
+            )
+            VALUES (
+                :run_id, :platform, :query_key, :model_name, :series_id, 'queued', :mode,
+                :shared_by_task_ids, 0, :resume_cursor, :created_at, :updated_at
+            )
+            """
+        ).bindparams(
+            bindparam("shared_by_task_ids", type_=SAJSON),
+            bindparam("resume_cursor", type_=SAJSON),
+        )
+        conn.execute(
+            insert_statement,
+            {
+                "run_id": run_id,
+                "platform": platform,
+                "query_key": query_key,
+                "model_name": model_name,
+                "series_id": series_id,
+                "mode": mode,
+                "shared_by_task_ids": [task_id],
+                "resume_cursor": {},
+                "created_at": now,
+                "updated_at": now,
+            },
+        )
+        return run_id
+
     def _get_collection_run_row(self, conn: Any, run_id: str) -> Any | None:
         return conn.execute(
             text(
@@ -283,6 +337,19 @@ class TaskStore:
                 SELECT run_id, platform, query_key, model_name, series_id, status, mode, shared_by_task_ids
                 FROM collection_runs
                 WHERE run_id = :run_id
+                """
+            ),
+            {"run_id": run_id},
+        ).mappings().first()
+
+    def _get_collection_run_row_for_update(self, conn: Any, run_id: str) -> Any | None:
+        lock_clause = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+        return conn.execute(
+            text(
+                f"""
+                SELECT run_id, platform, query_key, model_name, series_id, status, mode, shared_by_task_ids
+                FROM collection_runs
+                WHERE run_id = :run_id{lock_clause}
                 """
             ),
             {"run_id": run_id},
@@ -327,14 +394,7 @@ class TaskStore:
 
     def _insert_run_task_link(self, conn: Any, *, run_id: str, task_id: str) -> None:
         now = utc_now_iso()
-        if conn.dialect.name == "sqlite":
-            statement = text(
-                """
-                INSERT OR IGNORE INTO collection_run_tasks (run_id, task_id, task_vehicle_id, created_at)
-                VALUES (:run_id, :task_id, NULL, :created_at)
-                """
-            )
-        elif conn.dialect.name == "postgresql":
+        if conn.dialect.name == "postgresql":
             statement = text(
                 """
                 INSERT INTO collection_run_tasks (run_id, task_id, task_vehicle_id, created_at)
@@ -342,11 +402,35 @@ class TaskStore:
                 ON CONFLICT (run_id, task_id) DO NOTHING
                 """
             )
-        else:
-            statement = text(
-                """
-                INSERT INTO collection_run_tasks (run_id, task_id, task_vehicle_id, created_at)
-                VALUES (:run_id, :task_id, NULL, :created_at)
-                """
-            )
-        conn.execute(statement, {"run_id": run_id, "task_id": task_id, "created_at": now})
+            conn.execute(statement, {"run_id": run_id, "task_id": task_id, "created_at": now})
+            return
+        statement = text(
+            """
+            INSERT INTO collection_run_tasks (run_id, task_id, task_vehicle_id, created_at)
+            VALUES (:run_id, :task_id, NULL, :created_at)
+            """
+        )
+        try:
+            conn.execute(statement, {"run_id": run_id, "task_id": task_id, "created_at": now})
+        except IntegrityError as exc:
+            if self._is_duplicate_run_task_integrity_error(exc):
+                return
+            raise
+
+    def _is_active_identity_integrity_error(self, exc: IntegrityError) -> bool:
+        message = f"{exc}".lower()
+        return (
+            "uq_collection_run_active_identity" in message
+            or "collection_runs.platform" in message
+            or "active identity conflict" in message
+        )
+
+    def _is_duplicate_run_task_integrity_error(self, exc: IntegrityError) -> bool:
+        message = f"{exc}".lower()
+        return (
+            "uq_collection_run_task" in message
+            or "collection_run_tasks.run_id" in message
+            or "collection_run_tasks_task_id" in message
+            or "unique constraint failed: collection_run_tasks.run_id, collection_run_tasks.task_id" in message
+            or "duplicate key value violates unique constraint" in message
+        )
