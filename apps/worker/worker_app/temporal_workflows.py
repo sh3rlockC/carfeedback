@@ -8,6 +8,7 @@ from temporalio import workflow
 
 
 ActivityRunner = Callable[[str, Any, timedelta], Awaitable[dict[str, Any]]]
+CancelRequested = Callable[[], bool]
 PLATFORMS = ("autohome", "dongchedi")
 
 
@@ -32,6 +33,47 @@ def _successful_platforms(results: dict[str, Any]) -> set[str]:
     return {str(platform) for platform in results.get("successful_platforms", [])}
 
 
+def _pending_platform_name(pending_platform: Any) -> str | None:
+    if isinstance(pending_platform, str):
+        return pending_platform
+    if isinstance(pending_platform, dict):
+        platform = pending_platform.get("platform")
+        return str(platform) if platform else None
+    return None
+
+
+def _run_id_for_platform(results: dict[str, Any], platform: str) -> str | None:
+    runs = results.get("runs") or {}
+    run = runs.get(platform) if isinstance(runs, dict) else None
+    if isinstance(run, dict) and run.get("run_id"):
+        return str(run["run_id"])
+    return None
+
+
+def _collection_results_with_pending_timeouts(results: dict[str, Any]) -> dict[str, Any]:
+    pending_platforms = list(results.get("pending_platforms") or [])
+    if not pending_platforms:
+        return results
+    failed_platforms = list(results.get("failed_platforms") or [])
+    failed_names = {_failed_platform_name(failure) for failure in failed_platforms}
+    for pending_platform in pending_platforms:
+        platform = _pending_platform_name(pending_platform)
+        if not platform or platform in failed_names:
+            continue
+        failed_platforms.append(
+            {
+                "platform": platform,
+                "run_id": _run_id_for_platform(results, platform),
+                "failure_category": "collector_pending_timeout",
+                "retryable": True,
+            }
+        )
+    normalized = dict(results)
+    normalized["failed_platforms"] = failed_platforms
+    normalized["pending_platforms"] = []
+    return normalized
+
+
 def _merge_retry_results(results: dict[str, Any], retry_result: dict[str, Any]) -> dict[str, Any]:
     retry_successes = _successful_platforms(retry_result)
     successful_platforms = sorted(_successful_platforms(results) | retry_successes)
@@ -49,6 +91,18 @@ def _merge_retry_results(results: dict[str, Any], retry_result: dict[str, Any]) 
     merged["failed_platforms"] = failed_platforms
     merged["runs"] = runs
     return merged
+
+
+async def _cancel_if_requested(
+    *,
+    task_id: str,
+    activity_runner: ActivityRunner,
+    cancel_requested: CancelRequested | None,
+) -> dict[str, str] | None:
+    if cancel_requested is None or not cancel_requested():
+        return None
+    await activity_runner("cancel_task", {"task_id": task_id}, timedelta(minutes=2))
+    return {"task_id": task_id, "status": "cancelled"}
 
 
 async def _publish_full_pipeline(
@@ -93,8 +147,20 @@ async def _publish_full_pipeline(
     )
 
 
-async def run_single_vehicle_task(task_id: str, activity_runner: ActivityRunner) -> dict[str, str]:
+async def run_single_vehicle_task(
+    task_id: str,
+    activity_runner: ActivityRunner,
+    *,
+    cancel_requested: CancelRequested | None = None,
+) -> dict[str, str]:
     task = await activity_runner("load_task", task_id, timedelta(seconds=30))
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
     resolved = await activity_runner(
         "resolve_vehicle_inputs",
         {
@@ -114,6 +180,13 @@ async def run_single_vehicle_task(task_id: str, activity_runner: ActivityRunner)
             continue
         run = await activity_runner("create_or_join_collection_run", run_input, timedelta(minutes=2))
         runs[platform] = run
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
 
     if not runs:
         results = {
@@ -121,6 +194,13 @@ async def run_single_vehicle_task(task_id: str, activity_runner: ActivityRunner)
             "failed_platforms": initial_failed_platforms,
             "runs": {},
         }
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
         await activity_runner("mark_task_failed", {"task_id": task_id, "results": results}, timedelta(minutes=2))
         return {"task_id": task_id, "status": "failed"}
 
@@ -134,10 +214,25 @@ async def run_single_vehicle_task(task_id: str, activity_runner: ActivityRunner)
         "runs": {**runs, **dict(results.get("runs") or {})},
         "failed_platforms": [*initial_failed_platforms, *list(results.get("failed_platforms") or [])],
     }
+    results = _collection_results_with_pending_timeouts(results)
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
 
     successful_platforms = _successful_platforms(results)
     failed_platforms = list(results.get("failed_platforms") or [])
     if successful_platforms and failed_platforms:
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
         await activity_runner(
             "publish_degraded_result",
             {"task_id": task_id, "results": results},
@@ -160,20 +255,48 @@ async def run_single_vehicle_task(task_id: str, activity_runner: ActivityRunner)
                 successful_platforms = _successful_platforms(results)
                 failed_platforms = list(results.get("failed_platforms") or [])
         if set(PLATFORMS).issubset(successful_platforms) and not failed_platforms:
+            cancellation = await _cancel_if_requested(
+                task_id=task_id,
+                activity_runner=activity_runner,
+                cancel_requested=cancel_requested,
+            )
+            if cancellation is not None:
+                return cancellation
             await _publish_full_pipeline(task_id=task_id, task=task, results=results, activity_runner=activity_runner)
             return {"task_id": task_id, "status": "completed"}
         return {"task_id": task_id, "status": "completed_degraded"}
 
     if successful_platforms:
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
         await _publish_full_pipeline(task_id=task_id, task=task, results=results, activity_runner=activity_runner)
         return {"task_id": task_id, "status": "completed"}
 
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
     await activity_runner("mark_task_failed", {"task_id": task_id, "results": results}, timedelta(minutes=2))
     return {"task_id": task_id, "status": "failed"}
 
 
 @workflow.defn
 class SingleVehicleTaskWorkflow:
+    def __init__(self) -> None:
+        self.cancel_requested = False
+
+    @workflow.signal
+    async def request_cancel(self) -> None:
+        self.cancel_requested = True
+
     @workflow.run
     async def run(self, task_id: str) -> dict:
         async def activity_runner(name: str, payload: Any, timeout: timedelta) -> dict[str, Any]:
@@ -181,7 +304,11 @@ class SingleVehicleTaskWorkflow:
                 return await workflow.start_activity(name, payload, start_to_close_timeout=timeout)
             return await workflow.execute_activity(name, payload, start_to_close_timeout=timeout)
 
-        return await run_single_vehicle_task(task_id, activity_runner)
+        return await run_single_vehicle_task(
+            task_id,
+            activity_runner,
+            cancel_requested=lambda: self.cancel_requested,
+        )
 
 
 @workflow.defn

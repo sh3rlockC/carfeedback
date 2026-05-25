@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from test_task_store import create_schema, seed_task
 from worker_app.task_store import TaskStore
-from worker_app.temporal_workflows import run_single_vehicle_task
+from worker_app.temporal_workflows import SingleVehicleTaskWorkflow, run_single_vehicle_task
 
 
 @dataclass
@@ -53,6 +53,9 @@ class FakeActivityRunner:
             self.task.events.append(FakeEvent("task_failed"))
         elif name == "schedule_retry":
             self.task.events.append(FakeEvent("retry_scheduled"))
+        elif name == "cancel_task":
+            self.task.status = "cancelled"
+            self.task.events.append(FakeEvent("task_cancelled"))
 
         values = self.responses.get(name)
         if not values:
@@ -266,6 +269,139 @@ def test_all_platforms_failed_marks_task_failed() -> None:
     assert result == {"task_id": "task_1", "status": "failed"}
     assert task.status == "failed"
     assert any(event.event_type == "task_failed" for event in task.events)
+
+
+def test_pending_with_one_success_times_out_to_degraded_without_full_publish() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome"],
+                    "failed_platforms": [],
+                    "pending_platforms": ["dongchedi"],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "publish_degraded_result": [{"status": "completed_degraded"}],
+            "schedule_retry": [{"scheduled": True}],
+            "retry_failed_platforms": [
+                {
+                    "successful_platforms": [],
+                    "failed_platforms": [
+                        {
+                            "platform": "dongchedi",
+                            "run_id": "run_dcd",
+                            "failure_category": "collector_pending_timeout",
+                            "retryable": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "completed_degraded"}
+    assert any(event.event_type == "degraded_published" for event in task.events)
+    assert any(event.event_type == "retry_scheduled" for event in task.events)
+    assert "publish_full_result" not in runner.call_names()
+    degraded_payload = dict(runner.calls)["publish_degraded_result"]
+    assert degraded_payload["results"]["failed_platforms"] == [
+        {
+            "platform": "dongchedi",
+            "run_id": "run_dcd",
+            "failure_category": "collector_pending_timeout",
+            "retryable": True,
+        }
+    ]
+
+
+def test_all_pending_marks_task_failed_instead_of_publishing_full() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": [],
+                    "failed_platforms": [],
+                    "pending_platforms": ["autohome", "dongchedi"],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "mark_task_failed": [{"status": "failed"}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "failed"}
+    assert any(event.event_type == "task_failed" for event in task.events)
+    assert "publish_full_result" not in runner.call_names()
+    failure_payload = dict(runner.calls)["mark_task_failed"]
+    assert failure_payload["results"]["failed_platforms"] == [
+        {
+            "platform": "autohome",
+            "run_id": "run_ah",
+            "failure_category": "collector_pending_timeout",
+            "retryable": True,
+        },
+        {
+            "platform": "dongchedi",
+            "run_id": "run_dcd",
+            "failure_category": "collector_pending_timeout",
+            "retryable": True,
+        },
+    ]
+
+
+def test_cancellation_orchestration_calls_cancel_task_before_publish() -> None:
+    task = FakeTask()
+    cancel_requested = False
+
+    def request_cancel_after_wait(payload: dict[str, Any]) -> dict[str, Any]:
+        nonlocal cancel_requested
+        cancel_requested = True
+        return {
+            "successful_platforms": ["autohome", "dongchedi"],
+            "failed_platforms": [],
+            "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+        }
+
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [request_cancel_after_wait],
+            "cancel_task": [{"status": "cancelled"}],
+        },
+    )
+
+    result = asyncio.run(
+        run_single_vehicle_task("task_1", runner, cancel_requested=lambda: cancel_requested)
+    )
+
+    assert result == {"task_id": "task_1", "status": "cancelled"}
+    assert task.status == "cancelled"
+    assert "cancel_task" in runner.call_names()
+    assert "publish_full_result" not in runner.call_names()
+    cancel_payload = dict(runner.calls)["cancel_task"]
+    assert cancel_payload == {"task_id": "task_1"}
+
+
+def test_single_vehicle_workflow_exposes_cancel_signal() -> None:
+    assert hasattr(SingleVehicleTaskWorkflow, "request_cancel")
 
 
 def test_cancellation_detaches_task_and_cancels_run_only_when_no_task_remains(tmp_path: Path) -> None:
