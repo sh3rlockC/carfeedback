@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from test_task_store import create_schema, seed_task, seed_vehicle
+from worker_app.task_store import TaskStore
 from worker_app.temporal_activities import TaskActivities
 from worker_app.temporal_workflows import estimate_comparison_seconds, run_comparison_task
 
@@ -74,6 +77,13 @@ def comparison_task() -> dict[str, Any]:
                 "source_job_id": "job_reused_c",
             },
         ],
+    }
+
+
+def selected_candidates(autohome_id: str, dcd_id: str, title: str) -> dict[str, Any]:
+    return {
+        "autohome": {"series_id": autohome_id, "title": title},
+        "dongchedi": {"series_id": dcd_id, "title": title},
     }
 
 
@@ -296,6 +306,133 @@ def test_activity_returns_upgraded_to_full_from_child_job_record(tmp_path: Path,
 
     assert result["usable"] is True
     assert result["upgraded_to_full"] is True
+
+
+def test_ensure_vehicle_subworkflow_creates_loadable_single_vehicle_task(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE comparison_vehicles (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                child_job_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        connection.execute("INSERT INTO comparison_vehicles (id, status) VALUES (?, ?)", (10, "queued"))
+        connection.commit()
+    finally:
+        connection.close()
+
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    ensured = asyncio.run(
+        activities.ensure_vehicle_subworkflow(
+            {
+                "comparison_id": "cmp_1",
+                "task": {"passphrase_version": "2026-W17"},
+                "vehicle": {
+                    "id": 10,
+                    "position": 2,
+                    "query": "测试车A",
+                    "model_name": "测试车A",
+                    "selected_candidates": selected_candidates("1001", "2001", "测试车A"),
+                },
+            }
+        )
+    )
+
+    child_task = TaskStore(f"sqlite+pysqlite:///{db_path}").load_task(ensured["child_task_id"])
+    assert child_task.task_id == ensured["child_task_id"]
+    assert child_task.task_type == "single_vehicle"
+    assert child_task.collection_mode == "incremental"
+    assert child_task.vehicles[0].query == "测试车A"
+    assert child_task.vehicles[0].autohome_series_id == "1001"
+    assert child_task.vehicles[0].dcd_series_id == "2001"
+    assert ensured["child_workflow_id"] == f"SingleVehicleTaskWorkflow:{ensured['child_task_id']}"
+
+
+def test_wait_for_vehicle_results_reads_upgrade_and_snapshot_from_child_task(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_child")
+    seed_vehicle(db_path, task_id="task_child", position=1, query="测试车A", model_name="测试车A")
+    final_report = tmp_path / "task_child.final_report.json"
+    analysis_facts = tmp_path / "task_child.analysis_facts.jsonl"
+    final_report.write_text('{"headline":"ok"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"1"}\n', encoding="utf-8")
+    snapshot = {
+        "model_name": "测试车A",
+        "source_job_id": "task_child",
+        "final_report_path": str(final_report),
+        "analysis_facts_path": str(analysis_facts),
+    }
+
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE comparison_vehicles (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                child_job_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'completed', current_stage = 'completed', degraded = 1, upgraded_to_full = 1
+            WHERE task_id = 'task_child'
+            """
+        )
+        connection.execute(
+            "UPDATE task_vehicles SET result_snapshot_json = ? WHERE task_id = ?",
+            (json.dumps({"comparison_snapshot": snapshot}), "task_child"),
+        )
+        connection.execute(
+            "INSERT INTO comparison_vehicles (id, status, child_job_id) VALUES (?, ?, ?)",
+            (11, "running", "task_child"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(
+        activities.wait_for_vehicle_results(
+            {
+                "comparison_id": "cmp_1",
+                "vehicle": {"id": 11, "position": 1, "query": "测试车A", "model_name": "测试车A"},
+                "subworkflow": {"child_task_id": "task_child"},
+                "reused": False,
+            }
+        )
+    )
+
+    assert result["usable"] is True
+    assert result["source_job_id"] == "task_child"
+    assert result["degraded"] is True
+    assert result["upgraded_to_full"] is True
+    assert Path(result["snapshot"]["final_report_path"]).exists()
+    assert Path(result["snapshot"]["analysis_facts_path"]).exists()
 
 
 def test_fewer_than_two_usable_vehicles_marks_comparison_failed() -> None:

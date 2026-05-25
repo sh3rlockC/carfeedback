@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import time
@@ -261,10 +262,9 @@ class TaskActivities:
                 "status": "queued",
             }
 
-        store = DatabaseJobStore(self.database_url)
         task = payload.get("task") or {}
-        child_task_id = store.ensure_comparison_child_job(
-            _comparison_vehicle_from_dict(vehicle),
+        child_task_id = self._store().ensure_comparison_child_task(
+            vehicle,
             passphrase_version=str(task.get("passphrase_version") or ""),
         )
         return {
@@ -313,6 +313,19 @@ class TaskActivities:
             }
 
         store = DatabaseJobStore(self.database_url)
+        task = await self._wait_for_task_terminal(store, source_job_id)
+        if task is not None:
+            return self._vehicle_result_from_task(
+                store=store,
+                comparison_id=comparison_id,
+                vehicle=vehicle,
+                vehicle_id=vehicle_id,
+                model_name=model_name,
+                task_id=source_job_id,
+                task=task,
+                reused=reused,
+            )
+
         job = await self._wait_for_job_terminal(store, source_job_id)
         if job is not None and str(job.get("status")) not in {"completed", "completed_degraded"}:
             store.mark_comparison_vehicle_status(
@@ -375,6 +388,78 @@ class TaskActivities:
             "artifact_paths": artifact_paths,
         }
 
+    def _vehicle_result_from_task(
+        self,
+        *,
+        store: DatabaseJobStore,
+        comparison_id: str,
+        vehicle: dict[str, Any],
+        vehicle_id: int,
+        model_name: str,
+        task_id: str,
+        task: dict[str, Any],
+        reused: bool,
+    ) -> dict[str, Any]:
+        if str(task.get("status")) not in {"completed", "completed_degraded"}:
+            store.mark_comparison_vehicle_status(
+                vehicle_id,
+                status="excluded",
+                error_code=str(task.get("error_code") or "collection_failed"),
+                error_message=str(task.get("error_message") or "vehicle collection failed"),
+            )
+            return {
+                "vehicle_id": vehicle_id,
+                "model_name": model_name,
+                "source_job_id": task_id,
+                "usable": False,
+                "reason": str(task.get("error_message") or "vehicle collection failed"),
+                "reused": reused,
+            }
+
+        source_artifacts = self._task_source_artifacts(store, task_id)
+        if "final_report.json" not in source_artifacts or "analysis_facts.jsonl" not in source_artifacts:
+            reason = f"source task missing comparison JSON artifacts: {task_id}"
+            store.mark_comparison_vehicle_status(vehicle_id, status="excluded", error_code="missing_snapshot", error_message=reason)
+            return {
+                "vehicle_id": vehicle_id,
+                "model_name": model_name,
+                "source_job_id": task_id,
+                "usable": False,
+                "reason": reason,
+                "reused": reused,
+            }
+
+        snapshot, artifact_paths = _copy_snapshot_artifacts(
+            vehicle=vehicle,
+            source_job_id=task_id,
+            source_artifacts=source_artifacts,
+            output_dir=_comparison_output_dir(comparison_id),
+        )
+        artifact_paths.extend(
+            _copy_downloadable_artifacts(
+                source_paths=self._task_downloadable_artifacts(store, task_id),
+                output_dir=_comparison_output_dir(comparison_id),
+                model_name=model_name,
+            )
+        )
+        status = "reused" if reused else "completed"
+        store.mark_comparison_vehicle_status(vehicle_id, status=status, source_job_id=task_id)
+        degraded = _db_truthy(task.get("degraded")) or str(task.get("status")) == "completed_degraded"
+        upgraded_to_full = _db_truthy(task.get("upgraded_to_full")) or self._task_upgraded_to_full(store, task_id)
+        return {
+            "vehicle_id": vehicle_id,
+            "model_name": model_name,
+            "source_job_id": task_id,
+            "usable": True,
+            "reused": reused,
+            "degraded": degraded,
+            "upgraded_to_full": upgraded_to_full,
+            "incomplete_sources": ["partial_collection"] if degraded else [],
+            "labels": ["incomplete_source"] if degraded else [],
+            "snapshot": snapshot,
+            "artifact_paths": artifact_paths,
+        }
+
     async def _wait_for_job_terminal(self, store: DatabaseJobStore, job_id: str) -> dict[str, Any] | None:
         timeout_seconds = max(
             0.0,
@@ -417,6 +502,132 @@ class TaskActivities:
                 job["error_message"] = "vehicle result did not finish before comparison timeout"
                 return job
             await asyncio.sleep(min(poll_seconds, remaining_seconds))
+
+    async def _wait_for_task_terminal(self, store: DatabaseJobStore, task_id: str) -> dict[str, Any] | None:
+        columns = _table_columns(store, "tasks")
+        selected_columns = [
+            column
+            for column in ("status", "degraded", "upgraded_to_full", "error_code", "error_message")
+            if column in columns
+        ]
+        if "status" not in selected_columns:
+            return None
+        timeout_seconds = max(
+            0.0,
+            _env_float("COMPARISON_VEHICLE_WAIT_TIMEOUT_SECONDS", DEFAULT_COMPARISON_VEHICLE_WAIT_TIMEOUT_SECONDS),
+        )
+        poll_seconds = max(
+            0.0,
+            _env_float("COMPARISON_VEHICLE_WAIT_POLL_SECONDS", DEFAULT_COMPARISON_VEHICLE_WAIT_POLL_SECONDS),
+        )
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            with store.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        f"""
+                        SELECT {", ".join(selected_columns)}
+                        FROM tasks
+                        WHERE task_id = :task_id
+                        """
+                    ),
+                    {"task_id": task_id},
+                ).mappings().first()
+            if row is None:
+                return None
+            task = dict(row)
+            if str(task.get("status")) in {"completed", "completed_degraded", "failed", "cancelled", "cancel_requested"}:
+                return task
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                task["status"] = "failed"
+                task["error_code"] = "vehicle_result_timeout"
+                task["error_message"] = "vehicle result did not finish before comparison timeout"
+                return task
+            await asyncio.sleep(min(poll_seconds, remaining_seconds))
+
+    def _task_source_artifacts(self, store: DatabaseJobStore, task_id: str) -> dict[str, str]:
+        artifacts = self._task_artifacts_by_suffix(store, task_id)
+        if "final_report.json" in artifacts and "analysis_facts.jsonl" in artifacts:
+            return artifacts
+        snapshot = self._task_result_snapshot(store, task_id)
+        if snapshot:
+            if snapshot.get("final_report_path"):
+                artifacts["final_report.json"] = str(snapshot["final_report_path"])
+            if snapshot.get("analysis_facts_path"):
+                artifacts["analysis_facts.jsonl"] = str(snapshot["analysis_facts_path"])
+            if snapshot.get("llm_metrics_path"):
+                artifacts["llm_metrics.json"] = str(snapshot["llm_metrics_path"])
+        return artifacts
+
+    def _task_result_snapshot(self, store: DatabaseJobStore, task_id: str) -> dict[str, Any]:
+        if not {"task_id", "result_snapshot_json"}.issubset(_table_columns(store, "task_vehicles")):
+            return {}
+        with store.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT result_snapshot_json
+                    FROM task_vehicles
+                    WHERE task_id = :task_id
+                    ORDER BY position ASC, id ASC
+                    LIMIT 1
+                    """
+                ),
+                {"task_id": task_id},
+            ).mappings().first()
+        if row is None:
+            return {}
+        payload = row["result_snapshot_json"]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                return {}
+        if not isinstance(payload, dict):
+            return {}
+        snapshot = payload.get("comparison_snapshot") or payload.get("snapshot") or payload
+        return dict(snapshot) if isinstance(snapshot, dict) else {}
+
+    def _task_artifacts_by_suffix(self, store: DatabaseJobStore, task_id: str) -> dict[str, str]:
+        if not {"task_id", "path"}.issubset(_table_columns(store, "task_artifacts")):
+            return {}
+        with store.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT path
+                    FROM task_artifacts
+                    WHERE task_id = :task_id
+                    ORDER BY id ASC
+                    """
+                ),
+                {"task_id": task_id},
+            ).mappings().all()
+        artifacts: dict[str, str] = {}
+        for row in rows:
+            path = str(row["path"])
+            for suffix in ("final_report.json", "analysis_facts.jsonl", "llm_metrics.json"):
+                if path.endswith(suffix):
+                    artifacts[suffix] = path
+        return artifacts
+
+    def _task_downloadable_artifacts(self, store: DatabaseJobStore, task_id: str) -> list[str]:
+        if not {"task_id", "path"}.issubset(_table_columns(store, "task_artifacts")):
+            return []
+        with store.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT path
+                    FROM task_artifacts
+                    WHERE task_id = :task_id
+                    ORDER BY id ASC
+                    """
+                ),
+                {"task_id": task_id},
+            ).mappings().all()
+        return [str(row["path"]) for row in rows if str(row["path"]).lower().endswith((".xlsx", ".png"))]
 
     def _task_upgraded_to_full(self, store: DatabaseJobStore, task_id: str) -> bool:
         task_columns = _table_columns(store, "tasks")

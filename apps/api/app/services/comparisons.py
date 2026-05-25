@@ -172,14 +172,14 @@ def _vehicle_eta(db: Session, settings: Settings, vehicle: ComparisonVehicle) ->
 def comparison_progress_payload(db: Session, settings: Settings, comparison: ComparisonJob) -> ComparisonProgressResponse:
     vehicles = sorted(comparison.vehicles, key=lambda item: item.position)
     vehicle_payloads: list[ComparisonVehicleProgress] = []
-    total_seconds = 0
+    vehicle_path_seconds = 0
     confidence = "fallback"
     completed_count = 0
 
     for vehicle in vehicles:
         eta = _vehicle_eta(db, settings, vehicle)
         if eta.estimated_remaining_seconds is not None:
-            total_seconds += eta.estimated_remaining_seconds
+            vehicle_path_seconds = max(vehicle_path_seconds, eta.estimated_remaining_seconds)
         if eta.eta_confidence == "history":
             confidence = "history"
         if vehicle.status in {"reused", "completed"}:
@@ -200,7 +200,9 @@ def comparison_progress_payload(db: Session, settings: Settings, comparison: Com
         total_seconds = 0
         confidence = "done"
     elif comparison.current_stage != "comparing":
-        total_seconds += COMPARISON_SUMMARY_SECONDS
+        total_seconds = vehicle_path_seconds + COMPARISON_SUMMARY_SECONDS
+    else:
+        total_seconds = vehicle_path_seconds
 
     minutes = ceil(total_seconds / 60)
     status_to_percent = {

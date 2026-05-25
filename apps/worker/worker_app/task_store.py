@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import JSON as SAJSON
 from sqlalchemy import bindparam, create_engine, text
+from sqlalchemy import inspect as inspect_database
 from sqlalchemy.exc import IntegrityError
 
 
@@ -26,6 +27,10 @@ def new_collection_run_id() -> str:
     return f"run_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
+def new_task_id() -> str:
+    return f"task_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
 def _engine_kwargs(database_url: str) -> dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
@@ -40,6 +45,23 @@ def _json_value(value: Any, fallback: Any) -> Any:
             return fallback
         return json.loads(value)
     return value
+
+
+def _table_exists(engine: Any, table_name: str) -> bool:
+    try:
+        return table_name in inspect_database(engine).get_table_names()
+    except Exception:
+        return False
+
+
+def _candidate_series_id(vehicle: dict[str, Any], platform: str) -> str:
+    selected = dict(vehicle.get("selected_candidates") or {})
+    candidate = dict(selected.get(platform) or {})
+    if candidate.get("series_id"):
+        return str(candidate["series_id"])
+    if platform == "autohome":
+        return str(vehicle.get("autohome_series_id") or "")
+    return str(vehicle.get("dcd_series_id") or vehicle.get("dongchedi_series_id") or "")
 
 
 @dataclass(frozen=True)
@@ -138,6 +160,100 @@ class TaskStore:
             upgraded_to_full=bool(task_row["upgraded_to_full"]),
             vehicles=vehicles,
         )
+
+    def ensure_comparison_child_task(
+        self,
+        vehicle: dict[str, Any],
+        *,
+        passphrase_version: str,
+    ) -> str:
+        existing_task_id = str(vehicle.get("child_task_id") or vehicle.get("child_job_id") or "")
+        if existing_task_id and self._task_exists(existing_task_id):
+            return existing_task_id
+
+        now = utc_now_iso()
+        task_id = new_task_id()
+        query = str(vehicle.get("query") or vehicle.get("model_name") or "").strip()
+        model_name = str(vehicle.get("model_name") or vehicle.get("query") or "").strip()
+        autohome_series_id = _candidate_series_id(vehicle, "autohome")
+        dcd_series_id = _candidate_series_id(vehicle, "dongchedi")
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tasks (
+                        task_id, task_type, display_name, status, current_stage,
+                        degraded, upgraded_to_full, view_token_hash, manage_token_hash,
+                        manage_token_expires_at, eta_seconds, eta_reason, collection_mode,
+                        created_at, updated_at
+                    )
+                    VALUES (
+                        :task_id, 'single_vehicle', :display_name, 'queued', 'queued',
+                        :degraded, :upgraded_to_full, :view_token_hash, :manage_token_hash,
+                        :manage_token_expires_at, NULL, NULL, 'incremental',
+                        :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "display_name": model_name or query or task_id,
+                    "degraded": False,
+                    "upgraded_to_full": False,
+                    "view_token_hash": f"comparison-child-view:{task_id}",
+                    "manage_token_hash": f"comparison-child-manage:{task_id}",
+                    "manage_token_expires_at": "2030-01-01T00:00:00+00:00",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO task_vehicles (
+                        task_id, position, query, model_name, autohome_series_id, dcd_series_id,
+                        status, result_snapshot_json, created_at, updated_at
+                    )
+                    VALUES (
+                        :task_id, :position, :query, :model_name, :autohome_series_id, :dcd_series_id,
+                        'queued', :result_snapshot_json, :created_at, :updated_at
+                    )
+                    """
+                ).bindparams(bindparam("result_snapshot_json", type_=SAJSON)),
+                {
+                    "task_id": task_id,
+                    "position": int(vehicle.get("position") or 1),
+                    "query": query,
+                    "model_name": model_name or query,
+                    "autohome_series_id": autohome_series_id or None,
+                    "dcd_series_id": dcd_series_id or None,
+                    "result_snapshot_json": {},
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            if vehicle.get("id") and _table_exists(self.engine, "comparison_vehicles"):
+                conn.execute(
+                    text(
+                        """
+                        UPDATE comparison_vehicles
+                        SET child_job_id = :child_task_id,
+                            status = 'running',
+                            updated_at = :updated_at
+                        WHERE id = :vehicle_id
+                        """
+                    ),
+                    {"child_task_id": task_id, "vehicle_id": int(vehicle["id"]), "updated_at": now},
+                )
+        return task_id
+
+    def _task_exists(self, task_id: str) -> bool:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT 1 FROM tasks WHERE task_id = :task_id LIMIT 1"),
+                {"task_id": task_id},
+            ).first()
+        return row is not None
 
     def mark_task_stage(self, task_id: str, stage: str, status: str) -> None:
         now = utc_now_iso()

@@ -282,6 +282,12 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
         json.dumps({"percent": 70, "message": "Hermes 汇总批次结果"}, ensure_ascii=False),
         encoding="utf-8",
     )
+    second_progress_dir = tmp_path / "artifacts" / "job_child_b" / "progress"
+    second_progress_dir.mkdir(parents=True, exist_ok=True)
+    (second_progress_dir / "generating_hermes_outputs.progress.json").write_text(
+        json.dumps({"percent": 90, "message": "Hermes 汇总批次结果"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
     session = get_session_local()()
     now = datetime.now(UTC)
@@ -298,12 +304,28 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
                 started_at=now - timedelta(minutes=10),
             )
         )
+        session.add(
+            Job(
+                job_id="job_child_b",
+                query="测试车B",
+                model_name="测试车B",
+                status="generating_hermes_outputs",
+                current_stage="generating_hermes_outputs",
+                degraded=False,
+                passphrase_version="2026-W17",
+                started_at=now - timedelta(minutes=8),
+            )
+        )
         session.add_all(
             [
                 JobStageRun(job_id="job_child", stage_name="collecting_autohome", status="success", duration_ms=1000),
                 JobStageRun(job_id="job_child", stage_name="collecting_dcd", status="success", duration_ms=1000),
                 JobStageRun(job_id="job_child", stage_name="postprocessing", status="success", duration_ms=1000),
                 JobStageRun(job_id="job_child", stage_name="generating_hermes_outputs", status="running"),
+                JobStageRun(job_id="job_child_b", stage_name="collecting_autohome", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child_b", stage_name="collecting_dcd", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child_b", stage_name="postprocessing", status="success", duration_ms=1000),
+                JobStageRun(job_id="job_child_b", stage_name="generating_hermes_outputs", status="running"),
             ]
         )
         session.add(
@@ -331,8 +353,8 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
                     query="测试车B",
                     model_name="测试车B",
                     position=2,
-                    status="reused",
-                    source_job_id="job_reused",
+                    status="running",
+                    child_job_id="job_child_b",
                     selected_candidates=selected_candidates("1002", "2002", "测试车B"),
                 ),
             ]
@@ -346,8 +368,11 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
     assert response.status_code == 200
     payload = response.json()
     running = payload["vehicles"][0]
+    second = payload["vehicles"][1]
     assert running["estimated_remaining_seconds"] == 270
     assert running["estimated_remaining_minutes"] == 5
+    assert second["estimated_remaining_seconds"] == 90
+    assert second["estimated_remaining_minutes"] == 2
     assert payload["estimated_remaining_seconds"] == 870
     assert payload["estimated_remaining_minutes"] == 15
 
