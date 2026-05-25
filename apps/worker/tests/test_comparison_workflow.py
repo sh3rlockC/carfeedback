@@ -517,6 +517,92 @@ def test_default_single_vehicle_activities_publish_snapshot_consumable_by_compar
     assert Path(result["snapshot"]["analysis_facts_path"]).exists()
 
 
+def test_default_degraded_single_vehicle_result_is_usable_by_comparison(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_child")
+    seed_vehicle(db_path, task_id="task_child", position=1, query="测试车A", model_name="测试车A")
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE comparison_vehicles (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                child_job_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO comparison_vehicles (id, status, child_job_id) VALUES (?, ?, ?)",
+            (13, "running", "task_child"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+    task = {
+        "task_id": "task_child",
+        "vehicles": [{"query": "测试车A", "model_name": "测试车A"}],
+    }
+    results = {
+        "successful_platforms": ["autohome"],
+        "failed_platforms": [
+            {"platform": "dongchedi", "failure_category": "timeout", "retryable": True},
+        ],
+    }
+    postprocess = asyncio.run(activities.run_postprocess({"task_id": "task_child", "task": task, "results": results}))
+    report = asyncio.run(
+        activities.run_llm_report(
+            {
+                "task_id": "task_child",
+                "task": task,
+                "results": results,
+                "postprocess_result": postprocess,
+            }
+        )
+    )
+    asyncio.run(
+        activities.publish_degraded_result(
+            {
+                "task_id": "task_child",
+                "task": task,
+                "results": results,
+                "postprocess_result": postprocess,
+                "report_result": report,
+            }
+        )
+    )
+
+    result = asyncio.run(
+        activities.wait_for_vehicle_results(
+            {
+                "comparison_id": "cmp_1",
+                "vehicle": {"id": 13, "position": 1, "query": "测试车A", "model_name": "测试车A"},
+                "subworkflow": {"child_task_id": "task_child"},
+                "reused": False,
+            }
+        )
+    )
+
+    assert result["usable"] is True
+    assert result["degraded"] is True
+    assert "incomplete_source" in result["labels"]
+    assert result["incomplete_sources"] == ["partial_collection"]
+    assert result["snapshot"]["source_job_id"] == "task_child"
+
+
 def test_fewer_than_two_usable_vehicles_marks_comparison_failed() -> None:
     runner = FakeComparisonActivityRunner(
         {

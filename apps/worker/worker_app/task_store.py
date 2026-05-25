@@ -343,6 +343,7 @@ class TaskStore:
                     "updated_at": now,
                 },
             )
+            self._persist_comparison_snapshot(conn, task_id=task_id, payload=payload, updated_at=now)
         self.append_task_event(task_id, "degraded_published", payload)
 
     def publish_full_result(self, task_id: str, payload: dict[str, Any]) -> None:

@@ -458,3 +458,51 @@ def test_publish_full_result_persists_comparison_snapshot_and_artifacts(tmp_path
     assert snapshot["source_job_id"] == "task_1"
     assert snapshot["final_report_path"] == str(final_report)
     assert snapshot["analysis_facts_path"] == str(analysis_facts)
+
+
+def test_publish_degraded_result_persists_comparison_snapshot_and_artifacts(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    final_report = tmp_path / "final_report.json"
+    analysis_facts = tmp_path / "analysis_facts.jsonl"
+    final_report.write_text('{"headline":"degraded"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"fallback","fallback":true}\n', encoding="utf-8")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+
+    store.publish_degraded_result(
+        "task_1",
+        {
+            "task": {"vehicles": [{"model_name": "测试车", "query": "测试车"}]},
+            "postprocess_result": {"artifact_paths": [str(analysis_facts)]},
+            "report_result": {"artifact_paths": [str(final_report)]},
+        },
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            "SELECT status, degraded, upgraded_to_full FROM tasks WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()
+        artifact_rows = connection.execute(
+            "SELECT artifact_type, path FROM task_artifacts WHERE task_id = ? ORDER BY id ASC",
+            ("task_1",),
+        ).fetchall()
+        snapshot_json = connection.execute(
+            "SELECT result_snapshot_json FROM task_vehicles WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    snapshot = json.loads(snapshot_json)["comparison_snapshot"]
+    assert task_row == ("completed_degraded", 1, 0)
+    assert artifact_rows == [
+        ("jsonl", str(analysis_facts)),
+        ("json", str(final_report)),
+    ]
+    assert snapshot["source_job_id"] == "task_1"
+    assert snapshot["final_report_path"] == str(final_report)
+    assert snapshot["analysis_facts_path"] == str(analysis_facts)

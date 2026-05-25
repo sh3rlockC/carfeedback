@@ -187,6 +187,10 @@ def test_one_retryable_platform_failure_publishes_degraded_and_schedules_retry()
                     ],
                 }
             ],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
             "publish_degraded_result": [{"status": "completed_degraded"}],
             "schedule_retry": [{"scheduled": True}],
             "retry_failed_platforms": [
@@ -209,6 +213,10 @@ def test_one_retryable_platform_failure_publishes_degraded_and_schedules_retry()
     assert any(event.event_type == "degraded_published" for event in task.events)
     assert any(event.event_type == "retry_scheduled" for event in task.events)
     assert "publish_full_result" not in runner.call_names()
+    assert runner.call_names().index("run_llm_report") < runner.call_names().index("publish_degraded_result")
+    degraded_payload = dict(runner.calls)["publish_degraded_result"]
+    assert degraded_payload["postprocess_result"]["artifact_paths"] == ["/tmp/analysis_facts.jsonl"]
+    assert degraded_payload["report_result"]["artifact_paths"] == ["/tmp/final_report.json"]
 
 
 def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
@@ -236,10 +244,16 @@ def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
                     "runs": {"dongchedi": {"run_id": "run_dcd_retry"}},
                 }
             ],
-            "import_run_rows_to_corpus": [{"imported_rows": 30}],
-            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
-            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"], "skipped": False}],
-            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"], "skipped": False}],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}, {"imported_rows": 30}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/degraded_raw.xlsx"]}, {"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [
+                {"artifact_paths": ["/tmp/degraded_analysis_facts.jsonl"], "skipped": False},
+                {"artifact_paths": ["/tmp/post.xlsx"], "skipped": False},
+            ],
+            "run_llm_report": [
+                {"artifact_paths": ["/tmp/degraded_final_report.json"], "skipped": False},
+                {"artifact_paths": ["/tmp/report.json"], "skipped": False},
+            ],
             "publish_full_result": [{"status": "completed"}],
         },
     )
@@ -298,6 +312,10 @@ def test_pending_with_one_success_times_out_to_degraded_without_full_publish() -
                     "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
                 }
             ],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
             "publish_degraded_result": [{"status": "completed_degraded"}],
             "schedule_retry": [{"scheduled": True}],
             "retry_failed_platforms": [
@@ -349,6 +367,10 @@ def test_partial_success_missing_platform_result_degrades_instead_of_full_publis
                     "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
                 }
             ],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
             "publish_degraded_result": [{"status": "completed_degraded"}],
             "schedule_retry": [{"scheduled": True}],
             "retry_failed_platforms": [

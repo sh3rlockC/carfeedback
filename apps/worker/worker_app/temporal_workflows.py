@@ -217,6 +217,76 @@ async def _publish_full_pipeline(
     cancel_requested: CancelRequested | None = None,
 ) -> dict[str, str]:
     payload = {"task_id": task_id, "task": task, "results": results}
+    artifacts = await _generate_result_artifacts(payload=payload, activity_runner=activity_runner)
+    postprocessed = artifacts["postprocess_result"]
+    report = artifacts["report_result"]
+    artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
+    if artifact_failure is not None:
+        return await _mark_artifact_pipeline_failed(
+            task_id=task_id,
+            payload=payload,
+            results=results,
+            artifacts=artifacts,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
+    await activity_runner(
+        "publish_full_result",
+        {**payload, **artifacts},
+        timedelta(minutes=20),
+    )
+    return {"task_id": task_id, "status": "completed"}
+
+
+async def _publish_degraded_pipeline(
+    *,
+    task_id: str,
+    task: dict[str, Any],
+    results: dict[str, Any],
+    activity_runner: ActivityRunner,
+    cancel_requested: CancelRequested | None = None,
+) -> dict[str, str]:
+    payload = {"task_id": task_id, "task": task, "results": results}
+    artifacts = await _generate_result_artifacts(payload=payload, activity_runner=activity_runner)
+    postprocessed = artifacts["postprocess_result"]
+    report = artifacts["report_result"]
+    artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
+    if artifact_failure is not None:
+        return await _mark_artifact_pipeline_failed(
+            task_id=task_id,
+            payload=payload,
+            results=results,
+            artifacts=artifacts,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
+    await activity_runner(
+        "publish_degraded_result",
+        {**payload, **artifacts},
+        timedelta(minutes=10),
+    )
+    return {"task_id": task_id, "status": "completed_degraded"}
+
+
+async def _generate_result_artifacts(
+    *,
+    payload: dict[str, Any],
+    activity_runner: ActivityRunner,
+) -> dict[str, Any]:
     imported = await activity_runner("import_run_rows_to_corpus", payload, timedelta(minutes=10))
     exported = await activity_runner(
         "export_vehicle_workbooks",
@@ -238,30 +308,30 @@ async def _publish_full_pipeline(
         },
         timedelta(minutes=20),
     )
-    artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
-    if artifact_failure is not None:
-        failed_results = dict(results)
-        failed_results["failed_platforms"] = [*list(results.get("failed_platforms") or []), artifact_failure]
-        cancellation = await _cancel_if_requested(
-            task_id=task_id,
-            activity_runner=activity_runner,
-            cancel_requested=cancel_requested,
-        )
-        if cancellation is not None:
-            return cancellation
-        await activity_runner(
-            "mark_task_failed",
-            {
-                **payload,
-                "results": failed_results,
-                "import_result": imported,
-                "export_result": exported,
-                "postprocess_result": postprocessed,
-                "report_result": report,
-            },
-            timedelta(minutes=2),
-        )
-        return {"task_id": task_id, "status": "failed"}
+    return {
+        "import_result": imported,
+        "export_result": exported,
+        "postprocess_result": postprocessed,
+        "report_result": report,
+    }
+
+
+async def _mark_artifact_pipeline_failed(
+    *,
+    task_id: str,
+    payload: dict[str, Any],
+    results: dict[str, Any],
+    artifacts: dict[str, Any],
+    activity_runner: ActivityRunner,
+    cancel_requested: CancelRequested | None,
+) -> dict[str, str]:
+    artifact_failure = {
+        "platform": "postprocess_or_report",
+        "failure_category": "postprocess_or_report_deferred",
+        "retryable": False,
+    }
+    failed_results = dict(results)
+    failed_results["failed_platforms"] = [*list(results.get("failed_platforms") or []), artifact_failure]
     cancellation = await _cancel_if_requested(
         task_id=task_id,
         activity_runner=activity_runner,
@@ -270,17 +340,15 @@ async def _publish_full_pipeline(
     if cancellation is not None:
         return cancellation
     await activity_runner(
-        "publish_full_result",
+        "mark_task_failed",
         {
             **payload,
-            "import_result": imported,
-            "export_result": exported,
-            "postprocess_result": postprocessed,
-            "report_result": report,
+            "results": failed_results,
+            **artifacts,
         },
-        timedelta(minutes=20),
+        timedelta(minutes=2),
     )
-    return {"task_id": task_id, "status": "completed"}
+    return {"task_id": task_id, "status": "failed"}
 
 
 async def run_single_vehicle_task(
@@ -369,11 +437,15 @@ async def run_single_vehicle_task(
         )
         if cancellation is not None:
             return cancellation
-        await activity_runner(
-            "publish_degraded_result",
-            {"task_id": task_id, "results": results},
-            timedelta(minutes=10),
+        degraded_publish = await _publish_degraded_pipeline(
+            task_id=task_id,
+            task=task,
+            results=results,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
         )
+        if degraded_publish["status"] != "completed_degraded":
+            return degraded_publish
         retryable = _retryable_failures(failed_platforms)
         if retryable:
             await activity_runner(
