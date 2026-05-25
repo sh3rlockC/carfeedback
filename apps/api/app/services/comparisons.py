@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import ComparisonArtifact, ComparisonJob, ComparisonVehicle, Job, JobArtifact, JobStageRun
+from app.models import ComparisonArtifact, ComparisonJob, ComparisonVehicle, Job, JobArtifact, JobStageRun, Task
 from app.schemas import (
     ArtifactItem,
     ComparisonArtifactItem,
@@ -166,6 +166,24 @@ def _vehicle_eta(db: Session, settings: Settings, vehicle: ComparisonVehicle) ->
                 .all()
             )
             return estimate_job_progress_eta(db, job, _stage_items_with_live_progress(settings, job, stage_runs))
+        task = db.get(Task, vehicle.child_job_id)
+        if task is not None:
+            return _task_eta(db, task)
+    return estimate_full_job_seconds(db)
+
+
+def _task_eta(db: Session, task: Task) -> EtaEstimate:
+    if task.status in COMPARISON_TERMINAL_STATUSES or task.current_stage in COMPARISON_TERMINAL_STATUSES:
+        return EtaEstimate(0, 0, "预计剩余 0 分钟", "done")
+    if task.eta_seconds is not None:
+        seconds = max(0, int(task.eta_seconds))
+        minutes = ceil(seconds / 60)
+        return EtaEstimate(
+            seconds,
+            minutes,
+            f"预计剩余 {minutes} 分钟",
+            "history" if task.eta_reason else "fallback",
+        )
     return estimate_full_job_seconds(db)
 
 
@@ -202,7 +220,7 @@ def comparison_progress_payload(db: Session, settings: Settings, comparison: Com
     elif comparison.current_stage != "comparing":
         total_seconds = vehicle_path_seconds + COMPARISON_SUMMARY_SECONDS
     else:
-        total_seconds = vehicle_path_seconds
+        total_seconds = COMPARISON_SUMMARY_SECONDS
 
     minutes = ceil(total_seconds / 60)
     status_to_percent = {

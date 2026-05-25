@@ -197,17 +197,33 @@ class TaskStore:
         *,
         passphrase_version: str,
     ) -> str:
-        existing_task_id = str(vehicle.get("child_task_id") or vehicle.get("child_job_id") or "")
-        if existing_task_id and self._task_exists(existing_task_id):
-            return existing_task_id
-
-        now = utc_now_iso()
-        task_id = new_task_id()
         query = str(vehicle.get("query") or vehicle.get("model_name") or "").strip()
         model_name = str(vehicle.get("model_name") or vehicle.get("query") or "").strip()
         autohome_series_id = _candidate_series_id(vehicle, "autohome")
         dcd_series_id = _candidate_series_id(vehicle, "dongchedi")
+        vehicle_id = int(vehicle["id"]) if vehicle.get("id") else None
         with self.engine.begin() as conn:
+            existing_task_id = str(vehicle.get("child_task_id") or vehicle.get("child_job_id") or "")
+            if vehicle_id is not None and _table_exists(self.engine, "comparison_vehicles"):
+                lock_clause = " FOR UPDATE" if conn.dialect.name == "postgresql" else ""
+                row = conn.execute(
+                    text(
+                        f"""
+                        SELECT child_job_id
+                        FROM comparison_vehicles
+                        WHERE id = :vehicle_id{lock_clause}
+                        """
+                    ),
+                    {"vehicle_id": vehicle_id},
+                ).mappings().first()
+                db_child_task_id = str(row["child_job_id"]) if row is not None and row["child_job_id"] else ""
+                if db_child_task_id:
+                    existing_task_id = db_child_task_id
+            if existing_task_id and self._task_exists_conn(conn, existing_task_id):
+                return existing_task_id
+
+            now = utc_now_iso()
+            task_id = new_task_id()
             conn.execute(
                 text(
                     """
@@ -262,7 +278,7 @@ class TaskStore:
                     "updated_at": now,
                 },
             )
-            if vehicle.get("id") and _table_exists(self.engine, "comparison_vehicles"):
+            if vehicle_id is not None and _table_exists(self.engine, "comparison_vehicles"):
                 conn.execute(
                     text(
                         """
@@ -273,17 +289,20 @@ class TaskStore:
                         WHERE id = :vehicle_id
                         """
                     ),
-                    {"child_task_id": task_id, "vehicle_id": int(vehicle["id"]), "updated_at": now},
+                    {"child_task_id": task_id, "vehicle_id": vehicle_id, "updated_at": now},
                 )
         return task_id
 
     def _task_exists(self, task_id: str) -> bool:
         with self.engine.begin() as conn:
-            row = conn.execute(
-                text("SELECT 1 FROM tasks WHERE task_id = :task_id LIMIT 1"),
-                {"task_id": task_id},
-            ).first()
+            row = self._task_exists_conn(conn, task_id)
         return row is not None
+
+    def _task_exists_conn(self, conn: Any, task_id: str) -> Any | None:
+        return conn.execute(
+            text("SELECT 1 FROM tasks WHERE task_id = :task_id LIMIT 1"),
+            {"task_id": task_id},
+        ).first()
 
     def mark_task_stage(self, task_id: str, stage: str, status: str) -> None:
         now = utc_now_iso()

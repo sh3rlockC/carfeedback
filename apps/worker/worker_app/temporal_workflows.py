@@ -9,6 +9,7 @@ from temporalio import workflow
 
 ActivityRunner = Callable[[str, Any, timedelta], Awaitable[dict[str, Any]]]
 ChildWorkflowRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+ChildCompletionRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CancelRequested = Callable[[], bool]
 PLATFORMS = ("autohome", "dongchedi")
 MAX_COMPARISON_VEHICLES = 5
@@ -87,6 +88,14 @@ def _comparison_status(*, excluded: list[dict[str, str]], vehicles: list[dict[st
     if excluded or report.get("degraded") or any(vehicle.get("degraded") for vehicle in vehicles):
         return "completed_degraded"
     return "completed"
+
+
+def _upgraded_vehicle_ids(vehicles: list[dict[str, Any]]) -> list[int]:
+    return sorted(
+        int(vehicle["vehicle_id"])
+        for vehicle in vehicles
+        if vehicle.get("upgraded_to_full") is True
+    )
 
 
 def _normalized_comparison_result(
@@ -511,6 +520,7 @@ async def run_comparison_task(
     activity_runner: ActivityRunner,
     *,
     child_workflow_runner: ChildWorkflowRunner | None = None,
+    child_completion_runner: ChildCompletionRunner | None = None,
 ) -> dict[str, Any]:
     task = await activity_runner("load_comparison_task", task_id, timedelta(seconds=30))
     vehicles = sorted(
@@ -649,11 +659,45 @@ async def run_comparison_task(
         "excluded": excluded,
     }
 
-    upgraded_vehicle_ids = [
-        int(vehicle["vehicle_id"])
-        for vehicle in available
-        if vehicle.get("upgraded_to_full") is True
-    ]
+    upgraded_vehicle_ids = _upgraded_vehicle_ids(available)
+    if child_completion_runner is not None:
+        refreshed_by_vehicle_id = {int(vehicle["vehicle_id"]): dict(vehicle) for vehicle in available}
+        for state in vehicle_states:
+            if state["reused"]:
+                continue
+            completion = await child_completion_runner(
+                {
+                    "comparison_id": task_id,
+                    "task": task,
+                    "vehicle": state["vehicle"],
+                    "subworkflow": state["subworkflow"],
+                    "child_task_id": state["subworkflow"].get("child_task_id"),
+                    "child_workflow_id": state["subworkflow"].get("child_workflow_id"),
+                }
+            )
+            if completion.get("status") not in {"completed", "completed_degraded", "completed_upgraded"}:
+                continue
+            refreshed = await activity_runner(
+                "wait_for_vehicle_results",
+                {
+                    "comparison_id": task_id,
+                    "task": task,
+                    "vehicle": state["vehicle"],
+                    "subworkflow": state["subworkflow"],
+                    "reused": False,
+                },
+                timedelta(minutes=10),
+            )
+            normalized = _normalized_comparison_result(
+                vehicle=state["vehicle"],
+                result=refreshed,
+                reused=False,
+                fallback_position=int(state["index"]),
+            )
+            if _usable_comparison_result(normalized):
+                refreshed_by_vehicle_id[int(normalized["vehicle_id"])] = normalized
+        available = [refreshed_by_vehicle_id[int(vehicle["vehicle_id"])] for vehicle in available]
+        upgraded_vehicle_ids = sorted(set(upgraded_vehicle_ids) | set(_upgraded_vehicle_ids(available)))
     if upgraded_vehicle_ids:
         regenerated = await activity_runner(
             "regenerate_comparison_after_upgrade",
@@ -702,23 +746,36 @@ class ComparisonTaskWorkflow:
         async def activity_runner(name: str, payload: Any, timeout: timedelta) -> dict[str, Any]:
             return await workflow.execute_activity(name, payload, start_to_close_timeout=timeout)
 
+        child_handles: dict[str, Any] = {}
+
         async def child_workflow_runner(payload: dict[str, Any]) -> dict[str, Any]:
             child_task_id = str(payload["child_task_id"])
             child_workflow_id = str(payload.get("child_workflow_id") or f"SingleVehicleTaskWorkflow:{child_task_id}")
-            await workflow.start_child_workflow(
+            handle = await workflow.start_child_workflow(
                 SingleVehicleTaskWorkflow.run,
                 child_task_id,
                 id=child_workflow_id,
                 task_queue=workflow.info().task_queue,
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
             )
+            child_handles[child_task_id] = handle
             return {
                 "child_task_id": child_task_id,
                 "child_workflow_id": child_workflow_id,
                 "started": True,
             }
 
+        async def child_completion_runner(payload: dict[str, Any]) -> dict[str, Any]:
+            child_task_id = str(payload["child_task_id"])
+            handle = child_handles.get(child_task_id)
+            if handle is None:
+                return {"child_task_id": child_task_id, "status": "missing_child_handle"}
+            result = await handle
+            return dict(result) if isinstance(result, dict) else {"child_task_id": child_task_id, "status": "completed"}
+
         return await run_comparison_task(
             task_id,
             activity_runner,
             child_workflow_runner=child_workflow_runner,
+            child_completion_runner=child_completion_runner,
         )

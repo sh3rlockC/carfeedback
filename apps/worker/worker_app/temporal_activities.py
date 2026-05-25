@@ -23,7 +23,7 @@ PLATFORM_SERIES_FIELDS = {
     "autohome": "autohome_series_id",
     "dongchedi": "dcd_series_id",
 }
-SUCCESS_STATUSES = {"completed", "succeeded", "success"}
+SUCCESS_STATUSES = {"completed", "completed_degraded", "succeeded", "success"}
 FAILED_STATUSES = {"failed", "cancelled", "cancel_requested"}
 ACTIVE_STATUSES = {"queued", "waiting_agent", "running", "retry_wait"}
 DEFAULT_COLLECTOR_WAIT_POLL_SECONDS = 5.0

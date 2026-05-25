@@ -25,6 +25,7 @@ from app.models import (
     JobArtifact,
     JobCandidate,
     JobStageRun,
+    Task,
 )
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import hash_passphrase
@@ -375,6 +376,108 @@ def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) 
     assert second["estimated_remaining_minutes"] == 2
     assert payload["estimated_remaining_seconds"] == 870
     assert payload["estimated_remaining_minutes"] == 15
+
+
+def test_comparison_progress_uses_temporal_child_task_eta(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+    now = datetime.now(UTC)
+    session = get_session_local()()
+    try:
+        session.add(
+            Task(
+                task_id="task_child_a",
+                task_type="single_vehicle",
+                display_name="测试车A",
+                status="running",
+                current_stage="collecting",
+                degraded=False,
+                upgraded_to_full=False,
+                view_token_hash="view",
+                manage_token_hash="manage",
+                manage_token_expires_at=now + timedelta(days=7),
+                eta_seconds=180,
+                eta_reason="单车任务仍在采集",
+                collection_mode="incremental",
+            )
+        )
+        session.add(
+            ComparisonJob(
+                comparison_id="cmp_temporal_eta",
+                status="running",
+                current_stage="collecting_models",
+                passphrase_version="2026-W17",
+                vehicle_count=1,
+            )
+        )
+        session.add(
+            ComparisonVehicle(
+                comparison_id="cmp_temporal_eta",
+                query="测试车A",
+                model_name="测试车A",
+                position=1,
+                status="running",
+                child_job_id="task_child_a",
+                selected_candidates=selected_candidates("1001", "2001", "测试车A"),
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/comparisons/cmp_temporal_eta/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["vehicles"][0]["estimated_remaining_seconds"] == 180
+    assert payload["estimated_remaining_seconds"] == 780
+    assert payload["estimated_remaining_minutes"] == 13
+
+
+def test_comparison_progress_comparing_stage_keeps_summary_eta(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+    session = get_session_local()()
+    try:
+        session.add(
+            ComparisonJob(
+                comparison_id="cmp_summary_eta",
+                status="running",
+                current_stage="comparing",
+                passphrase_version="2026-W17",
+                vehicle_count=2,
+            )
+        )
+        session.add_all(
+            [
+                ComparisonVehicle(
+                    comparison_id="cmp_summary_eta",
+                    query="测试车A",
+                    model_name="测试车A",
+                    position=1,
+                    status="completed",
+                    selected_candidates=selected_candidates("1001", "2001", "测试车A"),
+                ),
+                ComparisonVehicle(
+                    comparison_id="cmp_summary_eta",
+                    query="测试车B",
+                    model_name="测试车B",
+                    position=2,
+                    status="completed",
+                    selected_candidates=selected_candidates("1002", "2002", "测试车B"),
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    response = client.get("/api/comparisons/cmp_summary_eta/progress")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["estimated_remaining_seconds"] == 600
+    assert payload["estimated_remaining_minutes"] == 10
 
 
 def test_get_comparison_result_returns_dimension_winner_fields(tmp_path: Path) -> None:
