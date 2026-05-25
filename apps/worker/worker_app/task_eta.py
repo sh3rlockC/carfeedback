@@ -3,7 +3,11 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from math import ceil
+from typing import Any
+
+from sqlalchemy import create_engine, text
 
 
 MAX_DURATION_SAMPLES = 100
@@ -44,18 +48,66 @@ def record_stage_duration(
     platform: str | None,
     task_type: str | None,
     duration_seconds: int | float,
+    *,
+    session: Any | None = None,
+    database_url: str | None = None,
 ) -> StageDurationMetric:
     key = _metric_key(stage, platform, task_type)
     samples = _duration_samples[key]
     samples.append(max(0, int(round(float(duration_seconds)))))
     sorted_samples = sorted(samples)
-    return StageDurationMetric(
+    metric = StageDurationMetric(
         stage=key[0],
         platform=key[1],
         task_type=key[2],
         sample_count=len(sorted_samples),
         p50_seconds=_nearest_rank(sorted_samples, 0.50),
         p90_seconds=_nearest_rank(sorted_samples, 0.90),
+    )
+    if session is not None:
+        _upsert_eta_metric(session, metric)
+    elif database_url is not None:
+        engine = create_engine(database_url, future=True, **_engine_kwargs(database_url))
+        try:
+            with engine.begin() as connection:
+                _upsert_eta_metric(connection, metric)
+        finally:
+            engine.dispose()
+    return metric
+
+
+def _engine_kwargs(database_url: str) -> dict[str, Any]:
+    if database_url.startswith("sqlite"):
+        return {"connect_args": {"check_same_thread": False}}
+    return {}
+
+
+def _upsert_eta_metric(connection: Any, metric: StageDurationMetric) -> None:
+    connection.execute(
+        text(
+            """
+            INSERT INTO eta_metrics (
+                stage, platform, task_type, sample_count, p50_seconds, p90_seconds, updated_at
+            )
+            VALUES (
+                :stage, :platform, :task_type, :sample_count, :p50_seconds, :p90_seconds, :updated_at
+            )
+            ON CONFLICT(stage, platform, task_type) DO UPDATE SET
+                sample_count = eta_metrics.sample_count + 1,
+                p50_seconds = excluded.p50_seconds,
+                p90_seconds = excluded.p90_seconds,
+                updated_at = excluded.updated_at
+            """
+        ),
+        {
+            "stage": metric.stage,
+            "platform": metric.platform,
+            "task_type": metric.task_type,
+            "sample_count": metric.sample_count,
+            "p50_seconds": metric.p50_seconds,
+            "p90_seconds": metric.p90_seconds,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
     )
 
 
