@@ -16,14 +16,14 @@ CollectorRunState = Literal[
 
 
 class CollectorRunRequest(BaseModel):
-    run_id: str
+    run_id: str = Field(min_length=1)
     platform: CollectorPlatform
-    series_id: str
+    series_id: str = Field(min_length=1)
     mode: CollectorMode
     known_links: list[str] = Field(default_factory=list)
     resume_cursor: dict = Field(default_factory=dict)
-    max_scan_pages: int = 10
-    stop_after_known_pages: int = 2
+    max_scan_pages: int = Field(default=10, ge=1)
+    stop_after_known_pages: int = Field(default=2, ge=0)
 
 
 class CollectorEvent(BaseModel):
@@ -44,4 +44,3 @@ class CollectorRunStatus(BaseModel):
     resume_cursor: dict = Field(default_factory=dict)
     failure_category: str | None = None
     output_path: str | None = None
-

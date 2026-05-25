@@ -6,7 +6,8 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from collector_service.main import app, reset_runs_for_tests  # noqa: E402
+from collector_service.main import _runs, app, reset_runs_for_tests  # noqa: E402
+from collector_service.models import CollectorRunStatus  # noqa: E402
 
 
 def make_client(monkeypatch) -> TestClient:
@@ -61,11 +62,31 @@ def test_get_run_returns_status(monkeypatch):
     assert body["resume_cursor"] == {"page": 3}
 
 
-def test_cancel_marks_cancellation_requested(monkeypatch):
+def test_cancel_completed_run_returns_conflict_without_mutating(monkeypatch):
     client = make_client(monkeypatch)
-    client.post("/runs", json=run_request("run-cancel"))
+    created = client.post("/runs", json=run_request("run-cancel")).json()
 
     response = client.post("/runs/run-cancel/cancel")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "run already reached terminal status"}
+    status = client.get("/runs/run-cancel").json()
+    assert status["status"] == "succeeded"
+    assert len(status["events"]) == len(created["events"])
+    assert status["events"][-1]["event_type"] == "run_succeeded"
+
+
+def test_cancel_non_terminal_run_marks_cancellation_requested(monkeypatch):
+    client = make_client(monkeypatch)
+    _runs["run-cancel-open"] = CollectorRunStatus(
+        run_id="run-cancel-open",
+        platform="autohome",
+        status="running",
+        progress_current=1,
+        progress_total=3,
+    )
+
+    response = client.post("/runs/run-cancel-open/cancel")
 
     assert response.status_code == 200
     body = response.json()
@@ -106,6 +127,21 @@ def test_fake_runner_uses_failure_category_from_env(monkeypatch):
     assert body["events"][-1]["event_type"] == "run_failed"
 
 
+def test_duplicate_run_id_with_different_request_returns_conflict(monkeypatch):
+    client = make_client(monkeypatch)
+    response = client.post("/runs", json=run_request("run-conflict"))
+    assert response.status_code == 200
+
+    conflicting_request = run_request("run-conflict")
+    conflicting_request["series_id"] = "different-series"
+    response = client.post("/runs", json=conflicting_request)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "run id already exists with different request"
+    }
+
+
 def test_empty_data_env_fails_unless_failure_category_is_set(monkeypatch):
     client = make_client(monkeypatch)
     monkeypatch.setenv("FAKE_COLLECTOR_EMPTY_DATA", "yes")
@@ -120,6 +156,25 @@ def test_empty_data_env_fails_unless_failure_category_is_set(monkeypatch):
     monkeypatch.setenv("FAKE_COLLECTOR_FAIL_CATEGORY", "parse_error")
     response = client.post("/runs", json=run_request("run-explicit-failure"))
     assert response.json()["failure_category"] == "parse_error"
+
+
+def test_run_request_validation_rejects_empty_ids_and_negative_counts(monkeypatch):
+    client = make_client(monkeypatch)
+
+    invalid = run_request("")
+    invalid["series_id"] = ""
+    invalid["max_scan_pages"] = -1
+    invalid["stop_after_known_pages"] = -1
+    response = client.post("/runs", json=invalid)
+
+    assert response.status_code == 422
+    invalid_fields = {error["loc"][-1] for error in response.json()["detail"]}
+    assert {
+        "run_id",
+        "series_id",
+        "max_scan_pages",
+        "stop_after_known_pages",
+    }.issubset(invalid_fields)
 
 
 def test_healthz(monkeypatch):
