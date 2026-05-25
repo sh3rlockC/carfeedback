@@ -80,6 +80,42 @@ class CreateJobResponse(BaseModel):
     result_url: str
 
 
+class TaskCreateVehicle(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+
+
+class TaskCreateRequest(BaseModel):
+    task_type: Literal["single", "comparison"]
+    vehicles: list[TaskCreateVehicle] = Field(min_length=1, max_length=5)
+
+
+class TaskCreateResponse(BaseModel):
+    task_id: str
+    status: str
+    view_url: str
+    manage_url: str
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    task_type: str
+    display_name: str
+    status: str
+    current_stage: str
+    degraded: bool
+    upgraded_to_full: bool
+    eta_seconds: int | None
+    eta_reason: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class TaskDetailResponse(TaskListItem):
+    vehicles: list[dict]
+    events: list[dict]
+    artifacts: list[dict]
+
+
 class JobOverviewResponse(BaseModel):
     job_id: str
     query: str
