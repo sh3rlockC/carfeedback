@@ -10,6 +10,8 @@ from temporalio import workflow
 ActivityRunner = Callable[[str, Any, timedelta], Awaitable[dict[str, Any]]]
 CancelRequested = Callable[[], bool]
 PLATFORMS = ("autohome", "dongchedi")
+MAX_COMPARISON_VEHICLES = 5
+MIN_COMPARISON_RESULTS = 2
 
 
 def _failed_platform_name(failure: Any) -> str | None:
@@ -48,6 +50,66 @@ def _run_id_for_platform(results: dict[str, Any], platform: str) -> str | None:
     if isinstance(run, dict) and run.get("run_id"):
         return str(run["run_id"])
     return None
+
+
+def estimate_comparison_seconds(vehicle_estimates: list[int], summary_seconds: int) -> int:
+    return max([0, *[max(0, int(value)) for value in vehicle_estimates]]) + max(0, int(summary_seconds))
+
+
+def _comparison_vehicle_id(vehicle: dict[str, Any], fallback: int) -> int:
+    try:
+        return int(vehicle.get("id") or vehicle.get("vehicle_id") or fallback)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _comparison_model_name(vehicle: dict[str, Any]) -> str:
+    return str(vehicle.get("model_name") or vehicle.get("query") or vehicle.get("id") or "vehicle")
+
+
+def _comparison_exclusion(result: dict[str, Any], vehicle: dict[str, Any]) -> dict[str, str]:
+    return {
+        "model_name": str(result.get("model_name") or _comparison_model_name(vehicle)),
+        "reason": str(result.get("reason") or result.get("error_message") or "vehicle_result_unusable"),
+    }
+
+
+def _usable_comparison_result(result: dict[str, Any]) -> bool:
+    if result.get("usable") is False:
+        return False
+    if result.get("usable") is True:
+        return True
+    return bool(result.get("snapshot"))
+
+
+def _comparison_status(*, excluded: list[dict[str, str]], vehicles: list[dict[str, Any]], report: dict[str, Any]) -> str:
+    if excluded or report.get("degraded") or any(vehicle.get("degraded") for vehicle in vehicles):
+        return "completed_degraded"
+    return "completed"
+
+
+def _normalized_comparison_result(
+    *,
+    vehicle: dict[str, Any],
+    result: dict[str, Any],
+    reused: bool,
+    fallback_position: int,
+) -> dict[str, Any]:
+    labels = [str(label) for label in result.get("labels", [])]
+    incomplete_sources = [str(source) for source in result.get("incomplete_sources", [])]
+    if incomplete_sources and "incomplete_source" not in labels:
+        labels.append("incomplete_source")
+    return {
+        **result,
+        "vehicle_id": int(result.get("vehicle_id") or _comparison_vehicle_id(vehicle, fallback_position)),
+        "position": int(result.get("position") or vehicle.get("position") or fallback_position),
+        "model_name": str(result.get("model_name") or _comparison_model_name(vehicle)),
+        "source_job_id": result.get("source_job_id") or vehicle.get("source_job_id"),
+        "reused": bool(result.get("reused", reused)),
+        "degraded": bool(result.get("degraded") or incomplete_sources),
+        "incomplete_sources": incomplete_sources,
+        "labels": labels,
+    }
 
 
 def _collection_results_with_pending_timeouts(results: dict[str, Any]) -> dict[str, Any]:
@@ -371,6 +433,142 @@ async def run_single_vehicle_task(
     return {"task_id": task_id, "status": "failed"}
 
 
+async def run_comparison_task(
+    task_id: str,
+    activity_runner: ActivityRunner,
+) -> dict[str, Any]:
+    task = await activity_runner("load_comparison_task", task_id, timedelta(seconds=30))
+    vehicles = sorted(
+        [vehicle for vehicle in task.get("vehicles", []) if isinstance(vehicle, dict)],
+        key=lambda vehicle: int(vehicle.get("position") or vehicle.get("id") or 0),
+    )
+
+    if len(vehicles) > MAX_COMPARISON_VEHICLES:
+        payload = {
+            "comparison_id": task_id,
+            "task": task,
+            "status": "failed",
+            "error_code": "too_many_vehicles",
+            "error_message": "竞品对比最多支持 5 个车型",
+        }
+        await activity_runner("publish_comparison_result", payload, timedelta(minutes=2))
+        return {
+            "comparison_id": task_id,
+            "status": "failed",
+            "error_code": "too_many_vehicles",
+            "error_message": "竞品对比最多支持 5 个车型",
+        }
+
+    available: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for index, vehicle in enumerate(vehicles, start=1):
+        reused = bool(vehicle.get("source_job_id")) and vehicle.get("needs_collection") is not True
+        subworkflow: dict[str, Any] = {"reused": True, "source_job_id": vehicle.get("source_job_id")}
+        if not reused:
+            subworkflow = await activity_runner(
+                "ensure_vehicle_subworkflow",
+                {"comparison_id": task_id, "task": task, "vehicle": vehicle},
+                timedelta(minutes=2),
+            )
+
+        result = await activity_runner(
+            "wait_for_vehicle_results",
+            {
+                "comparison_id": task_id,
+                "task": task,
+                "vehicle": vehicle,
+                "subworkflow": subworkflow,
+                "reused": reused,
+            },
+            timedelta(minutes=45),
+        )
+        normalized = _normalized_comparison_result(
+            vehicle=vehicle,
+            result=result,
+            reused=reused,
+            fallback_position=index,
+        )
+        if _usable_comparison_result(normalized):
+            available.append(normalized)
+        else:
+            excluded.append(_comparison_exclusion(normalized, vehicle))
+
+    if len(available) < MIN_COMPARISON_RESULTS:
+        error_message = "竞品对比至少需要 2 个可用车型结果"
+        payload = {
+            "comparison_id": task_id,
+            "task": task,
+            "status": "failed",
+            "error_code": "insufficient_available_vehicles",
+            "error_message": error_message,
+            "available_vehicle_count": len(available),
+            "vehicles": available,
+            "excluded": excluded,
+        }
+        await activity_runner("publish_comparison_result", payload, timedelta(minutes=2))
+        return {
+            "comparison_id": task_id,
+            "status": "failed",
+            "error_code": "insufficient_available_vehicles",
+            "error_message": error_message,
+            "available_vehicle_count": len(available),
+            "excluded": excluded,
+        }
+
+    report = await activity_runner(
+        "generate_comparison_report",
+        {
+            "comparison_id": task_id,
+            "task": task,
+            "vehicles": available,
+            "excluded": excluded,
+        },
+        timedelta(minutes=20),
+    )
+    status = _comparison_status(excluded=excluded, vehicles=available, report=report)
+    publish = await activity_runner(
+        "publish_comparison_result",
+        {
+            "comparison_id": task_id,
+            "task": task,
+            "status": status,
+            "vehicles": available,
+            "excluded": excluded,
+            "report": report,
+            "degraded": status == "completed_degraded",
+        },
+        timedelta(minutes=5),
+    )
+    result = {
+        "comparison_id": task_id,
+        "status": str(publish.get("status") or status),
+        "vehicle_count": len(available),
+        "excluded": excluded,
+    }
+
+    upgraded_vehicle_ids = [
+        int(vehicle["vehicle_id"])
+        for vehicle in available
+        if vehicle.get("upgraded_to_full") is True
+    ]
+    if upgraded_vehicle_ids:
+        regenerated = await activity_runner(
+            "regenerate_comparison_after_upgrade",
+            {
+                "comparison_id": task_id,
+                "task": task,
+                "vehicles": available,
+                "excluded": excluded,
+                "upgraded_vehicle_ids": upgraded_vehicle_ids,
+                "previous_report": report,
+            },
+            timedelta(minutes=20),
+        )
+        result["status"] = str(regenerated.get("status") or "completed_upgraded")
+
+    return result
+
+
 @workflow.defn
 class SingleVehicleTaskWorkflow:
     def __init__(self) -> None:
@@ -398,4 +596,7 @@ class SingleVehicleTaskWorkflow:
 class ComparisonTaskWorkflow:
     @workflow.run
     async def run(self, task_id: str) -> dict:
-        return {"task_id": task_id, "status": "queued"}
+        async def activity_runner(name: str, payload: Any, timeout: timedelta) -> dict[str, Any]:
+            return await workflow.execute_activity(name, payload, start_to_close_timeout=timeout)
+
+        return await run_comparison_task(task_id, activity_runner)
