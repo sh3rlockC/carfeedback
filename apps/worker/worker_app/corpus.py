@@ -334,6 +334,57 @@ def export_platform_workbook(
     return len(rows)
 
 
+def export_vehicle_merged_raw_workbook(
+    database_url: str,
+    query: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+    output_path: Path,
+) -> dict[str, int]:
+    engine = create_corpus_engine(database_url)
+    ensure_corpus_schema(engine)
+    key = query_key(query)
+    platform_series = {
+        "autohome": str(autohome_series_id),
+        "dongchedi": str(dongchedi_series_id),
+    }
+    sheet_names = {
+        "autohome": "汽车之家",
+        "dongchedi": "懂车帝",
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    counts: dict[str, int] = {}
+    first_sheet = True
+
+    with engine.begin() as conn:
+        for platform, series_id in platform_series.items():
+            rows = conn.execute(
+                select(koubei_raw_comments.c.row_json)
+                .where(
+                    koubei_raw_comments.c.query_key == key,
+                    koubei_raw_comments.c.platform == platform,
+                    koubei_raw_comments.c.series_id == series_id,
+                )
+                .order_by(koubei_raw_comments.c.id.asc())
+            ).all()
+
+            sheet = workbook.active if first_sheet else workbook.create_sheet()
+            first_sheet = False
+            sheet.title = sheet_names[platform]
+            headers = PLATFORM_HEADERS[platform]
+            sheet.append(headers)
+            for row in rows:
+                item = _row_json(row[0])
+                sheet.append([item.get(header, "") for header in headers])
+            _apply_basic_sheet_style(sheet, platform)
+            counts[platform] = len(rows)
+
+    workbook.save(output_path)
+    return counts
+
+
 def write_known_links_file(path: Path, links: set[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(sorted(links)) + ("\n" if links else ""), encoding="utf-8")
