@@ -193,6 +193,8 @@ def pause_retry_task(
     task = _load_task_or_404(db, task_id)
     _require_manage_token(task, manage_token)
 
+    task.status = "retry_paused"
+    task.current_stage = "retry_paused"
     db.add(TaskEvent(task_id=task.task_id, event_type="retry_paused", payload_json={}))
     db.commit()
     db.refresh(task)

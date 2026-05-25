@@ -181,7 +181,10 @@ def test_management_action_requires_passphrase_session_and_manage_token(tmp_path
 
     pause_response = client.post(f"/api/tasks/{payload['task_id']}/pause-retry?manage_token={manage_token}")
     assert pause_response.status_code == 200
-    assert pause_response.json()["events"][-1]["event_type"] == "retry_paused"
+    pause_detail = pause_response.json()
+    assert pause_detail["status"] == "retry_paused"
+    assert pause_detail["current_stage"] == "retry_paused"
+    assert pause_detail["events"][-1]["event_type"] == "retry_paused"
 
     session = get_session_local()()
     try:
