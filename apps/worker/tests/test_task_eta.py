@@ -121,7 +121,7 @@ def test_record_stage_duration_upserts_nullable_metric_identity(tmp_path: Path) 
     finally:
         new_connection.close()
 
-    assert rows == [("summary", None, None, 2, 60, 120)]
+    assert rows == [("summary", "__all__", "__all__", 2, 60, 120)]
 
 
 def test_queue_eta_uses_queue_position_and_platform_agent_count() -> None:

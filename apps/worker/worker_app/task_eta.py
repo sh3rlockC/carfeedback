@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, text
 
 
 MAX_DURATION_SAMPLES = 100
+ALL_DIMENSION_VALUE = "__all__"
 
 
 @dataclass(frozen=True)
@@ -82,47 +83,11 @@ def _engine_kwargs(database_url: str) -> dict[str, Any]:
     return {}
 
 
-def _upsert_eta_metric(connection: Any, metric: StageDurationMetric) -> None:
-    existing = connection.execute(
-        text(
-            """
-            SELECT id, sample_count
-            FROM eta_metrics
-            WHERE stage = :stage
-              AND ((platform = :platform) OR (platform IS NULL AND :platform IS NULL))
-              AND ((task_type = :task_type) OR (task_type IS NULL AND :task_type IS NULL))
-            ORDER BY id ASC
-            LIMIT 1
-            """
-        ),
-        {
-            "stage": metric.stage,
-            "platform": metric.platform,
-            "task_type": metric.task_type,
-        },
-    ).mappings().first()
-    if existing is not None:
-        connection.execute(
-            text(
-                """
-                UPDATE eta_metrics
-                SET sample_count = :sample_count,
-                    p50_seconds = :p50_seconds,
-                    p90_seconds = :p90_seconds,
-                    updated_at = :updated_at
-                WHERE id = :id
-                """
-            ),
-            {
-                "id": int(existing["id"]),
-                "sample_count": int(existing["sample_count"]) + 1,
-                "p50_seconds": metric.p50_seconds,
-                "p90_seconds": metric.p90_seconds,
-                "updated_at": datetime.now(UTC).isoformat(),
-            },
-        )
-        return
+def _db_dimension_value(value: str | None) -> str:
+    return value if value is not None else ALL_DIMENSION_VALUE
 
+
+def _upsert_eta_metric(connection: Any, metric: StageDurationMetric) -> None:
     connection.execute(
         text(
             """
@@ -132,12 +97,17 @@ def _upsert_eta_metric(connection: Any, metric: StageDurationMetric) -> None:
             VALUES (
                 :stage, :platform, :task_type, :sample_count, :p50_seconds, :p90_seconds, :updated_at
             )
+            ON CONFLICT(stage, platform, task_type) DO UPDATE SET
+                sample_count = eta_metrics.sample_count + 1,
+                p50_seconds = excluded.p50_seconds,
+                p90_seconds = excluded.p90_seconds,
+                updated_at = excluded.updated_at
             """
         ),
         {
             "stage": metric.stage,
-            "platform": metric.platform,
-            "task_type": metric.task_type,
+            "platform": _db_dimension_value(metric.platform),
+            "task_type": _db_dimension_value(metric.task_type),
             "sample_count": metric.sample_count,
             "p50_seconds": metric.p50_seconds,
             "p90_seconds": metric.p90_seconds,
