@@ -86,6 +86,25 @@ def test_crowded_mode_permits_one_active_lane_per_task() -> None:
     ]
 
 
+def test_crowded_mode_counts_planned_lanes_for_each_task() -> None:
+    order = plan_dispatch_order(
+        platform_queues={
+            "autohome": [
+                QueuedRun("run_a", "task_big", "comparison", waited_seconds=70),
+                QueuedRun("run_b", "task_other", "comparison", waited_seconds=65),
+            ],
+            "dongchedi": [
+                QueuedRun("run_c", "task_big", "comparison", waited_seconds=69),
+            ],
+        },
+        agent_capacity={"autohome": 2, "dongchedi": 1},
+        active_lanes_by_task={},
+        single_task_priority_weight=0.1,
+    )
+
+    assert [decision.task_id for decision in order].count("task_big") == 1
+
+
 def test_round_robin_gives_each_task_one_opportunity() -> None:
     order = plan_dispatch_order(
         platform_queues={
@@ -95,7 +114,7 @@ def test_round_robin_gives_each_task_one_opportunity() -> None:
                 QueuedRun("run_c", "task_other", "comparison", waited_seconds=118),
             ],
         },
-        agent_capacity={"autohome": 3},
+        agent_capacity={"autohome": 4},
         active_lanes_by_task={},
         single_task_priority_weight=0.1,
     )

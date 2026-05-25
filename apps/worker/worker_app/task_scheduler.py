@@ -98,6 +98,7 @@ def plan_dispatch_order(
     }
     consumed_run_ids: set[str] = set()
     tasks_seen_this_pass: set[str] = set()
+    planned_lanes_by_task: dict[str, int] = {}
     decisions: list[DispatchDecision] = []
 
     while any(count > 0 for count in remaining_capacity.values()):
@@ -107,13 +108,14 @@ def plan_dispatch_order(
             tasks_seen_this_pass=tasks_seen_this_pass,
             remaining_capacity=remaining_capacity,
             active_lanes_by_task=active_lanes_by_task,
+            planned_lanes_by_task=planned_lanes_by_task,
             crowded=crowded,
             platform_rank=platform_rank,
             single_task_priority_weight=single_task_priority_weight,
         )
 
         if not task_candidates:
-            if tasks_seen_this_pass:
+            if tasks_seen_this_pass and not crowded:
                 tasks_seen_this_pass.clear()
                 continue
             break
@@ -139,6 +141,9 @@ def plan_dispatch_order(
         )
         consumed_run_ids.add(candidate.run.run_id)
         tasks_seen_this_pass.add(candidate.run.task_id)
+        planned_lanes_by_task[candidate.run.task_id] = (
+            planned_lanes_by_task.get(candidate.run.task_id, 0) + 1
+        )
         remaining_capacity[candidate.queue_platform] -= 1
 
     return decisions
@@ -166,6 +171,7 @@ def _best_candidate_by_task(
     tasks_seen_this_pass: set[str],
     remaining_capacity: Mapping[str, int],
     active_lanes_by_task: Mapping[str, int],
+    planned_lanes_by_task: Mapping[str, int],
     crowded: bool,
     platform_rank: Mapping[str, int],
     single_task_priority_weight: float,
@@ -178,7 +184,11 @@ def _best_candidate_by_task(
             continue
         if candidate.run.task_id in tasks_seen_this_pass:
             continue
-        if crowded and active_lanes_by_task.get(candidate.run.task_id, 0) >= 1:
+        if crowded and (
+            active_lanes_by_task.get(candidate.run.task_id, 0)
+            + planned_lanes_by_task.get(candidate.run.task_id, 0)
+            >= 1
+        ):
             continue
 
         current = best_by_task.get(candidate.run.task_id)
