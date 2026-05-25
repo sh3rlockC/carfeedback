@@ -239,7 +239,7 @@ nano .env
 6. 构建并启动：
 
 ```bash
-docker compose up -d --build --scale worker=2
+docker compose up -d --build --scale temporal-worker=2
 ```
 
 7. 查看容器状态：
@@ -248,10 +248,10 @@ docker compose up -d --build --scale worker=2
 docker compose ps
 ```
 
-worker 应显示 2 个副本；如果只看到 1 个 worker，使用：
+`temporal-worker` 应显示 2 个副本；如果只看到 1 个 `temporal-worker`，使用：
 
 ```bash
-docker compose up -d --scale worker=2
+docker compose up -d --scale temporal-worker=2
 ```
 
 8. 查看启动日志：
@@ -344,7 +344,7 @@ docker compose -p vehicle-koubei-sandbox --env-file .sandbox/vehicle-koubei/.env
 服务器上如果还保留少量旧的汽车之家或懂车帝 raw Excel，可以一次性导入长期语料库。缺失的平台不要伪造数据，脚本会跳过并在 summary JSON 里标记 `skipped`。
 
 ```bash
-docker compose exec worker python apps/worker/scripts/backfill_raw_excels.py \
+docker compose exec worker sh -lc 'python scripts/backfill_raw_excels.py \
   --database-url "$DATABASE_URL" \
   --corpus-root "$CORPUS_ROOT" \
   --model-name "风云T11" \
@@ -352,7 +352,7 @@ docker compose exec worker python apps/worker/scripts/backfill_raw_excels.py \
   --autohome-series-id 8089 \
   --autohome-xlsx /path/autohome.xlsx \
   --dcd-series-id 25398 \
-  --dcd-xlsx /path/dcd.xlsx
+  --dcd-xlsx /path/dcd.xlsx'
 ```
 
 导入后检查对应车型目录：
@@ -471,9 +471,9 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - LLM provider、API key、base URL 和模型名已配置并验证可用。
 - 已确认是否需要真实汽车之家采集；如需要，已提供 `agent-browser` CLI 或替代采集运行时。
 - OpenClaw 已准备 `autohome-1/2`、`dongchedi-1/2` 四个采集 agent。
-- `docker compose up -d --build --scale worker=2` 启动成功。
+- `docker compose up -d --build --scale temporal-worker=2` 启动成功。
 - `docker compose ps` 中核心服务为 running 或 healthy。
-- 两个 worker 副本均在运行。
+- 两个 temporal-worker 副本均在运行。
 - `curl http://你的域名/healthz` 返回 `ok`。
 - Web 页面可打开，并能通过周口令门禁。
 - 已制定 Postgres volume、Redis volume、job artifacts 和 corpus 目录的备份策略。
