@@ -92,3 +92,39 @@ def test_project_task_load_counts_tasks_and_platform_agent_availability(tmp_path
             "dongchedi": {"available": 0, "total": 1},
         },
     }
+
+
+def test_project_task_load_treats_running_runs_without_agent_id_as_busy(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    init_db(settings)
+    session_local = get_session_local()
+
+    with session_local() as session:
+        session.add(_run("run_auto_unknown_agent", "autohome", "running", None))
+        session.commit()
+
+        payload = project_task_load(
+            session,
+            platform_agent_ids={"autohome": ["autohome_1", "autohome_2"]},
+        )
+
+    assert payload["platforms"]["autohome"] == {"available": 1, "total": 2}
+
+
+def test_project_task_load_treats_unconfigured_running_agent_as_busy(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    init_db(settings)
+    session_local = get_session_local()
+
+    with session_local() as session:
+        session.add(_run("run_auto_other_agent", "autohome", "running", "autohome_extra"))
+        session.commit()
+
+        payload = project_task_load(
+            session,
+            platform_agent_ids={"autohome": ["autohome_1", "autohome_2"]},
+        )
+
+    assert payload["platforms"]["autohome"] == {"available": 1, "total": 2}

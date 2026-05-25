@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import json
 import os
 from typing import Any
@@ -14,6 +15,12 @@ from app.models import CollectionRun, Task
 RUNNING_TASK_STATUSES = ("running",)
 QUEUED_TASK_STATUSES = ("queued", "waiting_agent", "retry_wait")
 RUNNING_COLLECTION_STATUSES = ("running",)
+
+
+@dataclass(frozen=True)
+class BusyAgents:
+    known_agent_ids: set[str]
+    unknown_agent_count: int = 0
 
 
 def _split_env_list(value: str | None) -> list[str]:
@@ -58,19 +65,29 @@ def _count_tasks(db: Session, statuses: Sequence[str]) -> int:
     return int(db.query(func.count(Task.task_id)).filter(Task.status.in_(statuses)).scalar() or 0)
 
 
-def _platform_busy_agent_ids(db: Session) -> dict[str, set[str]]:
+def _platform_busy_agents(db: Session) -> dict[str, BusyAgents]:
     rows = (
         db.query(CollectionRun.platform, CollectionRun.agent_id)
         .filter(
             CollectionRun.status.in_(RUNNING_COLLECTION_STATUSES),
-            CollectionRun.agent_id.isnot(None),
         )
         .all()
     )
-    busy: dict[str, set[str]] = {}
+    known: dict[str, set[str]] = {}
+    unknown: dict[str, int] = {}
     for platform, agent_id in rows:
-        busy.setdefault(str(platform), set()).add(str(agent_id))
-    return busy
+        platform_key = str(platform)
+        if agent_id:
+            known.setdefault(platform_key, set()).add(str(agent_id))
+        else:
+            unknown[platform_key] = unknown.get(platform_key, 0) + 1
+    return {
+        platform: BusyAgents(
+            known_agent_ids=known.get(platform, set()),
+            unknown_agent_count=unknown.get(platform, 0),
+        )
+        for platform in set(known) | set(unknown)
+    }
 
 
 def project_task_load(
@@ -83,15 +100,17 @@ def project_task_load(
         str(platform): _unique(agent_ids)
         for platform, agent_ids in agent_ids_source.items()
     }
-    busy_by_platform = _platform_busy_agent_ids(db)
+    busy_by_platform = _platform_busy_agents(db)
     platform_names = sorted(set(configured_agents) | set(busy_by_platform))
 
     platforms = {}
     for platform in platform_names:
         configured = set(configured_agents.get(platform, []))
-        busy = busy_by_platform.get(platform, set())
-        total = len(configured) if configured else len(busy)
-        available = max(0, total - len(busy & configured if configured else busy))
+        busy = busy_by_platform.get(platform, BusyAgents(set()))
+        total = len(configured) if configured else len(busy.known_agent_ids) + busy.unknown_agent_count
+        known_busy_count = len(busy.known_agent_ids)
+        busy_slots = min(total, known_busy_count + busy.unknown_agent_count)
+        available = max(0, total - busy_slots)
         platforms[platform] = {"available": available, "total": total}
 
     return {

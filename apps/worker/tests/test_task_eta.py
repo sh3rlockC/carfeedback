@@ -82,6 +82,48 @@ def test_record_stage_duration_upserts_eta_metric_row_readable_by_new_session(tm
     assert rows[0][6]
 
 
+def test_record_stage_duration_upserts_nullable_metric_identity(tmp_path: Path) -> None:
+    clear_eta_metrics()
+    db_path = tmp_path / "eta-nullable.db"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE eta_metrics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                stage TEXT NOT NULL,
+                platform TEXT,
+                task_type TEXT,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                p50_seconds INTEGER NOT NULL,
+                p90_seconds INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (stage, platform, task_type)
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    record_stage_duration("summary", None, None, 60, database_url=database_url)
+    record_stage_duration("summary", None, None, 120, database_url=database_url)
+
+    new_connection = sqlite3.connect(db_path)
+    try:
+        rows = new_connection.execute(
+            """
+            SELECT stage, platform, task_type, sample_count, p50_seconds, p90_seconds
+            FROM eta_metrics
+            """
+        ).fetchall()
+    finally:
+        new_connection.close()
+
+    assert rows == [("summary", None, None, 2, 60, 120)]
+
+
 def test_queue_eta_uses_queue_position_and_platform_agent_count() -> None:
     assert estimate_queue_seconds(position=3, agent_count=2, p50_seconds=60) == 120
     assert estimate_queue_seconds(position=0, agent_count=2, p50_seconds=60) == 0
