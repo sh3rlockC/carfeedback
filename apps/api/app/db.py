@@ -28,6 +28,21 @@ def init_db(settings: Settings | None = None) -> None:
     _sync_existing_schema(_ENGINE)
 
 
+def get_engine(settings: Settings | None = None):
+    global _ENGINE
+    if _ENGINE is None:
+        init_db(settings)
+    return _ENGINE
+
+
+def reset_engine_cache() -> None:
+    global _ENGINE, _SESSION_LOCAL
+    if _ENGINE is not None:
+        _ENGINE.dispose()
+    _ENGINE = None
+    _SESSION_LOCAL = None
+
+
 def _sync_existing_schema(engine) -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())

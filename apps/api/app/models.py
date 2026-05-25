@@ -23,8 +23,140 @@ def new_comparison_id() -> str:
     return f"cmp_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
+def new_task_id() -> str:
+    return f"task_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+def new_collection_run_id() -> str:
+    return f"run_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
 class Base(DeclarativeBase):
     pass
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_task_id)
+    task_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    current_stage: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    upgraded_to_full: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    view_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    manage_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    manage_token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    view_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manage_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    eta_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eta_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    collection_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="incremental")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    vehicles: Mapped[list["TaskVehicle"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    events: Mapped[list["TaskEvent"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    artifacts: Mapped[list["TaskArtifact"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+
+
+class TaskVehicle(Base):
+    __tablename__ = "task_vehicles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    autohome_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dcd_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    result_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="vehicles")
+
+
+class CollectionRun(Base):
+    __tablename__ = "collection_runs"
+    __table_args__ = (
+        UniqueConstraint("platform", "query_key", "series_id", "status", name="uq_collection_run_identity_status"),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_collection_run_id)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    shared_by_task_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resume_cursor: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    collector_events: Mapped[list["CollectorEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class TaskEvent(Base):
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="events")
+
+
+class CollectorEvent(Base):
+    __tablename__ = "collector_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("collection_runs.run_id", ondelete="CASCADE"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[CollectionRun] = relationship(back_populates="collector_events")
+
+
+class TaskArtifact(Base):
+    __tablename__ = "task_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    downloadable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="artifacts")
+
+
+class EtaMetric(Base):
+    __tablename__ = "eta_metrics"
+    __table_args__ = (UniqueConstraint("stage", "platform", "task_type", name="uq_eta_metric_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    task_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    p50_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    p90_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
 class Job(Base):
