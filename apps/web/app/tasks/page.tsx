@@ -8,6 +8,7 @@ import type { TaskListItem, TaskLoadResponse } from "@/lib/api-types";
 
 type PlatformStatusFilter = "all" | "available" | "crowded";
 type FlagFilter = "all" | "yes" | "no";
+type LoadIssue = { kind: "missing" | "error"; message: string };
 
 const runningStatuses = new Set(["running"]);
 const queuedStatuses = new Set(["queued", "waiting_agent", "retry_wait"]);
@@ -71,8 +72,16 @@ function formatEta(seconds: number | null) {
   return `${Math.ceil(seconds / 60)} 分钟`;
 }
 
+function safeTimestamp(value: string | null | undefined) {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = new Date(value).getTime();
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
 function newestFirst(a: TaskListItem, b: TaskListItem) {
-  return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  return safeTimestamp(b.created_at) - safeTimestamp(a.created_at) || b.task_id.localeCompare(a.task_id);
 }
 
 function matchesFlag(value: boolean, filter: FlagFilter) {
@@ -95,7 +104,7 @@ function fallbackLoad(tasks: TaskListItem[]): TaskLoadResponse {
 export default function TasksPage() {
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [load, setLoad] = useState<TaskLoadResponse | null>(null);
-  const [loadUnavailable, setLoadUnavailable] = useState(false);
+  const [loadIssue, setLoadIssue] = useState<LoadIssue | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -124,12 +133,19 @@ export default function TasksPage() {
           const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
           if (!cancelled) {
             setLoad(loadPayload);
-            setLoadUnavailable(false);
+            setLoadIssue(null);
           }
-        } catch {
+        } catch (err) {
           if (!cancelled) {
             setLoad(null);
-            setLoadUnavailable(true);
+            if (err instanceof ApiError && err.status === 404) {
+              setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
+            } else {
+              setLoadIssue({
+                kind: "error",
+                message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
+              });
+            }
           }
         }
       } catch (err) {
@@ -203,12 +219,13 @@ export default function TasksPage() {
             <strong>
               {filteredPlatforms.length
                 ? filteredPlatforms.map(([platform, value]) => `${platform} ${value.available}/${value.total}`).join(" / ")
-                : loadUnavailable
-                  ? "负载数据暂不可用"
+                : loadIssue
+                  ? loadIssue.message
                   : "暂无平台数据"}
             </strong>
           </div>
         </div>
+        {loadIssue?.kind === "error" ? <p className="error">{loadIssue.message}</p> : null}
       </SignalPanel>
 
       <SignalPanel className="stack" tone="accent">
@@ -274,7 +291,11 @@ export default function TasksPage() {
       <SignalPanel className="stack">
         <div className="task-table-head">
           <strong>{loading ? "读取中" : `${filteredTasks.length} 个任务`}</strong>
-          {loadUnavailable ? <StatusPill tone="warning">负载数据暂不可用</StatusPill> : <StatusPill tone="accent">负载已同步</StatusPill>}
+          {loadIssue ? (
+            <StatusPill tone={loadIssue.kind === "error" ? "danger" : "warning"}>{loadIssue.message}</StatusPill>
+          ) : (
+            <StatusPill tone="accent">负载已同步</StatusPill>
+          )}
         </div>
         <div className="task-table-wrap">
           <table className="task-table">
