@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import inspect as inspect_database
 from sqlalchemy import text
 from temporalio import activity
 
@@ -195,6 +196,19 @@ def _copy_downloadable_artifacts(*, source_paths: list[str], output_dir: Path, m
     return copied
 
 
+def _table_columns(store: DatabaseJobStore, table_name: str) -> set[str]:
+    try:
+        return {column["name"] for column in inspect_database(store.engine).get_columns(table_name)}
+    except Exception:
+        return set()
+
+
+def _db_truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 class TaskActivities:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url
@@ -346,6 +360,7 @@ class TaskActivities:
         status = "reused" if reused else "completed"
         store.mark_comparison_vehicle_status(vehicle_id, status=status, source_job_id=source_job_id)
         degraded = bool(job and str(job.get("status")) == "completed_degraded")
+        upgraded_to_full = bool(job and _db_truthy(job.get("upgraded_to_full"))) or self._task_upgraded_to_full(store, source_job_id)
         return {
             "vehicle_id": vehicle_id,
             "model_name": model_name,
@@ -353,6 +368,7 @@ class TaskActivities:
             "usable": True,
             "reused": reused,
             "degraded": degraded,
+            "upgraded_to_full": upgraded_to_full,
             "incomplete_sources": ["partial_collection"] if degraded else [],
             "labels": ["incomplete_source"] if degraded else [],
             "snapshot": snapshot,
@@ -368,13 +384,21 @@ class TaskActivities:
             0.0,
             _env_float("COMPARISON_VEHICLE_WAIT_POLL_SECONDS", DEFAULT_COMPARISON_VEHICLE_WAIT_POLL_SECONDS),
         )
+        columns = _table_columns(store, "jobs")
+        selected_columns = [
+            column
+            for column in ("status", "degraded", "upgraded_to_full", "error_code", "error_message")
+            if column in columns
+        ]
+        if "status" not in selected_columns:
+            return None
         deadline = time.monotonic() + timeout_seconds
         while True:
             with store.engine.begin() as conn:
                 row = conn.execute(
                     text(
-                        """
-                        SELECT status, degraded, error_code, error_message
+                        f"""
+                        SELECT {", ".join(selected_columns)}
                         FROM jobs
                         WHERE job_id = :job_id
                         """
@@ -393,6 +417,40 @@ class TaskActivities:
                 job["error_message"] = "vehicle result did not finish before comparison timeout"
                 return job
             await asyncio.sleep(min(poll_seconds, remaining_seconds))
+
+    def _task_upgraded_to_full(self, store: DatabaseJobStore, task_id: str) -> bool:
+        task_columns = _table_columns(store, "tasks")
+        if "upgraded_to_full" in task_columns and "task_id" in task_columns:
+            with store.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT upgraded_to_full
+                        FROM tasks
+                        WHERE task_id = :task_id
+                        """
+                    ),
+                    {"task_id": task_id},
+                ).mappings().first()
+            if row is not None and _db_truthy(row["upgraded_to_full"]):
+                return True
+
+        event_columns = _table_columns(store, "task_events")
+        if {"task_id", "event_type"}.issubset(event_columns):
+            with store.engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT 1
+                        FROM task_events
+                        WHERE task_id = :task_id AND event_type = 'upgraded_to_full'
+                        LIMIT 1
+                        """
+                    ),
+                    {"task_id": task_id},
+                ).first()
+            return row is not None
+        return False
 
     @activity.defn
     async def generate_comparison_report(self, payload: dict[str, Any]) -> dict:

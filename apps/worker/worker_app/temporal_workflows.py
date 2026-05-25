@@ -8,6 +8,7 @@ from temporalio import workflow
 
 
 ActivityRunner = Callable[[str, Any, timedelta], Awaitable[dict[str, Any]]]
+ChildWorkflowRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CancelRequested = Callable[[], bool]
 PLATFORMS = ("autohome", "dongchedi")
 MAX_COMPARISON_VEHICLES = 5
@@ -436,6 +437,8 @@ async def run_single_vehicle_task(
 async def run_comparison_task(
     task_id: str,
     activity_runner: ActivityRunner,
+    *,
+    child_workflow_runner: ChildWorkflowRunner | None = None,
 ) -> dict[str, Any]:
     task = await activity_runner("load_comparison_task", task_id, timedelta(seconds=30))
     vehicles = sorted(
@@ -459,8 +462,7 @@ async def run_comparison_task(
             "error_message": "竞品对比最多支持 5 个车型",
         }
 
-    available: list[dict[str, Any]] = []
-    excluded: list[dict[str, str]] = []
+    vehicle_states: list[dict[str, Any]] = []
     for index, vehicle in enumerate(vehicles, start=1):
         reused = bool(vehicle.get("source_job_id")) and vehicle.get("needs_collection") is not True
         subworkflow: dict[str, Any] = {"reused": True, "source_job_id": vehicle.get("source_job_id")}
@@ -470,23 +472,52 @@ async def run_comparison_task(
                 {"comparison_id": task_id, "task": task, "vehicle": vehicle},
                 timedelta(minutes=2),
             )
+        vehicle_states.append(
+            {
+                "index": index,
+                "vehicle": vehicle,
+                "reused": reused,
+                "subworkflow": subworkflow,
+            }
+        )
 
+    if child_workflow_runner is not None:
+        for state in vehicle_states:
+            if state["reused"]:
+                continue
+            subworkflow = dict(state["subworkflow"])
+            child_task_id = str(subworkflow.get("child_task_id") or "")
+            await child_workflow_runner(
+                {
+                    "comparison_id": task_id,
+                    "task": task,
+                    "vehicle": state["vehicle"],
+                    "subworkflow": subworkflow,
+                    "child_task_id": child_task_id,
+                    "child_workflow_id": subworkflow.get("child_workflow_id"),
+                }
+            )
+
+    available: list[dict[str, Any]] = []
+    excluded: list[dict[str, str]] = []
+    for state in vehicle_states:
+        vehicle = state["vehicle"]
         result = await activity_runner(
             "wait_for_vehicle_results",
             {
                 "comparison_id": task_id,
                 "task": task,
                 "vehicle": vehicle,
-                "subworkflow": subworkflow,
-                "reused": reused,
+                "subworkflow": state["subworkflow"],
+                "reused": state["reused"],
             },
             timedelta(minutes=45),
         )
         normalized = _normalized_comparison_result(
             vehicle=vehicle,
             result=result,
-            reused=reused,
-            fallback_position=index,
+            reused=bool(state["reused"]),
+            fallback_position=int(state["index"]),
         )
         if _usable_comparison_result(normalized):
             available.append(normalized)
@@ -599,4 +630,23 @@ class ComparisonTaskWorkflow:
         async def activity_runner(name: str, payload: Any, timeout: timedelta) -> dict[str, Any]:
             return await workflow.execute_activity(name, payload, start_to_close_timeout=timeout)
 
-        return await run_comparison_task(task_id, activity_runner)
+        async def child_workflow_runner(payload: dict[str, Any]) -> dict[str, Any]:
+            child_task_id = str(payload["child_task_id"])
+            child_workflow_id = str(payload.get("child_workflow_id") or f"SingleVehicleTaskWorkflow:{child_task_id}")
+            await workflow.start_child_workflow(
+                SingleVehicleTaskWorkflow.run,
+                child_task_id,
+                id=child_workflow_id,
+                task_queue=workflow.info().task_queue,
+            )
+            return {
+                "child_task_id": child_task_id,
+                "child_workflow_id": child_workflow_id,
+                "started": True,
+            }
+
+        return await run_comparison_task(
+            task_id,
+            activity_runner,
+            child_workflow_runner=child_workflow_runner,
+        )

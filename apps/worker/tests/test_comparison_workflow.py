@@ -9,16 +9,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from worker_app.temporal_activities import TaskActivities
 from worker_app.temporal_workflows import estimate_comparison_seconds, run_comparison_task
 
 
 class FakeComparisonActivityRunner:
-    def __init__(self, responses: dict[str, list[Any]]) -> None:
+    def __init__(self, responses: dict[str, list[Any]], events: list[str] | None = None) -> None:
         self.responses = {name: list(values) for name, values in responses.items()}
         self.calls: list[tuple[str, Any]] = []
+        self.events = events
 
     async def __call__(self, name: str, payload: Any, timeout: Any) -> dict[str, Any]:
         self.calls.append((name, payload))
+        if self.events is not None:
+            vehicle = payload.get("vehicle") if isinstance(payload, dict) else None
+            vehicle_id = vehicle.get("id") if isinstance(vehicle, dict) else ""
+            self.events.append(f"activity:{name}:{vehicle_id}")
         values = self.responses.get(name)
         if not values:
             return {}
@@ -36,6 +42,18 @@ class FakeComparisonActivityRunner:
 
 def run_workflow(runner: FakeComparisonActivityRunner) -> dict[str, Any]:
     return asyncio.run(run_comparison_task("cmp_1", runner))
+
+
+class FakeChildWorkflowRunner:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.calls.append(payload)
+        vehicle = payload["vehicle"]
+        self.events.append(f"child:{vehicle['id']}")
+        return {"started": True}
 
 
 def comparison_task() -> dict[str, Any]:
@@ -114,6 +132,40 @@ def test_comparison_collects_two_vehicles_and_reuses_existing_corpus_snapshot() 
     assert report_payload["vehicles"][2]["reused"] is True
 
 
+def test_comparison_starts_all_child_workflows_before_waiting_for_results() -> None:
+    events: list[str] = []
+    child_runner = FakeChildWorkflowRunner(events)
+    runner = FakeComparisonActivityRunner(
+        {
+            "load_comparison_task": [comparison_task()],
+            "ensure_vehicle_subworkflow": [
+                {"child_workflow_id": "single_vehicle:cmp_1:1", "child_task_id": "job_1"},
+                {"child_workflow_id": "single_vehicle:cmp_1:2", "child_task_id": "job_2"},
+            ],
+            "wait_for_vehicle_results": [
+                usable_vehicle(1, "测试车A"),
+                usable_vehicle(2, "测试车B"),
+                usable_vehicle(3, "测试车C", reused=True, source_job_id="job_reused_c"),
+            ],
+            "generate_comparison_report": [{"report_json": {}, "artifact_paths": []}],
+            "publish_comparison_result": [{"status": "completed"}],
+        },
+        events=events,
+    )
+
+    asyncio.run(run_comparison_task("cmp_1", runner, child_workflow_runner=child_runner))
+
+    assert [call["child_task_id"] for call in child_runner.calls] == ["job_1", "job_2"]
+    first_wait_index = next(index for index, event in enumerate(events) if event.startswith("activity:wait_for_vehicle_results"))
+    assert events[:first_wait_index] == [
+        "activity:load_comparison_task:",
+        "activity:ensure_vehicle_subworkflow:1",
+        "activity:ensure_vehicle_subworkflow:2",
+        "child:1",
+        "child:2",
+    ]
+
+
 def test_degraded_vehicle_enters_comparison_with_incomplete_source_label() -> None:
     runner = FakeComparisonActivityRunner(
         {
@@ -173,6 +225,77 @@ def test_upgraded_vehicle_regenerates_comparison_after_initial_publish() -> None
     regenerate_payload = runner.payloads("regenerate_comparison_after_upgrade")[0]
     assert regenerate_payload["upgraded_vehicle_ids"] == [1]
     assert regenerate_payload["previous_report"]["report_json"] == {"version": "initial"}
+
+
+def test_activity_returns_upgraded_to_full_from_child_job_record(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    final_report = tmp_path / "job_child.final_report.json"
+    analysis_facts = tmp_path / "job_child.analysis_facts.jsonl"
+    final_report.write_text('{"headline":"ok"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"1"}\n', encoding="utf-8")
+
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                degraded INTEGER NOT NULL DEFAULT 0,
+                upgraded_to_full INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT,
+                error_message TEXT
+            );
+            CREATE TABLE comparison_vehicles (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                child_job_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE job_artifacts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                artifact_path TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO jobs (job_id, status, degraded, upgraded_to_full) VALUES (?, ?, ?, ?)",
+            ("job_child", "completed", 1, 1),
+        )
+        connection.execute(
+            "INSERT INTO comparison_vehicles (id, status, child_job_id) VALUES (?, ?, ?)",
+            (1, "running", "job_child"),
+        )
+        connection.executemany(
+            "INSERT INTO job_artifacts (job_id, artifact_path) VALUES (?, ?)",
+            [("job_child", str(final_report)), ("job_child", str(analysis_facts))],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(
+        activities.wait_for_vehicle_results(
+            {
+                "comparison_id": "cmp_1",
+                "vehicle": {"id": 1, "position": 1, "query": "测试车A", "model_name": "测试车A"},
+                "subworkflow": {"child_task_id": "job_child"},
+                "reused": False,
+            }
+        )
+    )
+
+    assert result["usable"] is True
+    assert result["upgraded_to_full"] is True
 
 
 def test_fewer_than_two_usable_vehicles_marks_comparison_failed() -> None:
