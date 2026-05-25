@@ -74,6 +74,26 @@ def _collection_results_with_pending_timeouts(results: dict[str, Any]) -> dict[s
     return normalized
 
 
+def _collection_results_with_missing_failures(results: dict[str, Any]) -> dict[str, Any]:
+    successful_platforms = _successful_platforms(results)
+    failed_platforms = list(results.get("failed_platforms") or [])
+    failed_names = {_failed_platform_name(failure) for failure in failed_platforms}
+    for platform in PLATFORMS:
+        if platform in successful_platforms or platform in failed_names:
+            continue
+        failed_platforms.append(
+            {
+                "platform": platform,
+                "run_id": _run_id_for_platform(results, platform),
+                "failure_category": "collector_missing_result",
+                "retryable": True,
+            }
+        )
+    normalized = dict(results)
+    normalized["failed_platforms"] = failed_platforms
+    return normalized
+
+
 def _merge_retry_results(results: dict[str, Any], retry_result: dict[str, Any]) -> dict[str, Any]:
     retry_successes = _successful_platforms(retry_result)
     successful_platforms = sorted(_successful_platforms(results) | retry_successes)
@@ -105,13 +125,34 @@ async def _cancel_if_requested(
     return {"task_id": task_id, "status": "cancelled"}
 
 
+def _required_artifact_failure(
+    *,
+    postprocessed: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any] | None:
+    if postprocessed.get("skipped") is True or report.get("skipped") is True:
+        return {
+            "platform": "postprocess_or_report",
+            "failure_category": "postprocess_or_report_deferred",
+            "retryable": False,
+        }
+    if not postprocessed.get("artifact_paths") or not report.get("artifact_paths"):
+        return {
+            "platform": "postprocess_or_report",
+            "failure_category": "postprocess_or_report_deferred",
+            "retryable": False,
+        }
+    return None
+
+
 async def _publish_full_pipeline(
     *,
     task_id: str,
     task: dict[str, Any],
     results: dict[str, Any],
     activity_runner: ActivityRunner,
-) -> None:
+    cancel_requested: CancelRequested | None = None,
+) -> dict[str, str]:
     payload = {"task_id": task_id, "task": task, "results": results}
     imported = await activity_runner("import_run_rows_to_corpus", payload, timedelta(minutes=10))
     exported = await activity_runner(
@@ -134,6 +175,37 @@ async def _publish_full_pipeline(
         },
         timedelta(minutes=20),
     )
+    artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
+    if artifact_failure is not None:
+        failed_results = dict(results)
+        failed_results["failed_platforms"] = [*list(results.get("failed_platforms") or []), artifact_failure]
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
+        await activity_runner(
+            "mark_task_failed",
+            {
+                **payload,
+                "results": failed_results,
+                "import_result": imported,
+                "export_result": exported,
+                "postprocess_result": postprocessed,
+                "report_result": report,
+            },
+            timedelta(minutes=2),
+        )
+        return {"task_id": task_id, "status": "failed"}
+    cancellation = await _cancel_if_requested(
+        task_id=task_id,
+        activity_runner=activity_runner,
+        cancel_requested=cancel_requested,
+    )
+    if cancellation is not None:
+        return cancellation
     await activity_runner(
         "publish_full_result",
         {
@@ -145,6 +217,7 @@ async def _publish_full_pipeline(
         },
         timedelta(minutes=20),
     )
+    return {"task_id": task_id, "status": "completed"}
 
 
 async def run_single_vehicle_task(
@@ -214,7 +287,7 @@ async def run_single_vehicle_task(
         "runs": {**runs, **dict(results.get("runs") or {})},
         "failed_platforms": [*initial_failed_platforms, *list(results.get("failed_platforms") or [])],
     }
-    results = _collection_results_with_pending_timeouts(results)
+    results = _collection_results_with_missing_failures(_collection_results_with_pending_timeouts(results))
     cancellation = await _cancel_if_requested(
         task_id=task_id,
         activity_runner=activity_runner,
@@ -262,11 +335,16 @@ async def run_single_vehicle_task(
             )
             if cancellation is not None:
                 return cancellation
-            await _publish_full_pipeline(task_id=task_id, task=task, results=results, activity_runner=activity_runner)
-            return {"task_id": task_id, "status": "completed"}
+            return await _publish_full_pipeline(
+                task_id=task_id,
+                task=task,
+                results=results,
+                activity_runner=activity_runner,
+                cancel_requested=cancel_requested,
+            )
         return {"task_id": task_id, "status": "completed_degraded"}
 
-    if successful_platforms:
+    if set(PLATFORMS).issubset(successful_platforms):
         cancellation = await _cancel_if_requested(
             task_id=task_id,
             activity_runner=activity_runner,
@@ -274,8 +352,13 @@ async def run_single_vehicle_task(
         )
         if cancellation is not None:
             return cancellation
-        await _publish_full_pipeline(task_id=task_id, task=task, results=results, activity_runner=activity_runner)
-        return {"task_id": task_id, "status": "completed"}
+        return await _publish_full_pipeline(
+            task_id=task_id,
+            task=task,
+            results=results,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
 
     cancellation = await _cancel_if_requested(
         task_id=task_id,

@@ -14,7 +14,9 @@ if str(ROOT) not in sys.path:
 
 from test_task_store import create_schema, seed_task
 from worker_app.task_store import TaskStore
+from worker_app.temporal_activities import TaskActivities
 from worker_app.temporal_workflows import SingleVehicleTaskWorkflow, run_single_vehicle_task
+import worker_app.temporal_activities as temporal_activities
 
 
 @dataclass
@@ -134,8 +136,8 @@ def test_both_platforms_succeed_completes_full_result() -> None:
             ],
             "import_run_rows_to_corpus": [{"imported_rows": 24}],
             "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
-            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"]}],
-            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"], "skipped": False}],
             "publish_full_result": [{"status": "completed"}],
         },
     )
@@ -227,8 +229,8 @@ def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
             ],
             "import_run_rows_to_corpus": [{"imported_rows": 30}],
             "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
-            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"]}],
-            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"], "skipped": False}],
             "publish_full_result": [{"status": "completed"}],
         },
     )
@@ -322,6 +324,55 @@ def test_pending_with_one_success_times_out_to_degraded_without_full_publish() -
     ]
 
 
+def test_partial_success_missing_platform_result_degrades_instead_of_full_publish() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome"],
+                    "failed_platforms": [],
+                    "pending_platforms": [],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "publish_degraded_result": [{"status": "completed_degraded"}],
+            "schedule_retry": [{"scheduled": True}],
+            "retry_failed_platforms": [
+                {
+                    "successful_platforms": [],
+                    "failed_platforms": [
+                        {
+                            "platform": "dongchedi",
+                            "run_id": "run_dcd",
+                            "failure_category": "collector_missing_result",
+                            "retryable": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "completed_degraded"}
+    assert "publish_full_result" not in runner.call_names()
+    degraded_payload = dict(runner.calls)["publish_degraded_result"]
+    assert degraded_payload["results"]["failed_platforms"] == [
+        {
+            "platform": "dongchedi",
+            "run_id": "run_dcd",
+            "failure_category": "collector_missing_result",
+            "retryable": True,
+        }
+    ]
+
+
 def test_all_pending_marks_task_failed_instead_of_publishing_full() -> None:
     task = FakeTask()
     runner = FakeActivityRunner(
@@ -398,6 +449,43 @@ def test_cancellation_orchestration_calls_cancel_task_before_publish() -> None:
     assert "publish_full_result" not in runner.call_names()
     cancel_payload = dict(runner.calls)["cancel_task"]
     assert cancel_payload == {"task_id": "task_1"}
+
+
+def test_skipped_postprocess_prevents_full_publish_and_marks_failed() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome", "dongchedi"],
+                    "failed_platforms": [],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "import_run_rows_to_corpus": [{"imported_rows": 24}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": [], "skipped": True}],
+            "run_llm_report": [{"artifact_paths": [], "skipped": True}],
+            "mark_task_failed": [{"status": "failed"}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "failed"}
+    assert "publish_full_result" not in runner.call_names()
+    failure_payload = dict(runner.calls)["mark_task_failed"]
+    assert failure_payload["results"]["failed_platforms"] == [
+        {
+            "platform": "postprocess_or_report",
+            "failure_category": "postprocess_or_report_deferred",
+            "retryable": False,
+        }
+    ]
 
 
 def test_single_vehicle_workflow_exposes_cancel_signal() -> None:
@@ -481,3 +569,62 @@ def test_publish_degraded_then_full_updates_task_flags_and_events(tmp_path: Path
         "upgraded_to_full",
         "full_result_published",
     ]
+
+
+def test_wait_for_collection_runs_polls_until_terminal_before_returning_pending(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    autohome = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    dongchedi = store.create_or_join_collection_run(
+        platform="dongchedi",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="25398",
+        mode="incremental",
+        task_id="task_1",
+    )
+    sleep_calls: list[float] = []
+
+    async def complete_runs_after_first_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "UPDATE collection_runs SET status = 'completed' WHERE run_id IN (?, ?)",
+                (autohome.run_id, dongchedi.run_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    monkeypatch.setenv("COLLECTOR_WAIT_POLL_SECONDS", "1")
+    monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "30")
+    monkeypatch.setattr(
+        temporal_activities,
+        "asyncio",
+        type("FakeAsyncio", (), {"sleep": complete_runs_after_first_sleep}),
+        raising=False,
+    )
+
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+    result = asyncio.run(
+        activity.wait_for_collection_runs(
+            {"task_id": "task_1", "run_ids": [autohome.run_id, dongchedi.run_id]}
+        )
+    )
+
+    assert sleep_calls == [1.0]
+    assert result["successful_platforms"] == ["autohome", "dongchedi"]
+    assert result["pending_platforms"] == []

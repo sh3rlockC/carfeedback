@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +19,18 @@ PLATFORM_SERIES_FIELDS = {
 SUCCESS_STATUSES = {"completed", "succeeded", "success"}
 FAILED_STATUSES = {"failed", "cancelled", "cancel_requested"}
 ACTIVE_STATUSES = {"queued", "waiting_agent", "running", "retry_wait"}
+DEFAULT_COLLECTOR_WAIT_POLL_SECONDS = 5.0
+DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS = 2700.0
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
 
 
 def _vehicle_to_dict(vehicle: TaskVehicleRecord) -> dict[str, Any]:
@@ -158,7 +172,21 @@ class TaskActivities:
     async def wait_for_collection_runs(self, payload: dict[str, Any]) -> dict:
         if not self.database_url:
             return {"successful_platforms": [], "failed_platforms": [], "pending_platforms": [], "runs": {}}
-        runs = self._store().load_collection_runs([str(run_id) for run_id in payload.get("run_ids", [])])
+        run_ids = [str(run_id) for run_id in payload.get("run_ids", [])]
+        timeout_seconds = max(0.0, _env_float("COLLECTOR_WAIT_TIMEOUT_SECONDS", DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS))
+        poll_seconds = max(0.0, _env_float("COLLECTOR_WAIT_POLL_SECONDS", DEFAULT_COLLECTOR_WAIT_POLL_SECONDS))
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            result = self._collection_run_results(run_ids)
+            if not result["pending_platforms"]:
+                return result
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                return result
+            await asyncio.sleep(min(poll_seconds, remaining_seconds))
+
+    def _collection_run_results(self, run_ids: list[str]) -> dict[str, Any]:
+        runs = self._store().load_collection_runs(run_ids)
         successful_platforms: list[str] = []
         failed_platforms: list[dict[str, Any]] = []
         pending_platforms: list[str] = []
