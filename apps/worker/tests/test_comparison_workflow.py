@@ -611,8 +611,10 @@ def test_wait_for_vehicle_results_reads_upgrade_and_snapshot_from_child_task(tmp
 
     assert result["usable"] is True
     assert result["source_job_id"] == "task_child"
-    assert result["degraded"] is True
+    assert result["degraded"] is False
     assert result["upgraded_to_full"] is True
+    assert result["incomplete_sources"] == []
+    assert "incomplete_source" not in result["labels"]
     assert Path(result["snapshot"]["final_report_path"]).exists()
     assert Path(result["snapshot"]["analysis_facts_path"]).exists()
 

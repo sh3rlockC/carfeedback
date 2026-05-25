@@ -450,8 +450,10 @@ class TaskActivities:
         )
         status = "reused" if reused else "completed"
         store.mark_comparison_vehicle_status(vehicle_id, status=status, source_job_id=task_id)
-        degraded = _db_truthy(task.get("degraded")) or str(task.get("status")) == "completed_degraded"
         upgraded_to_full = _db_truthy(task.get("upgraded_to_full")) or self._task_upgraded_to_full(store, task_id)
+        degraded = str(task.get("status")) == "completed_degraded" or (
+            _db_truthy(task.get("degraded")) and not upgraded_to_full
+        )
         return {
             "vehicle_id": vehicle_id,
             "model_name": model_name,
