@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from app.models import Task
 
 
 def _dt(value):
     return value.isoformat() if value is not None else None
+
+
+def _datetime_desc_key(value):
+    if value is None:
+        return (0, 0, 0, 0, 0, 0, 0)
+    return (
+        -value.year,
+        -value.month,
+        -value.day,
+        -value.hour,
+        -value.minute,
+        -value.second,
+        -value.microsecond,
+    )
+
+
+def _task_sort_key(task: Task):
+    return (task.created_at is None, _datetime_desc_key(task.created_at), task.task_id)
+
+
+def _position_sort_key(item):
+    return (item.position, item.id or 0)
+
+
+def _created_at_sort_key(item):
+    return (item.created_at is None, item.created_at or datetime.min, item.id or 0)
 
 
 def _task_base(task: Task) -> dict:
@@ -24,7 +52,7 @@ def _task_base(task: Task) -> dict:
 
 
 def task_list_payload(tasks: list[Task]) -> list[dict]:
-    return [_task_base(task) for task in tasks]
+    return [_task_base(task) for task in sorted(tasks, key=_task_sort_key)]
 
 
 def task_detail_payload(task: Task) -> dict:
@@ -39,7 +67,7 @@ def task_detail_payload(task: Task) -> dict:
             "dcd_series_id": vehicle.dcd_series_id,
             "status": vehicle.status,
         }
-        for vehicle in sorted(task.vehicles, key=lambda item: item.position)
+        for vehicle in sorted(task.vehicles, key=_position_sort_key)
     ]
     payload["events"] = [
         {
@@ -48,7 +76,7 @@ def task_detail_payload(task: Task) -> dict:
             "payload": event.payload_json or {},
             "created_at": _dt(event.created_at),
         }
-        for event in sorted(task.events, key=lambda item: item.created_at)
+        for event in sorted(task.events, key=_created_at_sort_key)
     ]
     payload["artifacts"] = [
         {
@@ -58,6 +86,6 @@ def task_detail_payload(task: Task) -> dict:
             "downloadable": artifact.downloadable,
             "created_at": _dt(artifact.created_at),
         }
-        for artifact in sorted(task.artifacts, key=lambda item: item.created_at)
+        for artifact in sorted(task.artifacts, key=_created_at_sort_key)
     ]
     return payload
