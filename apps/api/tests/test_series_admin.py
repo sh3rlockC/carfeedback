@@ -55,7 +55,8 @@ def test_series_admin_models_persist_status_alias_audit_and_conflict(tmp_path: P
         )
         db.add(record)
         alias = SeriesAlias(alias_key="奇瑞风云t11", alias="奇瑞风云T11", canonical_query="风云T11")
-        db.add(alias)
+        duplicate_alias = SeriesAlias(alias_key="奇瑞风云t11", alias="风云T11", canonical_query="风云T11 Pro")
+        db.add_all([alias, duplicate_alias])
         audit = SeriesAuditLog(
             record_id=1,
             action="create",
@@ -69,20 +70,28 @@ def test_series_admin_models_persist_status_alias_audit_and_conflict(tmp_path: P
             conflict_type="series_id",
             query_key="fengyun t11",
             query="风云T11",
-            platform="autohome",
+            platform=None,
             existing_value_json={"series_id": "7411"},
             incoming_value_json={"series_id": "9999"},
             status="open",
             import_batch_id=batch.id,
+            resolved_by="reviewer",
+            resolution_json={"action": "keep_existing"},
         )
         db.add(conflict)
         db.commit()
 
         assert db.query(SeriesImportBatch).one().source == "legacy_sync"
         assert db.query(ConfirmedVehicleSeries).one().status == "active"
-        assert db.query(SeriesAlias).one().canonical_query == "风云T11"
-        assert db.query(SeriesAuditLog).one().operator == "tester"
-        assert db.query(SeriesConflict).one().status == "open"
+        assert db.query(SeriesAlias).filter_by(alias_key="奇瑞风云t11").count() == 2
+        audit_row = db.query(SeriesAuditLog).one()
+        assert audit_row.operator == "tester"
+        assert audit_row.reason == "initial import"
+        conflict_row = db.query(SeriesConflict).one()
+        assert conflict_row.platform is None
+        assert conflict_row.status == "open"
+        assert conflict_row.resolved_by == "reviewer"
+        assert conflict_row.resolution_json == {"action": "keep_existing"}
 
 
 def test_legacy_confirmed_vehicle_series_schema_sync_without_jobs(tmp_path: Path) -> None:
