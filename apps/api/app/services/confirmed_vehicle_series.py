@@ -25,6 +25,41 @@ def _candidate_value(candidate: Any, field: str) -> Any:
     return getattr(candidate, field, None)
 
 
+def candidate_canonical_key(candidate: Any) -> str | None:
+    explicit_key = str(_candidate_value(candidate, "canonical_query_key") or "").strip()
+    if explicit_key:
+        return query_key(explicit_key)
+
+    canonical_query = str(_candidate_value(candidate, "canonical_query") or "").strip()
+    if canonical_query:
+        return query_key(canonical_query)
+
+    return None
+
+
+def canonical_query_for_selected_candidates(
+    *,
+    query: str,
+    selected_candidates: Mapping[str, Any],
+) -> str:
+    canonical_keys = []
+    canonical_queries = []
+    for platform in PLATFORMS:
+        candidate = selected_candidates.get(platform)
+        canonical_key = candidate_canonical_key(candidate)
+        if canonical_key:
+            canonical_keys.append(canonical_key)
+
+        canonical_query = str(_candidate_value(candidate, "canonical_query") or "").strip()
+        if canonical_query:
+            canonical_queries.append(canonical_query)
+
+    if len(canonical_keys) == len(PLATFORMS) and len(set(canonical_keys)) == 1 and canonical_queries:
+        return canonical_queries[0]
+
+    return query
+
+
 def upsert_confirmed_vehicle_series(
     db: Session,
     *,

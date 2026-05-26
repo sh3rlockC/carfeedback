@@ -11,6 +11,8 @@ export type PlatformCandidate = {
   evidence_url?: string | null;
   kind?: string | null;
   note?: string | null;
+  canonical_query?: string | null;
+  canonical_query_key?: string | null;
 };
 
 export type PlatformCandidateGroup = {

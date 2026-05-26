@@ -19,10 +19,24 @@ function hasCandidate(candidate: PlatformCandidate | null | undefined): candidat
   return Boolean(candidate?.series_id && candidate.title && candidate.source);
 }
 
+function candidateIdentity(candidate: PlatformCandidate | null | undefined) {
+  if (!candidate) {
+    return "";
+  }
+  return [
+    candidate.canonical_query_key ?? "",
+    candidate.canonical_query ?? "",
+    candidate.series_id ?? "",
+    candidate.url ?? "",
+    candidate.title ?? "",
+    candidate.source ?? "",
+  ].join("|");
+}
+
 function uniqueCandidates(candidates: PlatformCandidate[]) {
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
-    const key = `${candidate.series_id ?? ""}|${candidate.url ?? ""}|${candidate.title ?? ""}`;
+    const key = candidateIdentity(candidate);
     if (seen.has(key)) {
       return false;
     }
@@ -246,15 +260,15 @@ export default function CandidatesPage() {
                   <div className="field">
                     <label>汽车之家</label>
                     <select
-                      value={draft.autohome?.series_id ?? ""}
+                      value={candidateIdentity(draft.autohome)}
                       onChange={(event) => {
-                        const candidate = autohomeOptions.find((item) => item.series_id === event.target.value) ?? null;
+                        const candidate = autohomeOptions.find((item) => candidateIdentity(item) === event.target.value) ?? null;
                         updateComparisonDraft(index, { autohome: candidate, manualAutohomeId: "" });
                       }}
                     >
                       <option value="">手动输入</option>
                       {autohomeOptions.map((candidate) => (
-                        <option key={`ah-${candidate.series_id}-${candidate.url}`} value={candidate.series_id ?? ""}>
+                        <option key={`ah-${candidateIdentity(candidate)}`} value={candidateIdentity(candidate)}>
                           {candidate.title} · {candidate.series_id}
                         </option>
                       ))}
@@ -271,15 +285,15 @@ export default function CandidatesPage() {
                   <div className="field">
                     <label>懂车帝</label>
                     <select
-                      value={draft.dongchedi?.series_id ?? ""}
+                      value={candidateIdentity(draft.dongchedi)}
                       onChange={(event) => {
-                        const candidate = dongchediOptions.find((item) => item.series_id === event.target.value) ?? null;
+                        const candidate = dongchediOptions.find((item) => candidateIdentity(item) === event.target.value) ?? null;
                         updateComparisonDraft(index, { dongchedi: candidate, manualDongchediId: "" });
                       }}
                     >
                       <option value="">手动输入</option>
                       {dongchediOptions.map((candidate) => (
-                        <option key={`dcd-${candidate.series_id}-${candidate.url}`} value={candidate.series_id ?? ""}>
+                        <option key={`dcd-${candidateIdentity(candidate)}`} value={candidateIdentity(candidate)}>
                           {candidate.title} · {candidate.series_id}
                         </option>
                       ))}
@@ -417,10 +431,10 @@ export default function CandidatesPage() {
             </div>
             <div className="candidate-list">
               {autohomeOptions.length ? autohomeOptions.map((candidate) => {
-                const selected = candidate.series_id === selectedAutohome?.series_id;
+                const selected = candidateIdentity(candidate) === candidateIdentity(selectedAutohome);
                 return (
                   <button
-                    key={`autohome-${candidate.series_id}-${candidate.url}`}
+                    key={`autohome-${candidateIdentity(candidate)}`}
                     type="button"
                     className={`card candidate-card ${selected ? "selected" : ""}`}
                     onClick={() => setSelectedAutohome(candidate)}
@@ -451,10 +465,10 @@ export default function CandidatesPage() {
             </div>
             <div className="candidate-list">
               {dongchediOptions.length ? dongchediOptions.map((candidate) => {
-                const selected = candidate.series_id === selectedDongchedi?.series_id;
+                const selected = candidateIdentity(candidate) === candidateIdentity(selectedDongchedi);
                 return (
                   <button
-                    key={`dongchedi-${candidate.series_id}-${candidate.url}`}
+                    key={`dongchedi-${candidateIdentity(candidate)}`}
                     type="button"
                     className={`card candidate-card ${selected ? "selected" : ""}`}
                     onClick={() => setSelectedDongchedi(candidate)}

@@ -32,7 +32,12 @@ from app.services.comparisons import (
     find_reusable_jobs,
     is_reusable_job,
 )
-from app.services.confirmed_vehicle_series import query_key, upsert_confirmed_vehicle_series
+from app.services.confirmed_vehicle_series import (
+    candidate_canonical_key,
+    canonical_query_for_selected_candidates,
+    query_key,
+    upsert_confirmed_vehicle_series,
+)
 from app.services.job_queue import get_job_queue
 from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
@@ -48,21 +53,9 @@ def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
 
 
-def _candidate_canonical_key(candidate) -> str | None:
-    explicit_key = (candidate.canonical_query_key or "").strip()
-    if explicit_key:
-        return explicit_key
-
-    canonical_query = (candidate.canonical_query or "").strip()
-    if canonical_query:
-        return query_key(canonical_query)
-
-    return None
-
-
 def _ensure_same_canonical_vehicle(selected_candidates: SelectedCandidates) -> None:
-    autohome_key = _candidate_canonical_key(selected_candidates.autohome)
-    dongchedi_key = _candidate_canonical_key(selected_candidates.dongchedi)
+    autohome_key = candidate_canonical_key(selected_candidates.autohome)
+    dongchedi_key = candidate_canonical_key(selected_candidates.dongchedi)
     if autohome_key and dongchedi_key and autohome_key != dongchedi_key:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -178,13 +171,14 @@ def create_comparison(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"reuse job is not available: {vehicle.reuse_job_id}")
 
         model_name = vehicle.model_name or vehicle.query
+        selected_candidates = {
+            "autohome": selected_autohome,
+            "dongchedi": selected_dongchedi,
+        }
         upsert_confirmed_vehicle_series(
             db,
-            query=vehicle.query,
-            selected_candidates={
-                "autohome": selected_autohome,
-                "dongchedi": selected_dongchedi,
-            },
+            query=canonical_query_for_selected_candidates(query=vehicle.query, selected_candidates=selected_candidates),
+            selected_candidates=selected_candidates,
         )
         db.add(
             ComparisonVehicle(

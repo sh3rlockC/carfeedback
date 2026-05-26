@@ -268,7 +268,7 @@ def test_create_comparison_validates_vehicle_count_and_enqueues_worker(tmp_path:
 
 
 def test_create_comparison_rejects_mismatched_alias_canonical_candidates(tmp_path: Path) -> None:
-    client, _queue = make_client(tmp_path)
+    client, queue = make_client(tmp_path)
     authorize(client)
 
     response = client.post(
@@ -289,6 +289,14 @@ def test_create_comparison_rejects_mismatched_alias_canonical_candidates(tmp_pat
 
     assert response.status_code == 400
     assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+    assert queue.calls == []
+
+    session = get_session_local()()
+    try:
+        assert session.query(ComparisonJob).count() == 0
+        assert session.query(ComparisonVehicle).count() == 0
+    finally:
+        session.close()
 
 
 def test_create_comparison_accepts_matching_alias_canonical_candidates(tmp_path: Path) -> None:
@@ -313,6 +321,25 @@ def test_create_comparison_accepts_matching_alias_canonical_candidates(tmp_path:
     )
 
     assert response.status_code == 200
+
+    session = get_session_local()()
+    try:
+        records = (
+            session.query(ConfirmedVehicleSeries)
+            .filter(
+                ConfirmedVehicleSeries.status == "active",
+                ConfirmedVehicleSeries.query.in_(["风云", "风云T11"]),
+            )
+            .all()
+        )
+        assert {record.query_key for record in records} == {"风云t11"}
+        assert {record.query for record in records} == {"风云T11"}
+        assert {record.platform: record.series_id for record in records} == {
+            "autohome": "7411",
+            "dongchedi": "25545",
+        }
+    finally:
+        session.close()
 
 
 def test_create_comparison_rejects_mismatched_alias_canonical_queries_without_keys(tmp_path: Path) -> None:
