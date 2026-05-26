@@ -7,15 +7,23 @@ export function readDensityMode(): DensityMode {
   if (typeof window === "undefined") {
     return defaultDensityMode;
   }
-  const stored = window.localStorage.getItem(DENSITY_STORAGE_KEY);
-  return stored === "compact" || stored === "comfortable" ? stored : defaultDensityMode;
+  try {
+    const stored = window.localStorage.getItem(DENSITY_STORAGE_KEY);
+    return stored === "compact" || stored === "comfortable" ? stored : defaultDensityMode;
+  } catch {
+    return defaultDensityMode;
+  }
 }
 
 export function writeDensityMode(mode: DensityMode) {
   if (typeof window === "undefined") {
     return;
   }
-  window.localStorage.setItem(DENSITY_STORAGE_KEY, mode);
+  try {
+    window.localStorage.setItem(DENSITY_STORAGE_KEY, mode);
+  } catch {
+    return;
+  }
 }
 
 export function nextDensityMode(mode: DensityMode): DensityMode {

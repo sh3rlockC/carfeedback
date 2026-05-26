@@ -129,7 +129,13 @@ export function AppChrome({ children }: { children: ReactNode }) {
       </header>
 
       <nav className="utility-nav" aria-label="全局导航">
-        <button className="icon-text-button" type="button" onClick={toggleDensity}>
+        <button
+          className="icon-text-button"
+          type="button"
+          onClick={toggleDensity}
+          aria-label={`切换显示密度，当前为${density === "compact" ? "紧凑" : "标准"}`}
+          aria-pressed={density === "compact"}
+        >
           {density === "compact" ? <Rows3 size={16} /> : <Columns3 size={16} />}
           {density === "compact" ? "紧凑" : "标准"}
         </button>
