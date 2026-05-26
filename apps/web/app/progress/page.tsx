@@ -212,6 +212,9 @@ export default function ProgressPage() {
             <Link className="button" href="/candidates">
               返回候选确认
             </Link>
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
+            </Link>
           </div>
         </main>
       );
@@ -276,6 +279,9 @@ export default function ProgressPage() {
         <div className="actions">
           <Link className="button" href="/candidates">
             返回候选确认
+          </Link>
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>

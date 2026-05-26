@@ -186,6 +186,9 @@ export default function CandidatesPage() {
             <Link className="button" href="/vehicle">
               返回车型输入
             </Link>
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
+            </Link>
           </div>
         </main>
       );
@@ -318,6 +321,9 @@ export default function CandidatesPage() {
         <div className="actions">
           <Link className="button" href="/vehicle">
             返回车型输入
+          </Link>
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>

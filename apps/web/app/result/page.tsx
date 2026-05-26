@@ -568,8 +568,8 @@ export default function ResultPage() {
           <h2>需要先创建竞品对比任务</h2>
           <p className="helper">请先创建并完成竞品对比任务，再查看结果页。</p>
           <div className="actions">
-            <Link className="button" href="/vehicle">
-              重新开始
+            <Link className="button" href="/tasks/new">
+              前往新建任务
             </Link>
           </div>
         </main>
@@ -695,7 +695,7 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                router.push("/passphrase");
+                router.push("/tasks/new");
               }}
             >
               重新开始
@@ -713,8 +713,8 @@ export default function ResultPage() {
         <h2>需要先创建任务</h2>
         <p className="helper">请先创建并完成任务，再查看结果页。</p>
         <div className="actions">
-          <Link className="button" href="/passphrase">
-            重新开始
+          <Link className="button" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>
@@ -1204,7 +1204,7 @@ export default function ResultPage() {
         </div>
         <div className="actions">
           {result.status === "expired" ? (
-            <Link className="button secondary" href="/vehicle">
+            <Link className="button secondary" href="/tasks/new">
               重新创建任务
             </Link>
           ) : downloadableCount ? (
@@ -1217,7 +1217,7 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                router.push("/passphrase");
+                router.push("/tasks/new");
               }}
             >
               重新开始

@@ -46,8 +46,11 @@ export default function VehiclePage() {
         <h2>需要先输入口令</h2>
         <p className="helper">请先完成访问口令校验，再进入车型识别。</p>
         <div className="actions">
-          <Link className="button" href="/passphrase">
-            返回口令页
+          <Link className="button" href="/">
+            返回工作台
+          </Link>
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>
