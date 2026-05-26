@@ -46,19 +46,29 @@ def reset_engine_cache() -> None:
 def _sync_existing_schema(engine) -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    if "jobs" not in table_names:
-        return
-
-    job_columns = {column["name"] for column in inspector.get_columns("jobs")}
     dialect = engine.dialect.name
     with engine.begin() as conn:
-        if "collection_mode" not in job_columns:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
-        if "collection_summary" not in job_columns:
-            if dialect == "postgresql":
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSONB NOT NULL DEFAULT '{}'::jsonb"))
-            else:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
+        if "jobs" in table_names:
+            job_columns = {column["name"] for column in inspector.get_columns("jobs")}
+            if "collection_mode" not in job_columns:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
+            if "collection_summary" not in job_columns:
+                if dialect == "postgresql":
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSONB NOT NULL DEFAULT '{}'::jsonb"))
+                else:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
+
+        if "confirmed_vehicle_series" in table_names:
+            confirmed_columns = {column["name"] for column in inspector.get_columns("confirmed_vehicle_series")}
+            if "status" not in confirmed_columns:
+                conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN status VARCHAR(32) NOT NULL DEFAULT 'active'"))
+            if "deleted_at" not in confirmed_columns:
+                if dialect == "postgresql":
+                    conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE"))
+                else:
+                    conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN deleted_at DATETIME"))
+            if "import_batch_id" not in confirmed_columns:
+                conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN import_batch_id INTEGER"))
 
 
 def get_session_local():
