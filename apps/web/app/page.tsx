@@ -198,6 +198,7 @@ export default function WorkbenchOverviewPage() {
                 <tr>
                   <th>任务</th>
                   <th>类型</th>
+                  <th>状态</th>
                   <th>阶段</th>
                   <th>ETA</th>
                   <th>操作</th>
@@ -211,6 +212,9 @@ export default function WorkbenchOverviewPage() {
                       <span>{task.task_id}</span>
                     </td>
                     <td>{taskTypeLabels[task.task_type]}</td>
+                    <td>
+                      <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
+                    </td>
                     <td>{labelFor(task.current_stage, stageLabels)}</td>
                     <td>{formatEtaCell(task.eta_seconds)}</td>
                     <td>
@@ -222,7 +226,7 @@ export default function WorkbenchOverviewPage() {
                 ))}
                 {!runningTasks.length ? (
                   <tr>
-                    <td colSpan={5}>{loading ? "正在读取任务。" : "暂无运行任务。"}</td>
+                    <td colSpan={6}>{loading ? "正在读取任务。" : "暂无运行任务。"}</td>
                   </tr>
                 ) : null}
               </tbody>
