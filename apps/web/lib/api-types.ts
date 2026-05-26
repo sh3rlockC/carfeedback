@@ -369,13 +369,17 @@ export type TaskLoadResponse = {
   platforms: Record<string, { available: number; total: number }>;
 };
 
+export type SeriesPlatform = "autohome" | "dongchedi";
+export type SeriesStatus = "active" | "deleted";
+export type SeriesImportStatus = "new" | "duplicate" | "conflict" | "invalid";
+
 export type SeriesRecord = {
   id: number;
   query_key: string;
   query: string;
-  platform: string;
+  platform: SeriesPlatform;
   series_id: string;
-  status: string;
+  status: SeriesStatus;
   url: string | null;
   title: string | null;
   source: string | null;
@@ -394,7 +398,7 @@ export type SeriesListResponse = {
 
 export type SeriesMutationRequest = {
   query: string;
-  platform: "autohome" | "dongchedi";
+  platform: SeriesPlatform;
   series_id: string;
   operator: string;
   reason: string;
@@ -440,12 +444,12 @@ export type SeriesAliasListResponse = {
 export type SeriesImportRow = {
   row_number: number;
   query: string | null;
-  platform: string | null;
+  platform: SeriesPlatform | null;
   series_id: string | null;
   url: string | null;
   title: string | null;
   source: string | null;
-  status: string;
+  status: SeriesImportStatus;
   query_key: string | null;
   error: string | null;
   existing_value_json: Record<string, unknown> | null;

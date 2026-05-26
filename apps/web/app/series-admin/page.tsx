@@ -22,14 +22,15 @@ import type {
   SeriesAuditItem,
   SeriesAuditResponse,
   SeriesImportPreviewResponse,
+  SeriesImportStatus,
   SeriesRecord,
   SeriesListResponse,
   SeriesMutationRequest,
+  SeriesPlatform,
 } from "@/lib/api-types";
 import { withBasePath } from "@/lib/paths";
 
 type AdminTab = "seriesId" | "aliases" | "import";
-type SeriesPlatform = "autohome" | "dongchedi";
 type SeriesForm = {
   query: string;
   platform: SeriesPlatform;
@@ -61,12 +62,13 @@ const emptyAliasForm: AliasForm = {
   canonical_query: "",
 };
 
-const importStatusTone: Record<string, "default" | "success" | "warning" | "danger" | "accent"> = {
+const importStatusTone: Record<SeriesImportStatus, "default" | "success" | "warning" | "danger" | "accent"> = {
   new: "success",
   duplicate: "accent",
   conflict: "danger",
   invalid: "warning",
 };
+const importStatuses: SeriesImportStatus[] = ["new", "duplicate", "conflict", "invalid"];
 
 function compactDate(value: string | null) {
   if (!value) {
@@ -85,6 +87,10 @@ function errorCopy(error: unknown, fallback: string) {
 function trimOptional(value: string) {
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function fileKey(file: File | null) {
+  return file ? `${file.name}:${file.size}:${file.lastModified}` : "";
 }
 
 function seriesPayload(form: SeriesForm): SeriesMutationRequest {
@@ -140,7 +146,7 @@ async function fetchFormJson<T>(path: string, file: File): Promise<T> {
 function recordToForm(record: SeriesRecord, current: SeriesForm): SeriesForm {
   return {
     query: record.query,
-    platform: record.platform === "dongchedi" ? "dongchedi" : "autohome",
+    platform: record.platform,
     series_id: record.series_id,
     url: record.url ?? "",
     title: record.title ?? "",
@@ -187,12 +193,14 @@ export default function SeriesAdminPage() {
 
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importPreview, setImportPreview] = useState<SeriesImportPreviewResponse | null>(null);
+  const [importPreviewFileKey, setImportPreviewFileKey] = useState("");
   const [importOperator, setImportOperator] = useState("");
   const [importLoading, setImportLoading] = useState(false);
 
   const visibleAuditItems = useMemo(() => auditItems.slice().reverse(), [auditItems]);
   const previewRows = importPreview?.rows.slice(0, 40) ?? [];
   const importSummary = importPreview?.summary ?? {};
+  const hasCurrentImportPreview = Boolean(importFile && importPreview && importPreviewFileKey === fileKey(importFile));
 
   const loadSeries = useCallback(async () => {
     setSeriesLoading(true);
@@ -269,6 +277,34 @@ export default function SeriesAdminPage() {
     }
   }, [loadAudit, selectedRecord]);
 
+  useEffect(() => {
+    if (!selectedRecord) {
+      return;
+    }
+    const visibleRecord = records.find((record) => record.id === selectedRecord.id);
+    if (!visibleRecord) {
+      setSelectedRecord(null);
+      setSeriesForm((current) => ({ ...emptySeriesForm, operator: current.operator, reason: current.reason }));
+      return;
+    }
+    setSelectedRecord(visibleRecord);
+    setSeriesForm((current) => recordToForm(visibleRecord, current));
+  }, [records, selectedRecord?.id]);
+
+  useEffect(() => {
+    if (!selectedAlias) {
+      return;
+    }
+    const visibleAlias = aliases.find((alias) => alias.id === selectedAlias.id);
+    if (!visibleAlias) {
+      setSelectedAlias(null);
+      setAliasForm(emptyAliasForm);
+      return;
+    }
+    setSelectedAlias(visibleAlias);
+    setAliasForm({ alias: visibleAlias.alias, canonical_query: visibleAlias.canonical_query });
+  }, [aliases, selectedAlias?.id]);
+
   function selectRecord(record: SeriesRecord) {
     setSelectedRecord(record);
     setSeriesForm((current) => recordToForm(record, current));
@@ -314,6 +350,13 @@ export default function SeriesAdminPage() {
   }
 
   async function changeRecordStatus(record: SeriesRecord, action: "delete" | "restore") {
+    if (selectedRecord?.id !== record.id) {
+      setSelectedRecord(record);
+      setSeriesForm((current) => ({ ...recordToForm(record, current), reason: "" }));
+      setSeriesError("已切换到该行；请确认 operator 并填写 reason 后再次执行软删除/恢复。");
+      return;
+    }
+
     const operator = seriesForm.operator.trim();
     const reason = seriesForm.reason.trim();
     if (!operator || !reason) {
@@ -408,6 +451,7 @@ export default function SeriesAdminPage() {
     try {
       const payload = await fetchFormJson<SeriesImportPreviewResponse>("/api/admin/series/import/preview", importFile);
       setImportPreview(payload);
+      setImportPreviewFileKey(fileKey(importFile));
       setStatusMessage("导入预览已生成");
     } catch (error) {
       setImportError(errorCopy(error, "导入预览失败。"));
@@ -425,6 +469,10 @@ export default function SeriesAdminPage() {
       setImportError("提交导入需要 operator。");
       return;
     }
+    if (!hasCurrentImportPreview) {
+      setImportError("请先为当前文件生成导入预览，再提交导入。");
+      return;
+    }
     setImportLoading(true);
     setImportError("");
     try {
@@ -433,6 +481,7 @@ export default function SeriesAdminPage() {
         importFile,
       );
       setImportPreview(payload);
+      setImportPreviewFileKey(fileKey(importFile));
       setStatusMessage("导入已提交");
       await loadSeries();
     } catch (error) {
@@ -445,6 +494,7 @@ export default function SeriesAdminPage() {
   function updateImportFile(event: ChangeEvent<HTMLInputElement>) {
     setImportFile(event.target.files?.[0] ?? null);
     setImportPreview(null);
+    setImportPreviewFileKey("");
     setImportError("");
   }
 
@@ -804,7 +854,7 @@ export default function SeriesAdminPage() {
                   <FileSpreadsheet size={16} />
                   预览
                 </button>
-                <button className="button" type="button" onClick={() => void commitImport()} disabled={importLoading || !importFile || !importOperator.trim()}>
+                <button className="button" type="button" onClick={() => void commitImport()} disabled={importLoading || !importFile || !hasCurrentImportPreview || !importOperator.trim()}>
                   <Upload size={16} />
                   提交导入
                 </button>
@@ -822,7 +872,7 @@ export default function SeriesAdminPage() {
             </div>
             {importError ? <p className="error admin-inline-error">{importError}</p> : null}
             <div className="import-summary-row" aria-label="导入摘要">
-              {["new", "duplicate", "conflict", "invalid"].map((key) => (
+              {importStatuses.map((key) => (
                 <StatusPill key={key} tone={importStatusTone[key]}>
                   {key} {importSummary[key] ?? 0}
                 </StatusPill>

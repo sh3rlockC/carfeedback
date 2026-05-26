@@ -2654,22 +2654,22 @@ details.card summary {
   font-size: 13px;
 }
 
-.dense-table-wrap {
+.series-admin .dense-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
 }
 
-.dense-table {
+.series-admin .dense-table {
   width: 100%;
   min-width: 980px;
   border-collapse: separate;
   border-spacing: 0;
 }
 
-.dense-table th,
-.dense-table td {
+.series-admin .dense-table th,
+.series-admin .dense-table td {
   max-width: 260px;
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -2679,48 +2679,48 @@ details.card summary {
   white-space: nowrap;
 }
 
-.dense-table th {
+.series-admin .dense-table th {
   color: var(--muted-strong);
   font-size: 12px;
   font-weight: 900;
 }
 
-.dense-table td {
+.series-admin .dense-table td {
   overflow: hidden;
   color: var(--muted);
   font-size: 13px;
   text-overflow: ellipsis;
 }
 
-.dense-table td strong,
-.dense-table td span {
+.series-admin .dense-table td strong,
+.series-admin .dense-table td span {
   display: block;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.dense-table td strong {
+.series-admin .dense-table td strong {
   color: var(--text-strong);
 }
 
-.dense-table td span {
+.series-admin .dense-table td span {
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
 }
 
-.dense-table tr.selected-row td {
+.series-admin .dense-table tr.selected-row td {
   background: var(--primary-soft);
 }
 
-.table-action-row {
+.series-admin .table-action-row {
   display: inline-flex;
   gap: 6px;
   align-items: center;
 }
 
-.table-action-row .table-action {
+.series-admin .table-action-row .table-action {
   width: 32px;
   min-width: 32px;
   padding: 0;
@@ -2787,17 +2787,17 @@ details.card summary {
   width: min(520px, 100%);
 }
 
-.admin-preview {
+.series-admin .admin-preview {
   background: var(--bg-soft);
 }
 
-.admin-preview h2 {
+.series-admin .admin-preview h2 {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.admin-preview h2 svg {
+.series-admin .admin-preview h2 svg {
   color: var(--primary);
 }
 
@@ -2808,7 +2808,7 @@ details.card summary {
   margin-top: 12px;
 }
 
-.admin-preview-table {
+.series-admin .admin-preview-table {
   min-width: 860px;
 }
 
