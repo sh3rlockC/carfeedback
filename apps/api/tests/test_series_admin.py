@@ -169,6 +169,81 @@ def test_legacy_confirmed_vehicle_series_schema_sync_without_jobs(tmp_path: Path
         assert row.import_batch_id is None
 
 
+def test_legacy_confirmed_vehicle_series_unique_constraint_migrates_to_active_index(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'legacy-unique-series.db'}"
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE confirmed_vehicle_series (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_key VARCHAR(255) NOT NULL,
+                    query VARCHAR(255) NOT NULL,
+                    platform VARCHAR(32) NOT NULL,
+                    series_id VARCHAR(64) NOT NULL,
+                    url TEXT,
+                    title VARCHAR(255),
+                    source TEXT,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL,
+                    CONSTRAINT uq_confirmed_vehicle_series_query_platform UNIQUE (query_key, platform)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO confirmed_vehicle_series (
+                    query_key,
+                    query,
+                    platform,
+                    series_id,
+                    url,
+                    title,
+                    source,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    '风云t11',
+                    '风云T11',
+                    'autohome',
+                    '7411',
+                    NULL,
+                    NULL,
+                    'legacy',
+                    '2026-05-26 00:00:00',
+                    '2026-05-26 00:00:00'
+                )
+                """
+            )
+        )
+
+    reset_engine_cache()
+    init_db(Settings(app_env="test", database_url=database_url))
+
+    inspector = inspect(engine)
+    confirmed_indexes = {index["name"] for index in inspector.get_indexes("confirmed_vehicle_series")}
+    assert "uq_confirmed_vehicle_series_active_query_platform" in confirmed_indexes
+
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    with SessionLocal() as db:
+        legacy = db.query(ConfirmedVehicleSeries).filter_by(query_key="风云t11", platform="autohome").one()
+        soft_delete_series_record(db, legacy.id, operator="tester", reason="replace legacy")
+
+        replacement = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7412", operator="tester", reason="replacement"),
+        )
+
+        assert replacement.id != legacy.id
+        rows = db.query(ConfirmedVehicleSeries).filter_by(query_key="风云t11", platform="autohome").all()
+        assert sorted(row.status for row in rows) == ["active", "deleted"]
+        assert [row.series_id for row in rows if row.status == "active"] == ["7412"]
+
+
 def test_series_admin_create_update_delete_restore_with_audit(tmp_path: Path) -> None:
     reset_engine_cache()
     settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")

@@ -69,6 +69,102 @@ def _sync_existing_schema(engine) -> None:
                     conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN deleted_at DATETIME"))
             if "import_batch_id" not in confirmed_columns:
                 conn.execute(text("ALTER TABLE confirmed_vehicle_series ADD COLUMN import_batch_id INTEGER"))
+            if dialect == "postgresql":
+                conn.execute(text("ALTER TABLE confirmed_vehicle_series DROP CONSTRAINT IF EXISTS uq_confirmed_vehicle_series_query_platform"))
+                conn.execute(text("DROP INDEX IF EXISTS uq_confirmed_vehicle_series_query_platform"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_vehicle_series_active_query_platform
+                        ON confirmed_vehicle_series (query_key, platform)
+                        WHERE status = 'active'
+                        """
+                    )
+                )
+            elif dialect == "sqlite":
+                _sync_confirmed_vehicle_series_sqlite_indexes(conn)
+
+
+def _sync_confirmed_vehicle_series_sqlite_indexes(conn) -> None:
+    index_rows = conn.execute(text("PRAGMA index_list('confirmed_vehicle_series')")).mappings().all()
+    has_active_index = any(row["name"] == "uq_confirmed_vehicle_series_active_query_platform" for row in index_rows)
+    has_full_unique_index = any(
+        row["unique"] and row["name"] != "uq_confirmed_vehicle_series_active_query_platform"
+        for row in index_rows
+    )
+    if has_active_index and not has_full_unique_index:
+        return
+
+    conn.execute(text("DROP TABLE IF EXISTS confirmed_vehicle_series_new"))
+    conn.execute(
+        text(
+            """
+            CREATE TABLE confirmed_vehicle_series_new (
+                id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                query_key VARCHAR(255) NOT NULL,
+                query VARCHAR(255) NOT NULL,
+                platform VARCHAR(32) NOT NULL,
+                series_id VARCHAR(64) NOT NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'active',
+                url TEXT,
+                title VARCHAR(255),
+                source TEXT,
+                import_batch_id INTEGER,
+                deleted_at DATETIME,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                FOREIGN KEY(import_batch_id) REFERENCES series_import_batches (id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO confirmed_vehicle_series_new (
+                id,
+                query_key,
+                query,
+                platform,
+                series_id,
+                status,
+                url,
+                title,
+                source,
+                import_batch_id,
+                deleted_at,
+                created_at,
+                updated_at
+            )
+            SELECT
+                id,
+                query_key,
+                query,
+                platform,
+                series_id,
+                COALESCE(status, 'active'),
+                url,
+                title,
+                source,
+                import_batch_id,
+                deleted_at,
+                created_at,
+                updated_at
+            FROM confirmed_vehicle_series
+            """
+        )
+    )
+    conn.execute(text("DROP TABLE confirmed_vehicle_series"))
+    conn.execute(text("ALTER TABLE confirmed_vehicle_series_new RENAME TO confirmed_vehicle_series"))
+    conn.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_vehicle_series_active_query_platform
+            ON confirmed_vehicle_series (query_key, platform)
+            WHERE status = 'active'
+            """
+        )
+    )
 
 
 def get_session_local():
