@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 from sqlalchemy.orm import Session
 
 from app.models import ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
@@ -68,7 +70,10 @@ def _validate_headers(headers: list[str]) -> None:
 
 
 def _read_csv_rows(content: bytes) -> list[dict[str, str]]:
-    text = content.decode("utf-8-sig")
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("invalid csv encoding") from exc
     reader = csv.DictReader(StringIO(text))
     if reader.fieldnames is None:
         raise ValueError(HEADER_ERROR)
@@ -77,7 +82,10 @@ def _read_csv_rows(content: bytes) -> list[dict[str, str]]:
 
 
 def _read_excel_rows(content: bytes) -> list[dict[str, str]]:
-    workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    try:
+        workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)
+    except (BadZipFile, InvalidFileException, OSError) as exc:
+        raise ValueError("invalid excel file") from exc
     worksheet = workbook.active
     rows = worksheet.iter_rows(values_only=True)
     try:
@@ -118,10 +126,6 @@ def _snapshot(record: ConfirmedVehicleSeries) -> dict[str, Any]:
     }
 
 
-def _active_snapshot(record: ConfirmedVehicleSeries) -> dict[str, Any]:
-    return _snapshot(record)
-
-
 def _incoming(row: dict[str, str], key: str) -> dict[str, Any]:
     return {
         "query_key": key,
@@ -141,7 +145,7 @@ def _active_working_set(db: Session) -> dict[tuple[str, str], dict[str, Any]]:
         .order_by(ConfirmedVehicleSeries.query.asc(), ConfirmedVehicleSeries.platform.asc(), ConfirmedVehicleSeries.id.asc())
         .all()
     )
-    return {(record.query_key, record.platform): _active_snapshot(record) for record in records}
+    return {(record.query_key, record.platform): _snapshot(record) for record in records}
 
 
 def _invalid_reason(row: dict[str, str]) -> str | None:
@@ -255,7 +259,7 @@ def commit_series_import(db: Session, *, filename: str, content: bytes, operator
                 )
             )
 
-    db.commit()
+    db.flush()
     return preview
 
 

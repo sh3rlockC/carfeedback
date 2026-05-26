@@ -279,7 +279,9 @@ def test_commit_reclassifies_duplicate_after_db_drift_without_mutating_existing_
 
         committed = commit_series_import(db, filename="series.csv", content=content, operator="operator-1")
 
+        batch = db.query(SeriesImportBatch).one()
         assert committed.summary == {"new": 0, "duplicate": 1, "conflict": 0, "invalid": 0}
+        assert batch.summary_json == committed.summary
         assert db.get(ConfirmedVehicleSeries, existing.id).import_batch_id is None
         assert db.query(ConfirmedVehicleSeries).count() == 1
         assert db.query(SeriesConflict).count() == 0
@@ -300,6 +302,7 @@ def test_commit_reclassifies_conflict_after_db_drift_without_mutating_existing_b
 
         batch = db.query(SeriesImportBatch).one()
         assert committed.summary == {"new": 0, "duplicate": 0, "conflict": 1, "invalid": 0}
+        assert batch.summary_json == committed.summary
         assert db.get(ConfirmedVehicleSeries, existing.id).import_batch_id is None
         assert db.query(ConfirmedVehicleSeries).count() == 1
         conflict = db.query(SeriesConflict).one()
@@ -330,6 +333,50 @@ def test_xls_is_rejected_with_clean_value_error(tmp_path: Path) -> None:
     with SessionLocal() as db:
         with pytest.raises(ValueError, match=r"supports \.csv, \.xlsx, and \.xlsm"):
             preview_series_import(db, filename="series.xls", content=b"not an xls")
+
+
+def test_invalid_utf8_csv_is_rejected_with_clean_value_error(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match="invalid csv encoding"):
+            preview_series_import(db, filename="series.csv", content=b"\xff\xfe\x80")
+
+
+def test_corrupt_xlsx_is_rejected_with_clean_value_error(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match="invalid excel file"):
+            preview_series_import(db, filename="series.xlsx", content=b"not a workbook")
+        with pytest.raises(ValueError, match="invalid excel file"):
+            preview_series_import(db, filename="series.xlsm", content=b"not a workbook")
+
+
+def test_commit_series_import_does_not_commit_unrelated_pending_data(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key=query_key("未提交车型"),
+                query="未提交车型",
+                platform="autohome",
+                series_id="1000",
+                status="active",
+            )
+        )
+        committed = commit_series_import(
+            db,
+            filename="series.csv",
+            content=_csv([{"query": "风云T11", "platform": "dongchedi", "series_id": "5498"}]),
+            operator="operator-1",
+        )
+
+        assert committed.summary == {"new": 1, "duplicate": 0, "conflict": 0, "invalid": 0}
+        assert db.query(ConfirmedVehicleSeries).count() == 2
+        db.rollback()
+
+    with SessionLocal() as db:
+        assert db.query(ConfirmedVehicleSeries).count() == 0
+        assert db.query(SeriesImportBatch).count() == 0
 
 
 def test_export_order_is_stable_for_duplicate_identity_history_and_nullable_updated_at(tmp_path: Path) -> None:
