@@ -791,7 +791,14 @@ def test_series_admin_routes_crud_list_filters_and_audit(tmp_path: Path) -> None
     active_list = client.get("/api/admin/series?search=风云&platform=autohome&status=active")
     assert active_list.status_code == 200
     assert active_list.json()["total"] == 1
+    assert active_list.json()["limit"] == 50
+    assert active_list.json()["offset"] == 0
     assert active_list.json()["items"][0]["id"] == record_id
+
+    capped_list = client.get("/api/admin/series?limit=999&offset=-10")
+    assert capped_list.status_code == 200
+    assert capped_list.json()["limit"] == 200
+    assert capped_list.json()["offset"] == 0
 
     update_response = client.patch(
         f"/api/admin/series/{record_id}",
@@ -831,7 +838,15 @@ def test_series_admin_routes_crud_list_filters_and_audit(tmp_path: Path) -> None
 
     audit_response = client.get(f"/api/admin/series/audit?record_id={record_id}")
     assert audit_response.status_code == 200
+    assert audit_response.json()["total"] == 4
+    assert audit_response.json()["limit"] == 50
+    assert audit_response.json()["offset"] == 0
     assert [item["action"] for item in audit_response.json()["items"]] == ["create", "update", "delete", "restore"]
+
+    capped_audit = client.get(f"/api/admin/series/audit?record_id={record_id}&limit=999&offset=-1")
+    assert capped_audit.status_code == 200
+    assert capped_audit.json()["limit"] == 200
+    assert capped_audit.json()["offset"] == 0
 
 
 def test_series_admin_routes_manage_aliases(tmp_path: Path) -> None:
@@ -857,6 +872,11 @@ def test_series_admin_routes_manage_aliases(tmp_path: Path) -> None:
     assert list_response.json()["total"] == 1
     assert list_response.json()["items"][0]["id"] == alias_id
 
+    capped_response = client.get("/api/admin/series/aliases?limit=999&offset=-3")
+    assert capped_response.status_code == 200
+    assert capped_response.json()["limit"] == 200
+    assert capped_response.json()["offset"] == 0
+
     update_response = client.patch(
         f"/api/admin/series/aliases/{alias_id}",
         json={"alias": "风云T11 Pro", "canonical_query": "风云T11"},
@@ -880,8 +900,117 @@ def test_series_admin_routes_require_passphrase_when_access_control_enabled(tmp_
     unauthorized = client.get("/api/admin/series")
     assert unauthorized.status_code == 401
 
+    unauthorized_mutation = client.post("/api/admin/series", json={})
+    assert unauthorized_mutation.status_code == 401
+
     verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
     assert verify_response.status_code == 200
 
     authorized = client.get("/api/admin/series")
     assert authorized.status_code == 200
+
+
+def test_series_admin_routes_reject_blank_and_invalid_series_payloads(tmp_path: Path) -> None:
+    client = make_admin_client(tmp_path)
+
+    blank_response = client.post(
+        "/api/admin/series",
+        json={
+            "query": "   ",
+            "platform": "autohome",
+            "series_id": "7411",
+            "operator": "tester",
+            "reason": "blank query",
+        },
+    )
+    assert blank_response.status_code == 422
+
+    invalid_platform = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "unknown",
+            "series_id": "7411",
+            "operator": "tester",
+            "reason": "invalid platform",
+        },
+    )
+    assert invalid_platform.status_code == 422
+
+
+def test_series_admin_routes_report_active_conflicts(tmp_path: Path) -> None:
+    client = make_admin_client(tmp_path)
+
+    first = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "7411",
+            "operator": "tester",
+            "reason": "seed first",
+        },
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "9999",
+            "operator": "tester",
+            "reason": "duplicate",
+        },
+    )
+    assert duplicate.status_code == 409
+
+    second = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云X3L",
+            "platform": "autohome",
+            "series_id": "8208",
+            "operator": "tester",
+            "reason": "seed second",
+        },
+    )
+    assert second.status_code == 201
+    second_id = second.json()["id"]
+
+    update_conflict = client.patch(
+        f"/api/admin/series/{second_id}",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "8208",
+            "operator": "tester",
+            "reason": "conflicting rename",
+        },
+    )
+    assert update_conflict.status_code == 409
+
+    delete_first = client.request(
+        "DELETE",
+        f"/api/admin/series/{first.json()['id']}",
+        json={"operator": "tester", "reason": "make deleted"},
+    )
+    assert delete_first.status_code == 200
+
+    replacement = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "7412",
+            "operator": "tester",
+            "reason": "replacement",
+        },
+    )
+    assert replacement.status_code == 201
+
+    restore_conflict = client.post(
+        f"/api/admin/series/{first.json()['id']}/restore",
+        json={"operator": "tester", "reason": "restore conflict"},
+    )
+    assert restore_conflict.status_code == 409

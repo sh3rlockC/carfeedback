@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 APPROVED_JOB_STATUSES = [
@@ -427,7 +427,7 @@ class AdminFailedJobsDeleteResponse(BaseModel):
 
 class SeriesMutationRequest(BaseModel):
     query: str = Field(min_length=1, max_length=255)
-    platform: str = Field(min_length=1, max_length=32)
+    platform: Literal["autohome", "dongchedi"]
     series_id: str = Field(min_length=1, max_length=64)
     operator: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1)
@@ -435,10 +435,34 @@ class SeriesMutationRequest(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     source: str | None = None
 
+    @field_validator("query", "series_id", "operator", "reason", mode="before")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("url", "title", "source", mode="before")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = str(value).strip()
+        return stripped or None
+
 
 class SeriesActionRequest(BaseModel):
     operator: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1)
+
+    @field_validator("operator", "reason", mode="before")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
 
 
 class SeriesRecordResponse(BaseModel):
@@ -466,13 +490,27 @@ class SeriesListResponse(BaseModel):
     offset: int
 
 
+class SeriesAuditItemResponse(BaseModel):
+    id: int
+    record_id: int | None = None
+    action: str
+    operator: str
+    reason: str
+    old_value: dict
+    new_value: dict
+    created_at: datetime
+
+
 class SeriesAuditResponse(BaseModel):
-    items: list[dict] = Field(default_factory=list)
+    items: list[SeriesAuditItemResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
 
 
 class SeriesAliasRequest(BaseModel):
-    alias: str = Field(max_length=255)
-    canonical_query: str = Field(max_length=255)
+    alias: str = Field(min_length=1, max_length=255)
+    canonical_query: str = Field(min_length=1, max_length=255)
 
 
 class SeriesAliasResponse(BaseModel):
