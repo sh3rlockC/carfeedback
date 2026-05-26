@@ -35,6 +35,7 @@ from app.services.series_import_export import commit_series_import, export_serie
 from app.services.vehicle_aliases import create_alias, delete_alias, update_alias
 
 MAX_PAGE_SIZE = 200
+MAX_IMPORT_UPLOAD_BYTES = 5 * 1024 * 1024
 EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
@@ -98,7 +99,22 @@ def _audit_payload(row: SeriesAuditLog) -> dict:
 
 
 async def _read_import_upload(request: Request) -> tuple[str, bytes]:
-    body = await request.body()
+    content_length = request.headers.get("content-length")
+    try:
+        if content_length and int(content_length) > MAX_IMPORT_UPLOAD_BYTES:
+            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="series import file is too large")
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid content-length")
+
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_IMPORT_UPLOAD_BYTES:
+            raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="series import file is too large")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+
     content_type = request.headers.get("content-type", "")
     if content_type.lower().startswith("multipart/form-data"):
         message = BytesParser(policy=email_policy).parsebytes(
@@ -107,13 +123,24 @@ async def _read_import_upload(request: Request) -> tuple[str, bytes]:
             + b"\r\nMIME-Version: 1.0\r\n\r\n"
             + body
         )
+        if not message.is_multipart():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid multipart upload")
+        upload: tuple[str, bytes] | None = None
         for part in message.iter_parts():
             if part.get_content_disposition() != "form-data":
                 continue
             if part.get_param("name", header="content-disposition") != "file":
                 continue
-            filename = part.get_filename() or "upload"
-            return filename, part.get_payload(decode=True) or b""
+            if upload is not None:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="multiple file fields are not supported")
+            if part.get("content-transfer-encoding"):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="content-transfer-encoding is not supported")
+            filename = (part.get_filename() or "").strip()
+            if not filename:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing filename")
+            upload = (filename, part.get_payload(decode=True) or b"")
+        if upload is not None:
+            return upload
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing file field")
 
     filename = request.headers.get("x-filename") or request.headers.get("filename")

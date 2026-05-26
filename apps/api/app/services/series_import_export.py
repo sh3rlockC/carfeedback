@@ -219,7 +219,8 @@ def _classify_rows(db: Session, *, filename: str, content: bytes) -> ImportPrevi
 
 
 def preview_series_import(db: Session, *, filename: str, content: bytes) -> ImportPreview:
-    return _classify_rows(db, filename=filename, content=content)
+    with db.no_autoflush:
+        return _classify_rows(db, filename=filename, content=content)
 
 
 def commit_series_import(db: Session, *, filename: str, content: bytes, operator: str) -> ImportPreview:

@@ -51,6 +51,25 @@ def _csv(rows: list[dict[str, str]]) -> bytes:
     return ("\ufeff" + "\n".join(lines) + "\n").encode("utf-8")
 
 
+def _multipart_body(
+    parts: list[tuple[str, str, bytes, str, dict[str, str] | None]],
+    *,
+    boundary: str = "series-boundary",
+) -> tuple[bytes, str]:
+    body = bytearray()
+    for name, filename, content, content_type, extra_headers in parts:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"))
+        body.extend(f"Content-Type: {content_type}\r\n".encode("utf-8"))
+        for key, value in (extra_headers or {}).items():
+            body.extend(f"{key}: {value}\r\n".encode("utf-8"))
+        body.extend(b"\r\n")
+        body.extend(content)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
 def _xlsx(rows: list[dict[str, str]]) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -439,6 +458,29 @@ def test_commit_series_import_does_not_commit_unrelated_pending_data(tmp_path: P
         assert db.query(SeriesImportBatch).count() == 0
 
 
+def test_preview_series_import_does_not_autoflush_unrelated_pending_data(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        pending = ConfirmedVehicleSeries(
+            query_key=query_key("未提交车型"),
+            query="未提交车型",
+            platform="autohome",
+            series_id="1000",
+            status="active",
+        )
+        db.add(pending)
+
+        preview = preview_series_import(
+            db,
+            filename="series.csv",
+            content=_csv([{"query": "风云T11", "platform": "dongchedi", "series_id": "5498"}]),
+        )
+
+        assert preview.summary["new"] == 1
+        assert pending.id is None
+        db.rollback()
+
+
 def test_export_order_is_stable_for_duplicate_identity_history_and_nullable_updated_at(tmp_path: Path) -> None:
     SessionLocal = _session(tmp_path)
     with SessionLocal() as db:
@@ -530,6 +572,69 @@ def test_series_import_api_rejects_bad_file_and_blank_operator(tmp_path: Path) -
     assert "missing columns" in bad_file.json()["detail"]
     assert blank_operator.status_code == 400
     assert blank_operator.json()["detail"] == "operator must not be blank"
+
+
+def test_series_import_api_rejects_oversized_upload_by_content_length(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+
+    response = client.post(
+        "/api/admin/series/import/preview",
+        content=b"",
+        headers={
+            "x-filename": "series.csv",
+            "content-type": "text/csv",
+            "content-length": str(5 * 1024 * 1024 + 1),
+        },
+    )
+
+    assert response.status_code == 413
+
+
+def test_series_import_api_rejects_ambiguous_multipart_uploads(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    first = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+    second = _csv([{"query": "风云X3L", "platform": "autohome", "series_id": "8208"}])
+
+    duplicate_files = client.post(
+        "/api/admin/series/import/preview",
+        files=[
+            ("file", ("series-a.csv", first, "text/csv")),
+            ("file", ("series-b.csv", second, "text/csv")),
+        ],
+    )
+    blank_filename = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("", first, "text/csv")},
+    )
+
+    assert duplicate_files.status_code == 400
+    assert duplicate_files.json()["detail"] == "multiple file fields are not supported"
+    assert blank_filename.status_code == 400
+    assert blank_filename.json()["detail"] == "missing filename"
+
+
+def test_series_import_api_rejects_content_transfer_encoding_and_bad_multipart(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+    encoded_body, content_type = _multipart_body(
+        [("file", "series.csv", content, "text/csv", {"Content-Transfer-Encoding": "base64"})]
+    )
+
+    encoded_response = client.post(
+        "/api/admin/series/import/preview",
+        content=encoded_body,
+        headers={"content-type": content_type},
+    )
+    bad_multipart = client.post(
+        "/api/admin/series/import/preview",
+        content=b"not multipart",
+        headers={"content-type": "multipart/form-data"},
+    )
+
+    assert encoded_response.status_code == 400
+    assert encoded_response.json()["detail"] == "content-transfer-encoding is not supported"
+    assert bad_multipart.status_code == 400
+    assert bad_multipart.json()["detail"] == "invalid multipart upload"
 
 
 def test_series_export_api_returns_xlsx_after_route_seed(tmp_path: Path) -> None:
