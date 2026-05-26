@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -83,3 +83,67 @@ def test_series_admin_models_persist_status_alias_audit_and_conflict(tmp_path: P
         assert db.query(SeriesAlias).one().canonical_query == "风云T11"
         assert db.query(SeriesAuditLog).one().operator == "tester"
         assert db.query(SeriesConflict).one().status == "open"
+
+
+def test_legacy_confirmed_vehicle_series_schema_sync_without_jobs(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'legacy-series.db'}"
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE confirmed_vehicle_series (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_key VARCHAR(255) NOT NULL,
+                    query VARCHAR(255) NOT NULL,
+                    platform VARCHAR(32) NOT NULL,
+                    series_id VARCHAR(64) NOT NULL,
+                    url TEXT,
+                    title VARCHAR(255),
+                    source TEXT,
+                    created_at DATETIME NOT NULL,
+                    updated_at DATETIME NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO confirmed_vehicle_series (
+                    query_key,
+                    query,
+                    platform,
+                    series_id,
+                    url,
+                    title,
+                    source,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    'fengyun t11',
+                    '风云T11',
+                    'autohome',
+                    '7411',
+                    NULL,
+                    NULL,
+                    'legacy',
+                    '2026-05-26 00:00:00',
+                    '2026-05-26 00:00:00'
+                )
+                """
+            )
+        )
+
+    reset_engine_cache()
+    init_db(Settings(app_env="test", database_url=database_url))
+
+    inspector = inspect(engine)
+    confirmed_columns = {column["name"] for column in inspector.get_columns("confirmed_vehicle_series")}
+    assert {"status", "deleted_at", "import_batch_id"}.issubset(confirmed_columns)
+
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT status, import_batch_id FROM confirmed_vehicle_series")).one()
+        assert row.status == "active"
+        assert row.import_batch_id is None
