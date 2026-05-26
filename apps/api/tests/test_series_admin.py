@@ -29,13 +29,62 @@ def test_active_series_index_predicate_validation_is_exact() -> None:
     assert _active_status_predicate_is_valid("status = 'active'::text")
     assert _active_status_predicate_is_valid("((status)::text = 'active'::text)")
     assert _postgres_active_index_is_valid(
-        {"indisunique": True, "columns": ["query_key", "platform"], "predicate": "(status)::text = 'active'::text"}
+        {
+            "indisunique": True,
+            "indisvalid": True,
+            "indisready": True,
+            "indnkeyatts": 2,
+            "has_no_expressions": True,
+            "columns": ["query_key", "platform"],
+            "predicate": "(status)::text = 'active'::text",
+        }
     )
 
     assert not _active_status_predicate_is_valid("status <> 'inactive'")
     assert not _active_status_predicate_is_valid("status in ('active', 'pending')")
     assert not _postgres_active_index_is_valid(
-        {"indisunique": True, "columns": ["platform", "query_key"], "predicate": "status = 'active'"}
+        {
+            "indisunique": True,
+            "indisvalid": True,
+            "indisready": True,
+            "indnkeyatts": 2,
+            "has_no_expressions": True,
+            "columns": ["platform", "query_key"],
+            "predicate": "status = 'active'",
+        }
+    )
+    assert not _postgres_active_index_is_valid(
+        {
+            "indisunique": True,
+            "indisvalid": True,
+            "indisready": True,
+            "indnkeyatts": 2,
+            "has_no_expressions": False,
+            "columns": [None, "platform"],
+            "predicate": "status = 'active'",
+        }
+    )
+    assert not _postgres_active_index_is_valid(
+        {
+            "indisunique": True,
+            "indisvalid": False,
+            "indisready": True,
+            "indnkeyatts": 2,
+            "has_no_expressions": True,
+            "columns": ["query_key", "platform"],
+            "predicate": "status = 'active'",
+        }
+    )
+    assert not _postgres_active_index_is_valid(
+        {
+            "indisunique": True,
+            "indisvalid": True,
+            "indisready": False,
+            "indnkeyatts": 2,
+            "has_no_expressions": True,
+            "columns": ["query_key", "platform"],
+            "predicate": "status = 'active'",
+        }
     )
 
 

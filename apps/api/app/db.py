@@ -78,6 +78,10 @@ def _sync_existing_schema(engine) -> None:
                         """
                         SELECT
                             i.indisunique,
+                            i.indisvalid,
+                            i.indisready,
+                            i.indnkeyatts,
+                            i.indexprs IS NULL AS has_no_expressions,
                             array_agg(a.attname ORDER BY ord.ordinality) AS columns,
                             pg_get_expr(i.indpred, i.indrelid) AS predicate
                         FROM pg_class idx
@@ -85,11 +89,12 @@ def _sync_existing_schema(engine) -> None:
                         JOIN pg_class tbl ON tbl.oid = i.indrelid
                         JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
                         JOIN unnest(i.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON true
-                        JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = ord.attnum
+                        LEFT JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = ord.attnum
                         WHERE ns.nspname = current_schema()
                           AND tbl.relname = 'confirmed_vehicle_series'
                           AND idx.relname = 'uq_confirmed_vehicle_series_active_query_platform'
-                        GROUP BY i.indisunique, i.indpred, i.indrelid
+                          AND ord.ordinality <= i.indnkeyatts
+                        GROUP BY i.indisunique, i.indisvalid, i.indisready, i.indnkeyatts, i.indexprs, i.indpred, i.indrelid
                         """
                     )
                 ).mappings().one_or_none()
@@ -112,6 +117,10 @@ def _postgres_active_index_is_valid(index_row) -> bool:
     columns = list(index_row["columns"] or [])
     return (
         bool(index_row["indisunique"])
+        and bool(index_row["indisvalid"])
+        and bool(index_row["indisready"])
+        and index_row["indnkeyatts"] == 2
+        and bool(index_row["has_no_expressions"])
         and columns == ["query_key", "platform"]
         and _active_status_predicate_is_valid(index_row["predicate"])
     )
