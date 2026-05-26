@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 from threading import Barrier
 
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
@@ -14,7 +15,9 @@ if str(ROOT) not in sys.path:
 
 from app.config import Settings
 from app.db import _active_status_predicate_is_valid, _postgres_active_index_is_valid, init_db, reset_engine_cache
+from app.main import create_app
 from app.models import ConfirmedVehicleSeries, SeriesAlias, SeriesAuditLog, SeriesConflict, SeriesImportBatch
+from app.services.passphrase import hash_passphrase
 from app.services.confirmed_vehicle_series import confirmed_vehicle_series_payload, upsert_confirmed_vehicle_series
 from app.services.series_admin import (
     SeriesMutation,
@@ -24,6 +27,22 @@ from app.services.series_admin import (
     soft_delete_series_record,
     update_series_record,
 )
+
+
+def make_admin_client(
+    tmp_path: Path,
+    *,
+    access_control_enabled: bool = False,
+    raise_server_exceptions: bool = True,
+) -> TestClient:
+    reset_engine_cache()
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'series-routes.db'}",
+        access_control_enabled=access_control_enabled,
+        pass_phrase_hash=hash_passphrase("weekly-secret"),
+    )
+    return TestClient(create_app(settings), raise_server_exceptions=raise_server_exceptions)
 
 
 def test_active_series_index_predicate_validation_is_exact() -> None:
@@ -745,3 +764,124 @@ def test_series_admin_list_filters_paginates_and_counts(tmp_path: Path) -> None:
         deleted = list_series_records(db, status="deleted")
         assert deleted.total == 1
         assert deleted.items[0].id == t11_auto.id
+
+
+def test_series_admin_routes_crud_list_filters_and_audit(tmp_path: Path) -> None:
+    client = make_admin_client(tmp_path)
+
+    create_response = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "7411",
+            "url": "https://k.autohome.com.cn/7411",
+            "title": "风云T11",
+            "source": "manual",
+            "operator": "tester",
+            "reason": "confirmed from admin",
+        },
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    record_id = created["id"]
+    assert created["status"] == "active"
+    assert created["query_key"] == "风云t11"
+
+    active_list = client.get("/api/admin/series?search=风云&platform=autohome&status=active")
+    assert active_list.status_code == 200
+    assert active_list.json()["total"] == 1
+    assert active_list.json()["items"][0]["id"] == record_id
+
+    update_response = client.patch(
+        f"/api/admin/series/{record_id}",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "7412",
+            "url": "https://k.autohome.com.cn/7412",
+            "title": "风云T11 2026",
+            "source": "manual",
+            "operator": "tester",
+            "reason": "corrected id",
+        },
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["series_id"] == "7412"
+
+    delete_response = client.request(
+        "DELETE",
+        f"/api/admin/series/{record_id}",
+        json={"operator": "tester", "reason": "temporary removal"},
+    )
+    assert delete_response.status_code == 200
+    assert delete_response.json()["status"] == "deleted"
+
+    deleted_list = client.get("/api/admin/series?search=7412&platform=autohome&status=deleted")
+    assert deleted_list.status_code == 200
+    assert deleted_list.json()["total"] == 1
+    assert deleted_list.json()["items"][0]["id"] == record_id
+
+    restore_response = client.post(
+        f"/api/admin/series/{record_id}/restore",
+        json={"operator": "tester", "reason": "restore after review"},
+    )
+    assert restore_response.status_code == 200
+    assert restore_response.json()["status"] == "active"
+
+    audit_response = client.get(f"/api/admin/series/audit?record_id={record_id}")
+    assert audit_response.status_code == 200
+    assert [item["action"] for item in audit_response.json()["items"]] == ["create", "update", "delete", "restore"]
+
+
+def test_series_admin_routes_manage_aliases(tmp_path: Path) -> None:
+    client = make_admin_client(tmp_path)
+
+    create_response = client.post(
+        "/api/admin/series/aliases",
+        json={"alias": "奇瑞风云T11", "canonical_query": "风云T11"},
+    )
+    assert create_response.status_code == 201
+    created = create_response.json()
+    alias_id = created["id"]
+    assert created["alias_key"] == "奇瑞风云t11"
+
+    blank_response = client.post(
+        "/api/admin/series/aliases",
+        json={"alias": "   ", "canonical_query": "风云T11"},
+    )
+    assert blank_response.status_code == 400
+
+    list_response = client.get("/api/admin/series/aliases?search=奇瑞")
+    assert list_response.status_code == 200
+    assert list_response.json()["total"] == 1
+    assert list_response.json()["items"][0]["id"] == alias_id
+
+    update_response = client.patch(
+        f"/api/admin/series/aliases/{alias_id}",
+        json={"alias": "风云T11 Pro", "canonical_query": "风云T11"},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["alias"] == "风云T11 Pro"
+
+    delete_response = client.delete(f"/api/admin/series/aliases/{alias_id}")
+    assert delete_response.status_code == 204
+
+    missing_response = client.patch(
+        f"/api/admin/series/aliases/{alias_id}",
+        json={"alias": "风云T11", "canonical_query": "风云T11"},
+    )
+    assert missing_response.status_code == 404
+
+
+def test_series_admin_routes_require_passphrase_when_access_control_enabled(tmp_path: Path) -> None:
+    client = make_admin_client(tmp_path, access_control_enabled=True)
+
+    unauthorized = client.get("/api/admin/series")
+    assert unauthorized.status_code == 401
+
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    authorized = client.get("/api/admin/series")
+    assert authorized.status_code == 200

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 APPROVED_JOB_STATUSES = [
@@ -423,6 +423,74 @@ class AdminFailedJobsDeleteResponse(BaseModel):
     db_expired_job_ids: list[str] = Field(default_factory=list)
     deleted_artifact_dirs: list[str] = Field(default_factory=list)
     redis_error: str | None = None
+
+
+class SeriesMutationRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+    platform: str = Field(min_length=1, max_length=32)
+    series_id: str = Field(min_length=1, max_length=64)
+    operator: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1)
+    url: str | None = None
+    title: str | None = Field(default=None, max_length=255)
+    source: str | None = None
+
+
+class SeriesActionRequest(BaseModel):
+    operator: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1)
+
+
+class SeriesRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    query_key: str
+    query: str
+    platform: str
+    series_id: str
+    status: str
+    url: str | None = None
+    title: str | None = None
+    source: str | None = None
+    import_batch_id: int | None = None
+    deleted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SeriesListResponse(BaseModel):
+    items: list[SeriesRecordResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class SeriesAuditResponse(BaseModel):
+    items: list[dict] = Field(default_factory=list)
+
+
+class SeriesAliasRequest(BaseModel):
+    alias: str = Field(max_length=255)
+    canonical_query: str = Field(max_length=255)
+
+
+class SeriesAliasResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    alias_key: str
+    alias: str
+    canonical_query: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SeriesAliasListResponse(BaseModel):
+    items: list[SeriesAliasResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
 
 
 class TimeReportListResponse(BaseModel):
