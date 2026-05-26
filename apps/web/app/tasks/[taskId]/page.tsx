@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Clock3, Download, Hourglass, Play, RefreshCw, ShieldAlert, XCircle } from "lucide-react";
 import { useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
@@ -202,10 +203,53 @@ function TaskDetailContent() {
           <div className="task-panel-head">
             <div>
               <p className="eyebrow">PROGRESS</p>
-              <h3>{labelFor(task.current_stage, stageLabels)}</h3>
+              <h3 className="task-panel-title">
+                <Play size={18} aria-hidden="true" />
+                {labelFor(task.current_stage, stageLabels)}
+              </h3>
             </div>
             <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
           </div>
+          <section className="task-detail-grid">
+            <div className="eta-card">
+              <div className="detail-card-icon" aria-hidden="true">
+                <Clock3 size={18} />
+              </div>
+              <div>
+                <span>预计完成</span>
+                <strong>{formatEtaMinutes(task.eta_seconds)}</strong>
+                <p>{task.eta_reason || "系统正在根据队列、平台车道和当前阶段估算剩余时间。"}</p>
+              </div>
+              <Hourglass className="eta-card-watermark" size={42} aria-hidden="true" />
+            </div>
+            <div className="action-card">
+              <span>可操作选项</span>
+              <div className="actions vertical-actions">
+                <button className="button secondary" type="button" disabled={Boolean(actionLoading)} onClick={() => void loadTask()}>
+                  <RefreshCw size={16} aria-hidden="true" />
+                  继续等待
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={!manageToken || Boolean(actionLoading)}
+                  title="后端暂未开放该动作"
+                >
+                  <ShieldAlert size={16} aria-hidden="true" />
+                  生成降级结果
+                </button>
+                <button
+                  className="button danger"
+                  type="button"
+                  disabled={!manageToken || Boolean(actionLoading)}
+                  onClick={() => void runManagementAction("cancel")}
+                >
+                  <XCircle size={16} aria-hidden="true" />
+                  取消任务
+                </button>
+              </div>
+            </div>
+          </section>
           <div className="bar" aria-hidden="true">
             <span style={{ width: `${progressPercent(task)}%` }} />
           </div>
@@ -214,6 +258,16 @@ function TaskDetailContent() {
               {task.eta_seconds === null ? "ETA 计算中" : `预计剩余 ${formatEtaMinutes(task.eta_seconds)}`}
             </StatusPill>
             {task.eta_reason ? <StatusPill tone="accent">{task.eta_reason}</StatusPill> : null}
+          </div>
+          <div className="platform-progress-grid">
+            <div className="platform-progress-card">
+              <strong>汽车之家</strong>
+              <p>优先确认车系 ID 与原始口碑入口，当前阶段会持续回填匹配状态和采集结果。</p>
+            </div>
+            <div className="platform-progress-card">
+              <strong>懂车帝</strong>
+              <p>并行检查平台车道、车系识别和评论采集进度，结果产物生成前会保留归档路径。</p>
+            </div>
           </div>
           <div className="task-table-wrap">
             <table className="task-table">
@@ -247,12 +301,15 @@ function TaskDetailContent() {
             </div>
             <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
           </div>
-          <div className="artifact-grid">
+          <div className="result-delivery-grid">
             {resultArtifacts.map((artifact) => (
-              <div className="card" key={artifact.artifact_id}>
-                <h4>{artifactLabel(artifact)}</h4>
+              <div className="delivery-card" key={artifact.artifact_id}>
+                <div className="delivery-card-head">
+                  <Download size={18} aria-hidden="true" />
+                  <h4>{artifactLabel(artifact)}</h4>
+                </div>
+                <StatusPill tone={artifact.downloadable ? "success" : "warning"}>{artifact.downloadable ? "可下载" : "仅归档"}</StatusPill>
                 <p className="artifact-path">{artifact.path}</p>
-                <StatusPill tone="warning">{artifact.downloadable ? "下载入口未暴露" : "不可直接下载"}</StatusPill>
               </div>
             ))}
             {!resultArtifacts.length ? <p className="status-copy">当前详情未返回可展示产物。</p> : null}

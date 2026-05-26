@@ -1880,6 +1880,152 @@ details.card summary {
   font-size: 22px;
 }
 
+.task-panel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-panel-title svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.task-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.65fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.eta-card,
+.action-card,
+.platform-progress-card,
+.delivery-card {
+  position: relative;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  box-shadow: none;
+}
+
+.eta-card {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  padding: var(--density-panel-padding);
+}
+
+.detail-card-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.eta-card span,
+.action-card > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.eta-card strong {
+  display: block;
+  color: var(--text-strong);
+  font-size: clamp(28px, 4vw, 44px);
+  line-height: 1;
+}
+
+.eta-card p,
+.platform-progress-card p {
+  margin: 8px 0 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.eta-card-watermark {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  color: var(--border-strong);
+  opacity: 0.3;
+}
+
+.action-card {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: var(--density-panel-padding);
+  background: var(--surface);
+}
+
+.vertical-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.vertical-actions .button {
+  width: 100%;
+  min-height: 38px;
+  justify-content: flex-start;
+  padding: 9px 12px;
+}
+
+.platform-progress-grid,
+.result-delivery-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.platform-progress-card {
+  display: grid;
+  gap: 6px;
+  padding: var(--density-panel-padding);
+}
+
+.platform-progress-card strong {
+  color: var(--text-strong);
+  font-size: 15px;
+}
+
+.delivery-card {
+  display: grid;
+  gap: 10px;
+  padding: var(--density-panel-padding);
+}
+
+.delivery-card-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.delivery-card-head svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.delivery-card h4 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .task-inline-banner {
   display: flex;
   gap: 10px;
@@ -2316,6 +2462,9 @@ details.card summary {
   .task-filter-grid,
   .task-load-row,
   .task-mode-grid,
+  .task-detail-grid,
+  .platform-progress-grid,
+  .result-delivery-grid,
   .metric-grid,
   .recent-result-grid,
   .artifact-grid {
