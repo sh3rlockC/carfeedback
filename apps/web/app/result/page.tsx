@@ -808,17 +808,18 @@ export default function ResultPage() {
           <div className="download-list">
             {result.status === "expired" ? (
               <p className="status-copy">该任务结果已过期，请重新创建任务。</p>
-            ) : (
+            ) : downloadableCount ? (
               <a className="download-link primary-download" href={resultBundleUrl}>
                 下载全部结果 ZIP
               </a>
+            ) : (
+              <p className="status-copy">暂无可打包下载的结果文件。</p>
             )}
             {result.artifacts.filter(isBusinessDownloadArtifact).slice(0, 4).map((artifact) => (
               <a className="download-link" href={withBasePath(artifact.url)} key={artifact.id}>
                 {artifactFileName(artifact)}
               </a>
             ))}
-            {!downloadableCount && result.status !== "expired" ? <p className="status-copy">暂无可打包下载的结果文件。</p> : null}
           </div>
         </aside>
       </section>
