@@ -3,27 +3,69 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const failures = [];
 
 function read(path) {
-  return readFileSync(join(root, path), "utf8");
+  try {
+    return readFileSync(join(root, path), "utf8");
+  } catch (error) {
+    failures.push(`${path} must be readable (${error.message})`);
+    return null;
+  }
+}
+
+function readJson(path) {
+  const content = read(path);
+  if (content === null) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(content);
+  } catch (error) {
+    failures.push(`${path} must contain valid JSON (${error.message})`);
+    return null;
+  }
 }
 
 function assertIncludes(path, expected) {
   const content = read(path);
+  if (content === null) {
+    return;
+  }
+
   if (!content.includes(expected)) {
-    throw new Error(`${path} must include ${expected}`);
+    failures.push(`${path} must include ${expected}`);
   }
 }
 
 function assertNotIncludes(path, unexpected) {
   const content = read(path);
+  if (content === null) {
+    return;
+  }
+
   if (content.includes(unexpected)) {
-    throw new Error(`${path} must not include ${unexpected}`);
+    failures.push(`${path} must not include ${unexpected}`);
   }
 }
 
-assertIncludes("apps/web/package.json", "\"lucide-react\"");
-assertIncludes("apps/web/package.json", "\"verify:ui\"");
+function assertPackageJsonContracts() {
+  const packageJson = readJson("apps/web/package.json");
+  if (packageJson === null) {
+    return;
+  }
+
+  if (!Object.hasOwn(packageJson.dependencies ?? {}, "lucide-react")) {
+    failures.push("apps/web/package.json dependencies must include lucide-react");
+  }
+
+  if (!Object.hasOwn(packageJson.scripts ?? {}, "verify:ui")) {
+    failures.push("apps/web/package.json scripts must include verify:ui");
+  }
+}
+
+assertPackageJsonContracts();
 assertIncludes("apps/web/app/layout.tsx", "车型口碑工作台");
 assertIncludes("apps/web/app/page.tsx", "WorkbenchOverviewPage");
 assertNotIncludes("apps/web/app/page.tsx", "/passphrase");
@@ -51,4 +93,14 @@ for (const path of copyTargets) {
   assertNotIncludes(path, "72小时");
   assertNotIncludes(path, "每次重新采集");
   assertNotIncludes(path, "情报舱");
+}
+
+if (failures.length > 0) {
+  console.error("UI contract verification failed:");
+  for (const failure of failures) {
+    console.error(`- ${failure}`);
+  }
+  process.exitCode = 1;
+} else {
+  console.log("UI contract verification passed.");
 }
