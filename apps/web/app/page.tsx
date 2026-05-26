@@ -74,7 +74,7 @@ export default function WorkbenchOverviewPage() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
+          setError("暂时无法读取任务总览。");
           setTasks([]);
           setLoad(null);
         }
