@@ -195,10 +195,15 @@ export default function CandidatesPage() {
       <main className="stack-lg">
         <SignalPanel tone="accent" className="stack-lg">
           <SectionHeader
-            eyebrow="第 3 步 / 多车型车系锁定"
+            eyebrow="LEGACY FLOW"
             title="确认竞品车型"
-            copy="每个车型都需要确认汽车之家和懂车帝编号；已有完整 JSON 的历史结果可直接复用。"
+            copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
           />
+          <div className="actions">
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
+            </Link>
+          </div>
           {options.map((option, index) => {
             const draft = comparisonDrafts[index] ?? draftFromOption(option);
             const autohomeOptions = platformOptions(option.resolve.autohome.best, option.resolve.autohome.candidates);
@@ -213,7 +218,7 @@ export default function CandidatesPage() {
                     <p className="eyebrow">车型 {index + 1}</p>
                     <h3 className="platform-title">{option.query}</h3>
                   </div>
-                  <StatusPill tone={draft.reuseJobId ? "success" : "accent"}>{draft.reuseJobId ? "复用历史结果" : "需要新采集"}</StatusPill>
+                  <StatusPill tone={draft.reuseJobId ? "success" : "accent"}>{draft.reuseJobId ? "复用历史结果" : "增量采集"}</StatusPill>
                 </div>
 
                 {option.reuse_options.length ? (
@@ -224,7 +229,7 @@ export default function CandidatesPage() {
                       value={draft.reuseJobId ?? ""}
                       onChange={(event) => updateComparisonDraft(index, { reuseJobId: event.target.value || null })}
                     >
-                      <option value="">重新采集</option>
+                      <option value="">执行增量采集</option>
                       {option.reuse_options.map((item) => (
                         <option key={item.job_id} value={item.job_id}>
                           {item.model_name} · {item.job_id}
@@ -376,10 +381,15 @@ export default function CandidatesPage() {
     <main className="page-grid">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 3 步 / 双平台车系锁定"
+          eyebrow="LEGACY FLOW"
           title="确认平台车系"
-          copy="两个平台的车系都锁定后，worker 会分别投递给 autohome 和 dongchedi 两个采集 agent。"
+          copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
         />
+        <div className="actions">
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
+          </Link>
+        </div>
 
         {!hasAutomaticCandidates ? (
           <div className="card manual-fallback">

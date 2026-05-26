@@ -155,10 +155,15 @@ export default function VehiclePage() {
     <main className="page-grid">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 2 步 / 任务启动台"
-          title="输入车型名称"
-          copy="系统会先锁定汽车之家和懂车帝的车系 ID，确认后再投递给两个采集 agent。"
+          eyebrow="LEGACY FLOW"
+          title="旧流程车型输入"
+          copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
         />
+        <div className="actions">
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
+          </Link>
+        </div>
 
         <div className="meta-row">
           <button className={`quick-chip ${mode === "single" ? "selected" : ""}`} type="button" onClick={() => setMode("single")}>
@@ -241,7 +246,7 @@ export default function VehiclePage() {
               <input id="comparison-end" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
             </div>
           </div>
-          <p className="field-hint">每个车型仍需确认汽车之家和懂车帝编号；72 小时内完整 JSON 结果会作为可复用选项。</p>
+          <p className="field-hint">每个车型仍需确认汽车之家和懂车帝编号；新任务会优先对照长期语料库并采集新增评论。</p>
           {error ? <p className="error">{error}</p> : null}
           <div className="actions">
             <button className="button" type="submit" disabled={loading || comparisonQueries.filter((item) => item.trim()).length < 2}>
@@ -277,7 +282,7 @@ export default function VehiclePage() {
 
         <div className="card">
           <h3>当前会话</h3>
-          <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据仍会在每次任务中重新采集。</p>
+          <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据会进入长期语料库并按增量方式更新。</p>
           <div className="meta-row" style={{ marginTop: 14 }}>
             <StatusPill>后端识别</StatusPill>
             <StatusPill tone="success">会话口令</StatusPill>

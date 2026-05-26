@@ -32,7 +32,7 @@ export default function PassphrasePage() {
 
       clearFlowState();
       setFlowState({ accessVersion: payload.passphrase_version });
-      router.push("/vehicle");
+      router.push("/");
     } catch (err) {
       if (err instanceof ApiError) {
         setError(err.status === 401 ? "口令不正确，请重新输入。" : err.message);
@@ -48,9 +48,9 @@ export default function PassphrasePage() {
     <main className="terminal-grid">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 1 步 / 门禁授权"
-          title="输入本周访问口令"
-          copy="这是部门内部演示入口。口令通过后，当前浏览器会获得一次临时访问会话。"
+          eyebrow="LEGACY ACCESS"
+          title="兼容访问入口"
+          copy="当前工作台默认直接进入；此页面保留用于未来重新启用访问口令。"
         />
 
         <form className="stack" onSubmit={handleSubmit}>
@@ -71,7 +71,7 @@ export default function PassphrasePage() {
 
           <div className="actions">
             <button className="button" type="submit" disabled={loading || !passphrase.trim()}>
-              {loading ? "正在校验口令" : "进入情报舱"}
+              {loading ? "正在校验" : "进入工作台"}
             </button>
           </div>
         </form>
@@ -93,10 +93,10 @@ export default function PassphrasePage() {
         </div>
         <div className="terminal-line">
           <span>下一步</span>
-          <strong>输入车型名称</strong>
+          <strong>进入工作台</strong>
         </div>
         <p className="status-copy">
-          当前 demo 的控制目标是让同事通过一个链接完成车型口碑采集、AI 一页纸和问答，不依赖本地安装。
+          当前工作台已支持直接创建增量采集任务；此页面只作为旧口令流程的兼容保留。
         </p>
       </aside>
     </main>
