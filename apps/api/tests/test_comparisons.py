@@ -108,6 +108,25 @@ def selected_alias_candidates(
     }
 
 
+def selected_alias_candidates_without_keys(
+    *,
+    autohome_query: str,
+    dongchedi_query: str,
+) -> dict:
+    return {
+        "autohome": {
+            "series_id": "7411",
+            "title": autohome_query,
+            "canonical_query": autohome_query,
+        },
+        "dongchedi": {
+            "series_id": "25545",
+            "title": dongchedi_query,
+            "canonical_query": dongchedi_query,
+        },
+    }
+
+
 def seed_confirmed_vehicle(query: str, autohome_id: str, dcd_id: str) -> None:
     session = get_session_local()()
     try:
@@ -286,6 +305,53 @@ def test_create_comparison_accepts_matching_alias_canonical_candidates(tmp_path:
                         autohome_key="fengyun t11",
                         dongchedi_key="fengyun t11",
                         dongchedi_title="风云T11",
+                    ),
+                },
+                {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_create_comparison_rejects_mismatched_alias_canonical_queries_without_keys(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+
+    response = client.post(
+        "/api/comparisons",
+        json={
+            "vehicles": [
+                {
+                    "query": "风云",
+                    "selected_candidates": selected_alias_candidates_without_keys(
+                        autohome_query="风云T11",
+                        dongchedi_query="风云X3L",
+                    ),
+                },
+                {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+
+
+def test_create_comparison_accepts_matching_alias_canonical_queries_without_keys(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+
+    response = client.post(
+        "/api/comparisons",
+        json={
+            "vehicles": [
+                {
+                    "query": "风云",
+                    "selected_candidates": selected_alias_candidates_without_keys(
+                        autohome_query="风云T11",
+                        dongchedi_query="风云T11",
                     ),
                 },
                 {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},

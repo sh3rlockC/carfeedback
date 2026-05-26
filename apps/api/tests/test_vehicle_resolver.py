@@ -369,7 +369,7 @@ def test_vehicle_resolver_returns_candidates_for_duplicate_alias(tmp_path: Path)
     db = SessionLocal()
     try:
         db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云T11"))
-        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云X3L"))
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云 X3L"))
         db.add(
             ConfirmedVehicleSeries(
                 query_key="风云t11",
@@ -390,8 +390,8 @@ def test_vehicle_resolver_returns_candidates_for_duplicate_alias(tmp_path: Path)
         )
         db.add(
             ConfirmedVehicleSeries(
-                query_key="风云x3l",
-                query="风云X3L",
+                query_key="风云 x3l",
+                query="风云 X3L",
                 platform="autohome",
                 series_id="8208",
                 status="active",
@@ -399,8 +399,8 @@ def test_vehicle_resolver_returns_candidates_for_duplicate_alias(tmp_path: Path)
         )
         db.add(
             ConfirmedVehicleSeries(
-                query_key="风云x3l",
-                query="风云X3L",
+                query_key="风云 x3l",
+                query="风云 X3L",
                 platform="dongchedi",
                 series_id="25545",
                 status="active",
@@ -416,10 +416,10 @@ def test_vehicle_resolver_returns_candidates_for_duplicate_alias(tmp_path: Path)
         assert result["autohome"]["best"] is None
         autohome_by_key = {candidate["canonical_query_key"]: candidate for candidate in result["autohome"]["candidates"]}
         dongchedi_by_key = {candidate["canonical_query_key"]: candidate for candidate in result["dongchedi"]["candidates"]}
-        assert set(autohome_by_key) == {"风云t11", "风云x3l"}
-        assert set(dongchedi_by_key) == {"风云t11", "风云x3l"}
+        assert set(autohome_by_key) == {"风云t11", "风云 x3l"}
+        assert set(dongchedi_by_key) == {"风云t11", "风云 x3l"}
         assert autohome_by_key["风云t11"]["canonical_query"] == "风云T11"
-        assert dongchedi_by_key["风云x3l"]["canonical_query"] == "风云X3L"
+        assert dongchedi_by_key["风云 x3l"]["canonical_query"] == "风云 X3L"
     finally:
         db.close()
 
@@ -430,12 +430,12 @@ def test_vehicle_resolver_dedupes_alias_canonical_queries_by_query_key(tmp_path:
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
     try:
-        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云T11"))
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云 T11"))
         db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云  T11"))
         db.add(
             ConfirmedVehicleSeries(
-                query_key="风云t11",
-                query="风云T11",
+                query_key="风云 t11",
+                query="风云 T11",
                 platform="autohome",
                 series_id="7411",
                 status="active",
@@ -443,8 +443,8 @@ def test_vehicle_resolver_dedupes_alias_canonical_queries_by_query_key(tmp_path:
         )
         db.add(
             ConfirmedVehicleSeries(
-                query_key="风云t11",
-                query="风云T11",
+                query_key="风云 t11",
+                query="风云 T11",
                 platform="dongchedi",
                 series_id="9436",
                 status="active",
@@ -455,7 +455,7 @@ def test_vehicle_resolver_dedupes_alias_canonical_queries_by_query_key(tmp_path:
         resolver = VehicleResolver(settings=make_service_settings(tmp_path), db=db)
         result = resolver.resolve("风云")
 
-        assert result["query"] == "风云T11"
+        assert result["query"] == "风云 T11"
         assert result["autohome"]["best"]["series_id"] == "7411"
         assert result["dongchedi"]["best"]["series_id"] == "9436"
     finally:

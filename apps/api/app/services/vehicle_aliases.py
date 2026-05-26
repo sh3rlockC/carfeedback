@@ -23,10 +23,6 @@ def alias_key(value: str) -> str:
     return query_key(value)
 
 
-def _canonical_query_key(value: str) -> str:
-    return query_key(value).replace(" ", "")
-
-
 def _normalize_alias_values(*, alias: str, canonical_query: str) -> tuple[str, str]:
     normalized_alias = alias.strip()
     normalized_canonical_query = canonical_query.strip()
@@ -93,7 +89,7 @@ def resolve_alias(db: Session | None, query: str) -> AliasResolution:
     canonical_by_key: dict[str, str] = {}
     for row in rows:
         canonical_query = row.canonical_query.strip()
-        canonical_key = _canonical_query_key(canonical_query)
+        canonical_key = query_key(canonical_query)
         if canonical_query and canonical_key not in canonical_by_key:
             canonical_by_key[canonical_key] = canonical_query
     canonical_queries = list(canonical_by_key.values())
@@ -130,7 +126,7 @@ def confirmed_payload_for_canonical_candidates(
     if db is None or not canonical_queries:
         return None
 
-    canonical_by_key = {_canonical_query_key(query): query.strip() for query in canonical_queries}
+    canonical_by_key = {query_key(query): query.strip() for query in canonical_queries}
     canonical_keys = list(canonical_by_key)
     records = (
         db.query(ConfirmedVehicleSeries)
