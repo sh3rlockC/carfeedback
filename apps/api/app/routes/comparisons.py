@@ -23,6 +23,7 @@ from app.schemas import (
     ComparisonProgressResponse,
     ComparisonResultResponse,
     ComparisonVehicleOptionResponse,
+    SelectedCandidates,
 )
 from app.services.comparisons import (
     comparison_progress_payload,
@@ -45,6 +46,16 @@ QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 work
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _ensure_same_canonical_vehicle(selected_candidates: SelectedCandidates) -> None:
+    autohome_key = (selected_candidates.autohome.canonical_query_key or "").strip()
+    dongchedi_key = (selected_candidates.dongchedi.canonical_query_key or "").strip()
+    if autohome_key and dongchedi_key and autohome_key != dongchedi_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="selected candidates must belong to the same canonical vehicle",
+        )
 
 
 def _resolve_vehicle(db: Session, settings: Settings, query: str) -> dict:
@@ -150,6 +161,7 @@ def create_comparison(
         selected_dongchedi = vehicle.selected_candidates.dongchedi
         if not selected_autohome.series_id or not selected_dongchedi.series_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmed candidates required for both platforms")
+        _ensure_same_canonical_vehicle(vehicle.selected_candidates)
         if vehicle.reuse_job_id and not is_reusable_job(db, settings, vehicle.reuse_job_id):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"reuse job is not available: {vehicle.reuse_job_id}")
 

@@ -44,6 +44,8 @@ class PlatformCandidate(BaseModel):
     evidence_url: str | None = None
     kind: str | None = None
     note: str | None = None
+    canonical_query: str | None = None
+    canonical_query_key: str | None = None
 
 
 class PlatformCandidateGroup(BaseModel):

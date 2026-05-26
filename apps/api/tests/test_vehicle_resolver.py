@@ -414,6 +414,112 @@ def test_vehicle_resolver_returns_candidates_for_duplicate_alias(tmp_path: Path)
         assert result["query"] == "风云"
         assert {candidate["series_id"] for candidate in result["autohome"]["candidates"]} == {"7411", "8208"}
         assert result["autohome"]["best"] is None
+        autohome_by_key = {candidate["canonical_query_key"]: candidate for candidate in result["autohome"]["candidates"]}
+        dongchedi_by_key = {candidate["canonical_query_key"]: candidate for candidate in result["dongchedi"]["candidates"]}
+        assert set(autohome_by_key) == {"风云t11", "风云x3l"}
+        assert set(dongchedi_by_key) == {"风云t11", "风云x3l"}
+        assert autohome_by_key["风云t11"]["canonical_query"] == "风云T11"
+        assert dongchedi_by_key["风云x3l"]["canonical_query"] == "风云X3L"
+    finally:
+        db.close()
+
+
+def test_vehicle_resolver_dedupes_alias_canonical_queries_by_query_key(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'alias-dedupe.db'}", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云T11"))
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云  T11"))
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="风云t11",
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                status="active",
+            )
+        )
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="风云t11",
+                query="风云T11",
+                platform="dongchedi",
+                series_id="9436",
+                status="active",
+            )
+        )
+        db.commit()
+
+        resolver = VehicleResolver(settings=make_service_settings(tmp_path), db=db)
+        result = resolver.resolve("风云")
+
+        assert result["query"] == "风云T11"
+        assert result["autohome"]["best"]["series_id"] == "7411"
+        assert result["dongchedi"]["best"]["series_id"] == "9436"
+    finally:
+        db.close()
+
+
+def test_vehicle_resolver_falls_back_for_incomplete_duplicate_alias_options(tmp_path: Path) -> None:
+    manifest = write_vehicle_finder_manifest(tmp_path)
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'alias-partial.db'}", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    calls: list[str] = []
+
+    class FallbackRunner:
+        def run_json(self, cmd: list[str], *, cwd=None, timeout: int = 60) -> dict:
+            site = cmd[cmd.index("--site") + 1]
+            calls.append(site)
+            return vehicle_payload(site, "风云")
+
+    try:
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云T11"))
+        db.add(SeriesAlias(alias_key="风云", alias="风云", canonical_query="风云X3L"))
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="风云t11",
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                status="active",
+            )
+        )
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="风云t11",
+                query="风云T11",
+                platform="dongchedi",
+                series_id="9436",
+                status="active",
+            )
+        )
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="风云x3l",
+                query="风云X3L",
+                platform="autohome",
+                series_id="8208",
+                status="active",
+            )
+        )
+        db.commit()
+
+        resolver = VehicleResolver(
+            manifest_path=manifest,
+            tool_runner=FallbackRunner(),
+            settings=make_service_settings(tmp_path),
+            db=db,
+        )
+        result = resolver.resolve("风云")
+
+        assert sorted(calls) == ["autohome", "dongchedi"]
+        assert result["query"] == "风云"
+        assert result["autohome"]["best"]["series_id"] == "8208"
+        assert result["dongchedi"]["best"]["series_id"] == "25545"
     finally:
         db.close()
 
@@ -502,5 +608,51 @@ def test_alias_crud_helpers_leave_transactions_to_caller(tmp_path: Path) -> None
         assert db.get(SeriesAlias, alias_id) is None
         db.rollback()
         assert db.get(SeriesAlias, alias_id) is not None
+    finally:
+        db.close()
+
+
+def test_alias_crud_helpers_validate_blank_values(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'alias-validation.db'}", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        for alias, canonical_query in [("", "风云T11"), ("风云", ""), ("  ", "风云T11"), ("风云", "  ")]:
+            try:
+                create_alias(db, alias=alias, canonical_query=canonical_query)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("blank alias values should raise ValueError")
+
+        record = create_alias(db, alias="风云", canonical_query="风云T11")
+        for alias, canonical_query in [("", "风云T11"), ("风云", "")]:
+            try:
+                update_alias(db, record.id, alias=alias, canonical_query=canonical_query)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("blank alias update values should raise ValueError")
+    finally:
+        db.close()
+
+
+def test_alias_crud_helpers_raise_value_error_when_not_found(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'alias-not-found.db'}", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    db = SessionLocal()
+    try:
+        for action in [
+            lambda: update_alias(db, 123, alias="风云", canonical_query="风云T11"),
+            lambda: delete_alias(db, 123),
+        ]:
+            try:
+                action()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("missing alias should raise ValueError")
     finally:
         db.close()

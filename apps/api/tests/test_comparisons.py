@@ -85,6 +85,29 @@ def selected_candidates(autohome_id: str, dcd_id: str, title: str) -> dict:
     }
 
 
+def selected_alias_candidates(
+    *,
+    autohome_key: str,
+    dongchedi_key: str,
+    autohome_title: str = "风云T11",
+    dongchedi_title: str = "风云X3L",
+) -> dict:
+    return {
+        "autohome": {
+            "series_id": "7411",
+            "title": autohome_title,
+            "canonical_query": autohome_title,
+            "canonical_query_key": autohome_key,
+        },
+        "dongchedi": {
+            "series_id": "25545",
+            "title": dongchedi_title,
+            "canonical_query": dongchedi_title,
+            "canonical_query_key": dongchedi_key,
+        },
+    }
+
+
 def seed_confirmed_vehicle(query: str, autohome_id: str, dcd_id: str) -> None:
     session = get_session_local()()
     try:
@@ -223,6 +246,54 @@ def test_create_comparison_validates_vehicle_count_and_enqueues_worker(tmp_path:
     assert payload["progress_url"] == f"/api/comparisons/{payload['comparison_id']}/progress"
     assert queue.calls[0]["func"] == "worker_jobs.run_comparison_job"
     assert queue.calls[0]["kwargs"]["comparison_id"] == payload["comparison_id"]
+
+
+def test_create_comparison_rejects_mismatched_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+
+    response = client.post(
+        "/api/comparisons",
+        json={
+            "vehicles": [
+                {
+                    "query": "风云",
+                    "selected_candidates": selected_alias_candidates(
+                        autohome_key="fengyun t11",
+                        dongchedi_key="fengyun x3l",
+                    ),
+                },
+                {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},
+            ]
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+
+
+def test_create_comparison_accepts_matching_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+
+    response = client.post(
+        "/api/comparisons",
+        json={
+            "vehicles": [
+                {
+                    "query": "风云",
+                    "selected_candidates": selected_alias_candidates(
+                        autohome_key="fengyun t11",
+                        dongchedi_key="fengyun t11",
+                        dongchedi_title="风云T11",
+                    ),
+                },
+                {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},
+            ]
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_comparison_progress_reports_reused_vehicle_with_zero_eta(tmp_path: Path) -> None:

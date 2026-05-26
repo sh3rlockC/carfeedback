@@ -190,6 +190,65 @@ def test_create_job_accepts_full_refresh_collection_mode(tmp_path: Path) -> None
         session.close()
 
 
+def test_create_job_rejects_mismatched_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+                "dongchedi": {
+                    "series_id": "25545",
+                    "title": "风云X3L",
+                    "canonical_query": "风云X3L",
+                    "canonical_query_key": "fengyun x3l",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+
+
+def test_create_job_accepts_matching_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+                "dongchedi": {
+                    "series_id": "9436",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+
+
 def test_progress_endpoint_supports_incremental_check_stage(tmp_path: Path) -> None:
     client, _ = make_client(tmp_path)
     verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})

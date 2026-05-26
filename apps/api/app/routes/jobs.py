@@ -27,6 +27,7 @@ from app.schemas import (
     JobOverviewResponse,
     JobProgressResponse,
     JobResultResponse,
+    SelectedCandidates,
     StageStatusItem,
     TimeReportListResponse,
     TimeReportResponse,
@@ -55,6 +56,16 @@ QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 work
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _ensure_same_canonical_vehicle(selected_candidates: SelectedCandidates) -> None:
+    autohome_key = (selected_candidates.autohome.canonical_query_key or "").strip()
+    dongchedi_key = (selected_candidates.dongchedi.canonical_query_key or "").strip()
+    if autohome_key and dongchedi_key and autohome_key != dongchedi_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="selected candidates must belong to the same canonical vehicle",
+        )
 
 
 def _is_result_bundle_artifact(path: str) -> bool:
@@ -103,6 +114,7 @@ def create_job(
     selected_dongchedi = payload.selected_candidates.dongchedi
     if not selected_autohome.series_id or not selected_dongchedi.series_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmed candidates required for both platforms")
+    _ensure_same_canonical_vehicle(payload.selected_candidates)
 
     job = Job(
         query=payload.query,
