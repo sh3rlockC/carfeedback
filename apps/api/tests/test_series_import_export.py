@@ -555,6 +555,20 @@ def test_series_import_commit_api_persists_multipart_file(tmp_path: Path) -> Non
     assert list_response.json()["items"][0]["series_id"] == "7411"
 
 
+def test_series_import_preview_api_accepts_multipart_xlsx_file(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _xlsx([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    response = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("series.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["new"] == 1
+    assert response.json()["rows"][0]["query_key"] == "风云t11"
+
+
 def test_series_import_api_rejects_bad_file_and_blank_operator(tmp_path: Path) -> None:
     client = _admin_client(tmp_path)
     content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
@@ -585,6 +599,18 @@ def test_series_import_api_rejects_oversized_upload_by_content_length(tmp_path: 
             "content-type": "text/csv",
             "content-length": str(5 * 1024 * 1024 + 1),
         },
+    )
+
+    assert response.status_code == 413
+
+
+def test_series_import_api_rejects_oversized_stream_without_content_length(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+
+    response = client.post(
+        "/api/admin/series/import/preview",
+        content=b"x" * (5 * 1024 * 1024 + 1),
+        headers={"x-filename": "series.csv", "content-type": "text/csv"},
     )
 
     assert response.status_code == 413
@@ -630,11 +656,25 @@ def test_series_import_api_rejects_content_transfer_encoding_and_bad_multipart(t
         content=b"not multipart",
         headers={"content-type": "multipart/form-data"},
     )
+    missing_close_body = (
+        b"--series-boundary\r\n"
+        b'Content-Disposition: form-data; name="file"; filename="series.csv"\r\n'
+        b"Content-Type: text/csv\r\n\r\n"
+        + content
+        + b"\r\n"
+    )
+    missing_close = client.post(
+        "/api/admin/series/import/preview",
+        content=missing_close_body,
+        headers={"content-type": "multipart/form-data; boundary=series-boundary"},
+    )
 
     assert encoded_response.status_code == 400
     assert encoded_response.json()["detail"] == "content-transfer-encoding is not supported"
     assert bad_multipart.status_code == 400
     assert bad_multipart.json()["detail"] == "invalid multipart upload"
+    assert missing_close.status_code == 400
+    assert missing_close.json()["detail"] == "invalid multipart upload"
 
 
 def test_series_export_api_returns_xlsx_after_route_seed(tmp_path: Path) -> None:

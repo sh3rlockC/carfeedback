@@ -125,8 +125,12 @@ async def _read_import_upload(request: Request) -> tuple[str, bytes]:
         )
         if not message.is_multipart():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid multipart upload")
+        if message.defects:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid multipart upload")
         upload: tuple[str, bytes] | None = None
         for part in message.iter_parts():
+            if part.defects:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid multipart upload")
             if part.get_content_disposition() != "form-data":
                 continue
             if part.get_param("name", header="content-disposition") != "file":
