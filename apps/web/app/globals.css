@@ -2588,6 +2588,230 @@ details.card summary {
   line-height: 1.6;
 }
 
+/* Hidden series admin */
+.series-admin {
+  min-width: 0;
+}
+
+.series-admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(330px, 0.55fr);
+  gap: var(--density-gap);
+  align-items: start;
+}
+
+.alias-admin-grid {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.38fr);
+}
+
+.series-admin-toolbar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+  justify-content: space-between;
+}
+
+.series-admin-status {
+  display: flex;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.series-filter-grid,
+.series-form-grid,
+.import-control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  align-items: end;
+}
+
+.series-form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.series-form-wide {
+  grid-column: 1 / -1;
+}
+
+.admin-editor {
+  background: var(--bg-soft);
+}
+
+.admin-editor .field input,
+.admin-editor .field select,
+.series-admin .field input,
+.series-admin .field select {
+  min-height: var(--density-control-height);
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.admin-inline-error {
+  margin-top: 10px;
+  font-size: 13px;
+}
+
+.dense-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.dense-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.dense-table th,
+.dense-table td {
+  max-width: 260px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: var(--density-row-padding);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.dense-table th {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.dense-table td {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+
+.dense-table td strong,
+.dense-table td span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dense-table td strong {
+  color: var(--text-strong);
+}
+
+.dense-table td span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.dense-table tr.selected-row td {
+  background: var(--primary-soft);
+}
+
+.table-action-row {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.table-action-row .table-action {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  cursor: pointer;
+}
+
+.table-action-danger {
+  color: var(--danger);
+}
+
+.audit-panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audit-panel h2 svg {
+  color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.audit-list {
+  display: grid;
+  gap: 8px;
+  max-height: 390px;
+  overflow: auto;
+}
+
+.audit-row {
+  display: grid;
+  grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  gap: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--surface);
+}
+
+.audit-row strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.audit-row span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-row p {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alias-search-field {
+  width: min(520px, 100%);
+}
+
+.admin-preview {
+  background: var(--bg-soft);
+}
+
+.admin-preview h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.admin-preview h2 svg {
+  color: var(--primary);
+}
+
+.import-summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.admin-preview-table {
+  min-width: 860px;
+}
+
 @keyframes stage-in {
   from {
     opacity: 0;
@@ -2624,6 +2848,8 @@ details.card summary {
   .terminal-grid,
   .overview-hero,
   .overview-grid,
+  .series-admin-grid,
+  .alias-admin-grid,
   .platform-grid,
   .collector-grid,
   .result-dashboard-hero,
@@ -2686,6 +2912,9 @@ details.card summary {
   }
 
   .task-filter-grid,
+  .series-filter-grid,
+  .series-form-grid,
+  .import-control-grid,
   .task-load-row,
   .task-mode-grid,
   .task-detail-grid,

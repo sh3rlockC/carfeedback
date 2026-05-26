@@ -78,6 +78,11 @@ assertIncludes("apps/web/lib/density.ts", "koubei-density-mode");
 assertIncludes("apps/web/app/tasks/[taskId]/page.tsx", "预计完成");
 assertIncludes("apps/web/app/tasks/[taskId]/page.tsx", "继续等待");
 assertIncludes("apps/web/app/tasks/[taskId]/page.tsx", "生成降级结果");
+assertIncludes("apps/web/app/series-admin/page.tsx", "SeriesAdminPage");
+assertIncludes("apps/web/app/series-admin/page.tsx", "series-admin");
+assertIncludes("apps/web/app/series-admin/page.tsx", "别名");
+assertIncludes("apps/web/app/series-admin/page.tsx", "导入预览");
+assertNotIncludes("apps/web/app/components/app-chrome.tsx", "/series-admin");
 
 const copyTargets = [
   "apps/web/app/components/app-chrome.tsx",

@@ -368,3 +368,91 @@ export type TaskLoadResponse = {
   queued_task_count: number;
   platforms: Record<string, { available: number; total: number }>;
 };
+
+export type SeriesRecord = {
+  id: number;
+  query_key: string;
+  query: string;
+  platform: string;
+  series_id: string;
+  status: string;
+  url: string | null;
+  title: string | null;
+  source: string | null;
+  import_batch_id: number | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SeriesListResponse = {
+  items: SeriesRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesMutationRequest = {
+  query: string;
+  platform: "autohome" | "dongchedi";
+  series_id: string;
+  operator: string;
+  reason: string;
+  url?: string | null;
+  title?: string | null;
+  source?: string | null;
+};
+
+export type SeriesAuditItem = {
+  id: number;
+  record_id: number | null;
+  action: string;
+  operator: string;
+  reason: string;
+  old_value: Record<string, unknown>;
+  new_value: Record<string, unknown>;
+  created_at: string;
+};
+
+export type SeriesAuditResponse = {
+  items: SeriesAuditItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesAlias = {
+  id: number;
+  alias_key: string;
+  alias: string;
+  canonical_query: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SeriesAliasListResponse = {
+  items: SeriesAlias[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesImportRow = {
+  row_number: number;
+  query: string | null;
+  platform: string | null;
+  series_id: string | null;
+  url: string | null;
+  title: string | null;
+  source: string | null;
+  status: string;
+  query_key: string | null;
+  error: string | null;
+  existing_value_json: Record<string, unknown> | null;
+  incoming_value_json: Record<string, unknown> | null;
+};
+
+export type SeriesImportPreviewResponse = {
+  summary: Record<string, number>;
+  rows: SeriesImportRow[];
+};
