@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { Filter, ListChecks, Plus, RotateCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
+import { StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
 import {
   formatDateTime,
@@ -118,6 +119,28 @@ export default function TasksPage() {
     return entries;
   }, [effectiveLoad.platforms, platformStatus]);
 
+  const platformLaneSummary = useMemo(() => {
+    if (loadIssue) {
+      return loadIssue.message;
+    }
+    if (!filteredPlatforms.length) {
+      return "暂无匹配车道";
+    }
+    return filteredPlatforms.map(([platform, value]) => `${platform} ${value.available}/${value.total}`).join(" / ");
+  }, [filteredPlatforms, loadIssue]);
+
+  const filteredLaneCounts = useMemo(
+    () =>
+      filteredPlatforms.reduce(
+        (total, [, value]) => ({
+          available: total.available + value.available,
+          total: total.total + value.total,
+        }),
+        { available: 0, total: 0 },
+      ),
+    [filteredPlatforms],
+  );
+
   const filteredTasks = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
     return tasks
@@ -133,40 +156,75 @@ export default function TasksPage() {
 
   return (
     <main className="stack-lg task-workbench">
-      <SignalPanel className="stack">
-        <div className="task-page-head">
-          <SectionHeader eyebrow="TASK CENTER" title="任务中心" />
+      <section className="flat-panel">
+        <div className="page-head">
+          <div>
+            <p className="eyebrow">TASK CENTER</p>
+            <h1>
+              <ListChecks size={24} />
+              任务中心
+            </h1>
+            <p className="helper">筛选历史任务、查看运行状态，并进入结果交付页。</p>
+          </div>
           <Link className="button" href="/tasks/new">
-            创建任务
+            <Plus size={16} />
+            新建任务
           </Link>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
 
-        <div className="task-load-row">
-          <div>
+        <section className="metric-grid task-metric-grid" aria-label="任务中心指标">
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <ListChecks size={18} />
+            </div>
             <span>运行中</span>
-            <strong>{effectiveLoad.running_task_count}</strong>
-          </div>
-          <div>
+            <strong>{loading ? "-" : effectiveLoad.running_task_count}</strong>
+            <p>当前执行任务</p>
+          </article>
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <ListChecks size={18} />
+            </div>
             <span>排队中</span>
-            <strong>{effectiveLoad.queued_task_count}</strong>
-          </div>
-          <div className="task-load-platforms">
+            <strong>{loading ? "-" : effectiveLoad.queued_task_count}</strong>
+            <p>等待调度任务</p>
+          </article>
+          <article className="metric-tile task-platform-metric">
+            <div className="metric-icon">
+              <Filter size={18} />
+            </div>
             <span>平台可用车道</span>
-            <strong>
-              {filteredPlatforms.length
-                ? filteredPlatforms.map(([platform, value]) => `${platform} ${value.available}/${value.total}`).join(" / ")
-                : loadIssue
-                  ? loadIssue.message
-                  : "暂无平台数据"}
-            </strong>
-          </div>
-        </div>
+            <strong>{loading ? "-" : filteredLaneCounts.total ? `${filteredLaneCounts.available}/${filteredLaneCounts.total}` : "未知"}</strong>
+            <p>{platformLaneSummary}</p>
+          </article>
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <Filter size={18} />
+            </div>
+            <span>筛选结果</span>
+            <strong>{loading ? "-" : filteredTasks.length}</strong>
+            <p>任务总数 {tasks.length}</p>
+          </article>
+        </section>
         {loadIssue?.kind === "error" ? <p className="error">{loadIssue.message}</p> : null}
-      </SignalPanel>
+      </section>
 
-      <SignalPanel className="stack" tone="accent">
+      <section className="flat-panel filter-panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">FILTERS</p>
+            <h2>
+              <Filter size={18} />
+              筛选
+            </h2>
+          </div>
+          <button className="icon-text-button" type="button" onClick={() => window.location.reload()}>
+            <RotateCw size={16} />
+            刷新
+          </button>
+        </div>
         <div className="task-filter-grid">
           <label className="field">
             <span>状态</span>
@@ -219,14 +277,14 @@ export default function TasksPage() {
             <span>平台状态</span>
             <select value={platformStatus} onChange={(event) => setPlatformStatus(event.target.value as PlatformStatusFilter)}>
               <option value="all">全部</option>
-              <option value="available">可用</option>
-              <option value="crowded">拥挤</option>
+              <option value="available">有空闲车道</option>
+              <option value="crowded">车道占满</option>
             </select>
           </label>
         </div>
-      </SignalPanel>
+      </section>
 
-      <SignalPanel className="stack">
+      <section className="flat-panel">
         <div className="task-table-head">
           <strong>{loading ? "读取中" : `${filteredTasks.length} 个任务`}</strong>
           {loadIssue ? (
@@ -243,10 +301,11 @@ export default function TasksPage() {
                 <th>类型</th>
                 <th>状态</th>
                 <th>阶段</th>
-                <th>ETA</th>
+                <th>预计</th>
                 <th>标记</th>
                 <th>创建</th>
                 <th>完成</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -273,17 +332,22 @@ export default function TasksPage() {
                   </td>
                   <td>{formatDateTime(task.created_at)}</td>
                   <td>{formatDateTime(task.completed_at)}</td>
+                  <td>
+                    <Link className="table-action" href={`/tasks/${task.task_id}`}>
+                      查看
+                    </Link>
+                  </td>
                 </tr>
               ))}
               {!filteredTasks.length ? (
                 <tr>
-                  <td colSpan={8}>没有匹配任务。</td>
+                  <td colSpan={9}>没有匹配任务。</td>
                 </tr>
               ) : null}
             </tbody>
           </table>
         </div>
-      </SignalPanel>
+      </section>
     </main>
   );
 }

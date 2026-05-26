@@ -1590,6 +1590,37 @@ details.card summary {
   min-width: 0;
 }
 
+.page-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: var(--density-gap);
+}
+
+.page-head h1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-strong);
+  font-size: clamp(26px, 3vw, 38px);
+  line-height: 1.05;
+}
+
+.page-head h1 svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.page-head .helper {
+  max-width: 720px;
+  margin: 10px 0 0;
+  color: var(--muted-strong);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .task-create-layout {
   max-width: 920px;
 }
@@ -1643,7 +1674,30 @@ details.card summary {
 .task-filter-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  gap: 10px;
+}
+
+.filter-panel {
+  background: var(--bg-soft);
+}
+
+.filter-panel .panel-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-panel .panel-head h2 svg {
+  color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.task-metric-grid {
+  margin-top: 0;
+}
+
+.task-platform-metric {
+  min-width: 0;
 }
 
 .task-table-wrap {
@@ -1655,7 +1709,7 @@ details.card summary {
 
 .task-table {
   width: 100%;
-  min-width: 920px;
+  min-width: 1040px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -1693,6 +1747,11 @@ details.card summary {
 .task-link span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.task-table .table-action {
+  min-width: 44px;
+  padding: 0 10px;
 }
 
 .task-mode-grid,
