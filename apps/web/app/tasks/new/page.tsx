@@ -86,15 +86,25 @@ export default function NewTaskPage() {
     <main className="stack-lg task-workbench task-create-layout">
       <SignalPanel className="stack">
         <SectionHeader eyebrow="CREATE TASK" title="创建任务" />
-        <div className="task-mode-grid">
-          <button className={`mode-card ${mode === "single" ? "selected" : ""}`} type="button" onClick={() => setMode("single")}>
+        <div className="task-mode-grid" role="group" aria-label="任务类型">
+          <button
+            className={`mode-card ${mode === "single" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("single")}
+            aria-pressed={mode === "single"}
+          >
             <Search size={18} aria-hidden="true" />
             <span>
               <strong>单车型查询</strong>
               <small>一个车型的增量采集、报告和交付物。</small>
             </span>
           </button>
-          <button className={`mode-card ${mode === "comparison" ? "selected" : ""}`} type="button" onClick={() => setMode("comparison")}>
+          <button
+            className={`mode-card ${mode === "comparison" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("comparison")}
+            aria-pressed={mode === "comparison"}
+          >
             <GitCompareArrows size={18} aria-hidden="true" />
             <span>
               <strong>多车型对比</strong>
