@@ -55,6 +55,9 @@ def decode_session_token(token: str, settings: Settings) -> dict[str, Any]:
 
 
 def require_passphrase_session(request: Request, settings: Settings) -> None:
+    if not settings.access_control_enabled:
+        return
+
     token = request.cookies.get(settings.session_cookie_name)
     if not token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="passphrase session required")

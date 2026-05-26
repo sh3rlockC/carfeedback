@@ -40,6 +40,7 @@ def make_client(
     workflow_client: FakeTaskWorkflowClient | FailingTaskWorkflowClient | None = None,
     *,
     raise_server_exceptions: bool = True,
+    access_control_enabled: bool = True,
 ) -> tuple[TestClient, FakeTaskWorkflowClient | FailingTaskWorkflowClient]:
     reset_engine_cache()
     settings = Settings(
@@ -47,6 +48,7 @@ def make_client(
         database_url=f"sqlite+pysqlite:///{tmp_path / 'tasks-api.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
+        access_control_enabled=access_control_enabled,
         session_secret="test-secret",
         artifact_root=str(tmp_path / "artifacts"),
         workspace_root="/Users/xyc/Documents/codexwork",
@@ -117,6 +119,24 @@ def test_post_tasks_creates_single_vehicle_task_and_returns_access_urls(tmp_path
         assert [event.event_type for event in task.events] == ["created"]
     finally:
         session.close()
+
+
+def test_post_tasks_allows_direct_access_when_access_control_disabled(tmp_path: Path) -> None:
+    client, fake_workflow = make_client(tmp_path, access_control_enabled=False)
+
+    response = client.post(
+        "/api/tasks",
+        json={"task_type": "single", "vehicles": [{"query": "风云X3 PLUS"}]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "queued"
+    assert fake_workflow.started == [payload["task_id"]]
+
+    list_response = client.get("/api/tasks")
+    assert list_response.status_code == 200
+    assert list_response.json()[0]["task_id"] == payload["task_id"]
 
 
 def test_get_tasks_returns_list_after_passphrase_access(tmp_path: Path) -> None:

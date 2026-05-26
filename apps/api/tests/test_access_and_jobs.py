@@ -52,6 +52,7 @@ def make_client(
         database_url=f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
+        access_control_enabled=True,
         session_secret="test-secret",
         artifact_root=str(tmp_path / "artifacts"),
         workspace_root="/Users/xyc/Documents/codexwork",

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     pass_phrase_hash: str = ""
     pass_phrase_version: str = "2026-W17"
+    access_control_enabled: bool = False
     session_secret: str = "change-me"
     session_cookie_name: str = "koubei_access"
     session_ttl_seconds: int = 4 * 60 * 60

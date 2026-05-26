@@ -20,12 +20,13 @@ from app.services.passphrase import hash_passphrase
 from app.services.vehicle_resolver import VehicleResolver
 
 
-def make_client(tmp_path: Path) -> TestClient:
+def make_client(tmp_path: Path, *, access_control_enabled: bool = True) -> TestClient:
     settings = Settings(
         app_env="test",
         database_url=f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
+        access_control_enabled=access_control_enabled,
         session_secret="test-secret",
         workspace_root="/Users/xyc/Documents/codexwork",
     )
@@ -80,6 +81,39 @@ def test_vehicle_resolve_returns_normalized_candidates(tmp_path: Path, monkeypat
     payload = response.json()
     assert payload["autohome"]["best"]["series_id"] == "8089"
     assert payload["dongchedi"]["best"]["series_id"] == "25398"
+
+
+def test_vehicle_resolve_allows_direct_access_when_access_control_disabled(tmp_path: Path, monkeypatch) -> None:
+    client = make_client(tmp_path, access_control_enabled=False)
+
+    sample_payload = {
+        "query": "风云X3 PLUS",
+        "autohome": {
+            "best": {
+                "series_id": "8089",
+                "url": "https://k.autohome.com.cn/8089",
+                "title": "风云X3 PLUS",
+                "source": "fixture:autohome",
+            },
+            "candidates": [],
+        },
+        "dongchedi": {
+            "best": {
+                "series_id": "25398",
+                "url": "https://www.dongchedi.com/auto/series/25398",
+                "title": "风云X3 PLUS",
+                "source": "fixture:dcd",
+            },
+            "candidates": [],
+        },
+    }
+
+    monkeypatch.setattr("app.routes.vehicles.VehicleResolver.resolve", lambda self, query: sample_payload)
+
+    response = client.post("/api/vehicles/resolve", json={"query": "风云X3 PLUS"})
+
+    assert response.status_code == 200
+    assert response.json()["query"] == "风云X3 PLUS"
 
 
 def test_vehicle_resolve_rejects_malformed_service_output(tmp_path: Path, monkeypatch) -> None:
