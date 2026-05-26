@@ -80,7 +80,10 @@ def confirmed_vehicle_series_payload(db: Session | None, query: str) -> dict[str
     key = query_key(query)
     records = (
         db.query(ConfirmedVehicleSeries)
-        .filter(ConfirmedVehicleSeries.query_key == key)
+        .filter(
+            ConfirmedVehicleSeries.query_key == key,
+            ConfirmedVehicleSeries.status == "active",
+        )
         .all()
     )
     records_by_platform = {record.platform: record for record in records if record.series_id}

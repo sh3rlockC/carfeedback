@@ -13,6 +13,15 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import init_db, reset_engine_cache
 from app.models import ConfirmedVehicleSeries, SeriesAlias, SeriesAuditLog, SeriesConflict, SeriesImportBatch
+from app.services.confirmed_vehicle_series import confirmed_vehicle_series_payload
+from app.services.series_admin import (
+    SeriesMutation,
+    create_series_record,
+    list_series_records,
+    restore_series_record,
+    soft_delete_series_record,
+    update_series_record,
+)
 
 
 def test_series_admin_tables_and_columns_exist(tmp_path: Path) -> None:
@@ -156,3 +165,120 @@ def test_legacy_confirmed_vehicle_series_schema_sync_without_jobs(tmp_path: Path
         row = conn.execute(text("SELECT status, import_batch_id FROM confirmed_vehicle_series")).one()
         assert row.status == "active"
         assert row.import_batch_id is None
+
+
+def test_series_admin_create_update_delete_restore_with_audit(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        created = create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                url="https://k.autohome.com.cn/7411",
+                title="风云T11",
+                source="manual",
+                operator="tester",
+                reason="confirmed from old system",
+            ),
+        )
+        assert created.status == "active"
+
+        updated = update_series_record(
+            db,
+            created.id,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7412",
+                url="https://k.autohome.com.cn/7412",
+                title="风云T11",
+                source="manual",
+                operator="tester",
+                reason="corrected series id",
+            ),
+        )
+        assert updated.series_id == "7412"
+
+        soft_delete_series_record(db, created.id, operator="tester", reason="temporary removal")
+        assert list_series_records(db, status="deleted").items[0].series_id == "7412"
+
+        restore_series_record(db, created.id, operator="tester", reason="restore after review")
+        assert list_series_records(db, status="active").items[0].series_id == "7412"
+
+        actions = [row.action for row in db.query(SeriesAuditLog).order_by(SeriesAuditLog.id).all()]
+        assert actions == ["create", "update", "delete", "restore"]
+
+
+def test_series_admin_blocks_unresolved_active_conflict(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        first = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="tester", reason="first"),
+        )
+        second = create_series_record(
+            db,
+            SeriesMutation(query="风云X3L", platform="autohome", series_id="8208", operator="tester", reason="second"),
+        )
+
+        result = update_series_record(
+            db,
+            second.id,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="8208", operator="tester", reason="rename"),
+            allow_conflict=False,
+        )
+
+        assert result.id == second.id
+        conflicts = db.query(SeriesConflict).all()
+        assert len(conflicts) == 1
+        assert conflicts[0].existing_value_json["id"] == first.id
+        assert conflicts[0].incoming_value_json["id"] == second.id
+
+
+def test_confirmed_vehicle_series_payload_ignores_deleted_rows(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        db.add_all(
+            [
+                ConfirmedVehicleSeries(
+                    query_key="风云t11",
+                    query="风云T11",
+                    platform="autohome",
+                    series_id="7411",
+                    status="active",
+                ),
+                ConfirmedVehicleSeries(
+                    query_key="风云t11",
+                    query="风云T11",
+                    platform="dongchedi",
+                    series_id="5498",
+                    status="deleted",
+                ),
+            ]
+        )
+        db.commit()
+
+        assert confirmed_vehicle_series_payload(db, "风云T11") is None
+
+        deleted = db.query(ConfirmedVehicleSeries).filter_by(platform="dongchedi").one()
+        deleted.status = "active"
+        db.commit()
+
+        assert confirmed_vehicle_series_payload(db, "风云T11") is not None
