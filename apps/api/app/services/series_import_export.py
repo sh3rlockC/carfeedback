@@ -11,12 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.models import ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
 from app.services.confirmed_vehicle_series import PLATFORMS, query_key
-from app.services.series_admin import SeriesMutation, create_series_record, now
+from app.services.series_admin import now
 
 IMPORT_SUMMARY_KEYS = ("new", "duplicate", "conflict", "invalid")
 REQUIRED_FIELDS = ("query", "platform", "series_id")
 OPTIONAL_FIELDS = ("url", "title", "source")
 SUPPORTED_EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
+HEADER_ERROR = "missing header row"
 
 
 @dataclass(frozen=True)
@@ -57,11 +58,21 @@ def _normalize_row(raw: dict[str, Any], row_number: int) -> dict[str, str]:
     return row
 
 
+def _validate_headers(headers: list[str]) -> None:
+    normalized = {header.strip() for header in headers if header.strip()}
+    if not normalized:
+        raise ValueError(HEADER_ERROR)
+    missing = [field for field in REQUIRED_FIELDS if field not in normalized]
+    if missing:
+        raise ValueError(f"missing columns: {', '.join(missing)}")
+
+
 def _read_csv_rows(content: bytes) -> list[dict[str, str]]:
     text = content.decode("utf-8-sig")
     reader = csv.DictReader(StringIO(text))
     if reader.fieldnames is None:
-        return []
+        raise ValueError(HEADER_ERROR)
+    _validate_headers(reader.fieldnames)
     return [_normalize_row(raw, index) for index, raw in enumerate(reader, start=2)]
 
 
@@ -72,9 +83,10 @@ def _read_excel_rows(content: bytes) -> list[dict[str, str]]:
     try:
         header_values = next(rows)
     except StopIteration:
-        return []
+        raise ValueError(HEADER_ERROR)
 
     headers = [_cell_to_text(value) for value in header_values]
+    _validate_headers(headers)
     parsed_rows: list[dict[str, str]] = []
     for index, values in enumerate(rows, start=2):
         raw = {header: value for header, value in zip(headers, values, strict=False) if header}
@@ -106,6 +118,10 @@ def _snapshot(record: ConfirmedVehicleSeries) -> dict[str, Any]:
     }
 
 
+def _active_snapshot(record: ConfirmedVehicleSeries) -> dict[str, Any]:
+    return _snapshot(record)
+
+
 def _incoming(row: dict[str, str], key: str) -> dict[str, Any]:
     return {
         "query_key": key,
@@ -118,16 +134,14 @@ def _incoming(row: dict[str, str], key: str) -> dict[str, Any]:
     }
 
 
-def _active_record(db: Session, *, key: str, platform: str) -> ConfirmedVehicleSeries | None:
-    return (
+def _active_working_set(db: Session) -> dict[tuple[str, str], dict[str, Any]]:
+    records = (
         db.query(ConfirmedVehicleSeries)
-        .filter(
-            ConfirmedVehicleSeries.query_key == key,
-            ConfirmedVehicleSeries.platform == platform,
-            ConfirmedVehicleSeries.status == "active",
-        )
-        .one_or_none()
+        .filter(ConfirmedVehicleSeries.status == "active")
+        .order_by(ConfirmedVehicleSeries.query.asc(), ConfirmedVehicleSeries.platform.asc(), ConfirmedVehicleSeries.id.asc())
+        .all()
     )
+    return {(record.query_key, record.platform): _active_snapshot(record) for record in records}
 
 
 def _invalid_reason(row: dict[str, str]) -> str | None:
@@ -139,9 +153,10 @@ def _invalid_reason(row: dict[str, str]) -> str | None:
     return None
 
 
-def preview_series_import(db: Session, *, filename: str, content: bytes) -> ImportPreview:
+def _classify_rows(db: Session, *, filename: str, content: bytes) -> ImportPreview:
     summary = {key: 0 for key in IMPORT_SUMMARY_KEYS}
     previews: list[ImportRowPreview] = []
+    working_set = _active_working_set(db)
 
     for row in _read_rows(filename, content):
         row_number = int(row["_row_number"])
@@ -166,17 +181,16 @@ def preview_series_import(db: Session, *, filename: str, content: bytes) -> Impo
             continue
 
         assert key is not None
-        existing = _active_record(db, key=key, platform=row["platform"])
         incoming = _incoming(row, key)
-        if existing is None:
+        identity = (key, row["platform"])
+        existing_value = working_set.get(identity)
+        if existing_value is None:
             status = "new"
-            existing_value = None
-        elif existing.series_id == row["series_id"]:
+            working_set[identity] = incoming
+        elif existing_value["series_id"] == row["series_id"]:
             status = "duplicate"
-            existing_value = _snapshot(existing)
         else:
             status = "conflict"
-            existing_value = _snapshot(existing)
 
         summary[status] += 1
         previews.append(
@@ -198,29 +212,34 @@ def preview_series_import(db: Session, *, filename: str, content: bytes) -> Impo
     return ImportPreview(filename=filename, summary=summary, rows=previews)
 
 
+def preview_series_import(db: Session, *, filename: str, content: bytes) -> ImportPreview:
+    return _classify_rows(db, filename=filename, content=content)
+
+
 def commit_series_import(db: Session, *, filename: str, content: bytes, operator: str) -> ImportPreview:
-    preview = preview_series_import(db, filename=filename, content=content)
+    preview = _classify_rows(db, filename=filename, content=content)
     batch = SeriesImportBatch(source="import", filename=filename, operator=operator, summary_json=preview.summary)
     db.add(batch)
     db.flush()
 
     for row in preview.rows:
         if row.status == "new":
-            record = create_series_record(
-                db,
-                SeriesMutation(
+            current_time = now()
+            db.add(
+                ConfirmedVehicleSeries(
+                    query_key=row.query_key or "",
                     query=row.query or "",
                     platform=row.platform or "",
                     series_id=row.series_id or "",
+                    status="active",
                     url=row.url,
                     title=row.title,
                     source=row.source,
-                    operator=operator,
-                    reason=f"import batch {batch.id}",
-                ),
+                    import_batch_id=batch.id,
+                    created_at=current_time,
+                    updated_at=current_time,
+                )
             )
-            record.import_batch_id = batch.id
-            db.flush()
         elif row.status == "conflict":
             db.add(
                 SeriesConflict(
@@ -248,7 +267,12 @@ def export_series_excel(db: Session) -> bytes:
 
     records = (
         db.query(ConfirmedVehicleSeries)
-        .order_by(ConfirmedVehicleSeries.query.asc(), ConfirmedVehicleSeries.platform.asc())
+        .order_by(
+            ConfirmedVehicleSeries.query.asc(),
+            ConfirmedVehicleSeries.platform.asc(),
+            ConfirmedVehicleSeries.status.asc(),
+            ConfirmedVehicleSeries.id.asc(),
+        )
         .all()
     )
     for record in records:

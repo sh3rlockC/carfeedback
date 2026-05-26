@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 
 from openpyxl import Workbook, load_workbook
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -42,6 +43,24 @@ def _xlsx(rows: list[dict[str, str]]) -> bytes:
     ws.append(["query", "platform", "series_id", "url", "title", "source"])
     for row in rows:
         ws.append([row.get("query"), row.get("platform"), row.get("series_id"), row.get("url"), row.get("title"), row.get("source")])
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _xlsx_with_header(header: list[str]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(header)
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _empty_xlsx() -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.delete_rows(1, ws.max_row)
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -190,3 +209,165 @@ def test_duplicate_rows_are_counted_but_not_stored_as_conflicts(tmp_path: Path) 
         assert preview.summary == {"new": 0, "duplicate": 1, "conflict": 0, "invalid": 0}
         assert db.query(ConfirmedVehicleSeries).count() == 1
         assert db.query(SeriesConflict).count() == 0
+
+
+def test_in_file_duplicate_same_id_counts_duplicate_and_commits_one_record(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    content = _csv(
+        [
+            {"query": "风云T11", "platform": "autohome", "series_id": "7411"},
+            {"query": " 风云T11 ", "platform": "autohome", "series_id": "7411"},
+        ]
+    )
+    with SessionLocal() as db:
+        preview = preview_series_import(db, filename="series.csv", content=content)
+
+        assert preview.summary == {"new": 1, "duplicate": 1, "conflict": 0, "invalid": 0}
+        assert [row.status for row in preview.rows] == ["new", "duplicate"]
+
+        committed = commit_series_import(db, filename="series.csv", content=content, operator="operator-1")
+
+        assert committed.summary == {"new": 1, "duplicate": 1, "conflict": 0, "invalid": 0}
+        assert db.query(ConfirmedVehicleSeries).count() == 1
+        assert db.query(SeriesConflict).count() == 0
+
+
+def test_in_file_conflict_different_id_creates_series_import_conflict(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    content = _csv(
+        [
+            {"query": "风云T11", "platform": "autohome", "series_id": "7411", "url": "https://example.test/7411"},
+            {"query": "风云T11", "platform": "autohome", "series_id": "9999", "url": "https://example.test/9999"},
+        ]
+    )
+    with SessionLocal() as db:
+        preview = preview_series_import(db, filename="series.csv", content=content)
+
+        assert preview.summary == {"new": 1, "duplicate": 0, "conflict": 1, "invalid": 0}
+        assert [row.status for row in preview.rows] == ["new", "conflict"]
+
+        committed = commit_series_import(db, filename="series.csv", content=content, operator="operator-1")
+
+        assert committed.summary == {"new": 1, "duplicate": 0, "conflict": 1, "invalid": 0}
+        batch = db.query(SeriesImportBatch).one()
+        records = db.query(ConfirmedVehicleSeries).all()
+        assert len(records) == 1
+        assert records[0].series_id == "7411"
+        assert records[0].import_batch_id == batch.id
+        conflict = db.query(SeriesConflict).one()
+        assert conflict.conflict_type == "series_import"
+        assert conflict.import_batch_id == batch.id
+        assert conflict.existing_value_json["series_id"] == "7411"
+        assert conflict.incoming_value_json["series_id"] == "9999"
+
+
+def test_commit_reclassifies_duplicate_after_db_drift_without_mutating_existing_batch(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+    with SessionLocal() as db:
+        assert preview_series_import(db, filename="series.csv", content=content).summary == {
+            "new": 1,
+            "duplicate": 0,
+            "conflict": 0,
+            "invalid": 0,
+        }
+        existing = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="drift", reason="drift"),
+        )
+        db.commit()
+
+        committed = commit_series_import(db, filename="series.csv", content=content, operator="operator-1")
+
+        assert committed.summary == {"new": 0, "duplicate": 1, "conflict": 0, "invalid": 0}
+        assert db.get(ConfirmedVehicleSeries, existing.id).import_batch_id is None
+        assert db.query(ConfirmedVehicleSeries).count() == 1
+        assert db.query(SeriesConflict).count() == 0
+
+
+def test_commit_reclassifies_conflict_after_db_drift_without_mutating_existing_batch(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+    with SessionLocal() as db:
+        assert preview_series_import(db, filename="series.csv", content=content).summary["new"] == 1
+        existing = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="9999", operator="drift", reason="drift"),
+        )
+        db.commit()
+
+        committed = commit_series_import(db, filename="series.csv", content=content, operator="operator-1")
+
+        batch = db.query(SeriesImportBatch).one()
+        assert committed.summary == {"new": 0, "duplicate": 0, "conflict": 1, "invalid": 0}
+        assert db.get(ConfirmedVehicleSeries, existing.id).import_batch_id is None
+        assert db.query(ConfirmedVehicleSeries).count() == 1
+        conflict = db.query(SeriesConflict).one()
+        assert conflict.conflict_type == "series_import"
+        assert conflict.import_batch_id == batch.id
+        assert conflict.existing_value_json["series_id"] == "9999"
+        assert conflict.incoming_value_json["series_id"] == "7411"
+
+
+def test_missing_headers_are_rejected_for_csv_and_xlsx(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match="missing columns.*series_id"):
+            preview_series_import(db, filename="series.csv", content=b"query,platform\nA,autohome\n")
+        with pytest.raises(ValueError, match="missing columns.*platform"):
+            preview_series_import(db, filename="series.xlsx", content=_xlsx_with_header(["query", "series_id"]))
+
+
+def test_empty_workbook_is_rejected(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match="missing header"):
+            preview_series_import(db, filename="series.xlsx", content=_empty_xlsx())
+
+
+def test_xls_is_rejected_with_clean_value_error(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        with pytest.raises(ValueError, match=r"supports \.csv, \.xlsx, and \.xlsm"):
+            preview_series_import(db, filename="series.xls", content=b"not an xls")
+
+
+def test_export_order_is_stable_for_duplicate_identity_history_and_nullable_updated_at(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        active = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="tester", reason="seed"),
+        )
+        deleted = ConfirmedVehicleSeries(
+            query_key=query_key("风云T11"),
+            query="风云T11",
+            platform="autohome",
+            series_id="7400",
+            status="deleted",
+        )
+        other = ConfirmedVehicleSeries(
+            query_key=query_key("风云T11"),
+            query="风云T11",
+            platform="dongchedi",
+            series_id="5498",
+            status="active",
+        )
+        db.add_all([deleted, other])
+        db.commit()
+        db.refresh(active)
+        db.refresh(deleted)
+        db.refresh(other)
+        active.updated_at = None
+
+        with db.no_autoflush:
+            content = export_series_excel(db)
+
+    ws = load_workbook(BytesIO(content))["confirmed_vehicle_series"]
+    rows = [tuple(cell.value for cell in row) for row in ws.iter_rows(min_row=2)]
+    assert [(row[1], row[6], row[2]) for row in rows] == [
+        ("autohome", "active", "7411"),
+        ("autohome", "deleted", "7400"),
+        ("dongchedi", "active", "5498"),
+    ]
+    assert rows[0][7] is None
