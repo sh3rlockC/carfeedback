@@ -6,6 +6,7 @@ import sys
 
 from openpyxl import Workbook, load_workbook
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,7 +16,9 @@ if str(ROOT) not in sys.path:
 
 from app.config import Settings
 from app.db import init_db, reset_engine_cache
+from app.main import create_app
 from app.models import ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
+from app.services.passphrase import hash_passphrase
 from app.services.confirmed_vehicle_series import query_key
 from app.services.series_admin import SeriesMutation, create_series_record
 from app.services.series_import_export import commit_series_import, export_series_excel, preview_series_import
@@ -27,6 +30,17 @@ def _session(tmp_path: Path):
     init_db(settings)
     engine = create_engine(settings.database_url, future=True)
     return sessionmaker(bind=engine, future=True)
+
+
+def _admin_client(tmp_path: Path, *, access_control_enabled: bool = False) -> TestClient:
+    reset_engine_cache()
+    settings = Settings(
+        app_env="test",
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'series-api.db'}",
+        access_control_enabled=access_control_enabled,
+        pass_phrase_hash=hash_passphrase("weekly-secret"),
+    )
+    return TestClient(create_app(settings))
 
 
 def _csv(rows: list[dict[str, str]]) -> bytes:
@@ -464,3 +478,115 @@ def test_export_order_is_stable_for_duplicate_identity_history_and_nullable_upda
         ("dongchedi", "active", "5498"),
     ]
     assert rows[0][7] is None
+
+
+def test_series_import_preview_api_accepts_multipart_file(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    response = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("series.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"]["new"] == 1
+    assert body["rows"][0]["query_key"] == "风云t11"
+    assert body["rows"][0]["status"] == "new"
+
+
+def test_series_import_commit_api_persists_multipart_file(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    response = client.post(
+        "/api/admin/series/import/commit?operator=tester",
+        files={"file": ("series.csv", content, "text/csv")},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["summary"]["new"] == 1
+    list_response = client.get("/api/admin/series?search=风云T11&platform=autohome&status=active")
+    assert list_response.status_code == 200
+    assert list_response.json()["total"] == 1
+    assert list_response.json()["items"][0]["series_id"] == "7411"
+
+
+def test_series_import_api_rejects_bad_file_and_blank_operator(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    bad_file = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("series.csv", b"query,platform\nA,autohome\n", "text/csv")},
+    )
+    blank_operator = client.post(
+        "/api/admin/series/import/commit?operator=%20%20%20",
+        files={"file": ("series.csv", content, "text/csv")},
+    )
+
+    assert bad_file.status_code == 400
+    assert "missing columns" in bad_file.json()["detail"]
+    assert blank_operator.status_code == 400
+    assert blank_operator.json()["detail"] == "operator must not be blank"
+
+
+def test_series_export_api_returns_xlsx_after_route_seed(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    create_response = client.post(
+        "/api/admin/series",
+        json={
+            "query": "风云T11",
+            "platform": "autohome",
+            "series_id": "7411",
+            "operator": "tester",
+            "reason": "seed for export",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.get("/api/admin/series/export.xlsx")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert "attachment" in response.headers["content-disposition"]
+    assert len(response.content) > 1000
+    ws = load_workbook(BytesIO(response.content))["confirmed_vehicle_series"]
+    assert [cell.value for cell in ws[2][:3]] == ["风云T11", "autohome", "7411"]
+
+
+def test_series_import_export_static_routes_are_not_captured_by_record_id_route(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    preview = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("series.csv", content, "text/csv")},
+    )
+    export = client.get("/api/admin/series/export.xlsx")
+
+    assert preview.status_code == 200
+    assert export.status_code == 200
+    assert preview.json()["summary"]["new"] == 1
+    assert export.headers["content-type"] == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def test_series_import_export_routes_require_admin_access_when_enabled(tmp_path: Path) -> None:
+    client = _admin_client(tmp_path, access_control_enabled=True)
+    content = _csv([{"query": "风云T11", "platform": "autohome", "series_id": "7411"}])
+
+    unauthorized_preview = client.post(
+        "/api/admin/series/import/preview",
+        files={"file": ("series.csv", content, "text/csv")},
+    )
+    unauthorized_export = client.get("/api/admin/series/export.xlsx")
+
+    assert unauthorized_preview.status_code == 401
+    assert unauthorized_export.status_code == 401
+
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    authorized_export = client.get("/api/admin/series/export.xlsx")
+    assert authorized_export.status_code == 200

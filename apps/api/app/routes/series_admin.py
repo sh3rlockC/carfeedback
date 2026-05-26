@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from email.parser import BytesParser
+from email.policy import default as email_policy
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -13,6 +16,7 @@ from app.schemas import (
     SeriesAliasRequest,
     SeriesAliasResponse,
     SeriesAuditResponse,
+    SeriesImportPreviewResponse,
     SeriesListResponse,
     SeriesMutationRequest,
     SeriesRecordResponse,
@@ -27,9 +31,11 @@ from app.services.series_admin import (
     soft_delete_series_record,
     update_series_record,
 )
+from app.services.series_import_export import commit_series_import, export_series_excel, preview_series_import
 from app.services.vehicle_aliases import create_alias, delete_alias, update_alias
 
 MAX_PAGE_SIZE = 200
+EXCEL_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _require_admin_access(request: Request, settings: Settings = Depends(get_settings)) -> None:
@@ -91,6 +97,31 @@ def _audit_payload(row: SeriesAuditLog) -> dict:
     }
 
 
+async def _read_import_upload(request: Request) -> tuple[str, bytes]:
+    body = await request.body()
+    content_type = request.headers.get("content-type", "")
+    if content_type.lower().startswith("multipart/form-data"):
+        message = BytesParser(policy=email_policy).parsebytes(
+            b"Content-Type: "
+            + content_type.encode("latin-1")
+            + b"\r\nMIME-Version: 1.0\r\n\r\n"
+            + body
+        )
+        for part in message.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                continue
+            if part.get_param("name", header="content-disposition") != "file":
+                continue
+            filename = part.get_filename() or "upload"
+            return filename, part.get_payload(decode=True) or b""
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing file field")
+
+    filename = request.headers.get("x-filename") or request.headers.get("filename")
+    if not filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="missing filename")
+    return filename, body
+
+
 @router.get("", response_model=SeriesListResponse)
 def list_series(
     search: str | None = None,
@@ -131,6 +162,51 @@ def create_series(
     except ValueError as exc:
         db.rollback()
         raise _not_found_or_bad_request(exc) from exc
+
+
+@router.post("/import/preview", response_model=SeriesImportPreviewResponse)
+async def preview_series_import_route(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> SeriesImportPreviewResponse:
+    filename, content = await _read_import_upload(request)
+    try:
+        return preview_series_import(db, filename=filename, content=content)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/import/commit", response_model=SeriesImportPreviewResponse)
+async def commit_series_import_route(
+    request: Request,
+    operator: str,
+    db: Session = Depends(get_db),
+) -> SeriesImportPreviewResponse:
+    normalized_operator = operator.strip()
+    if not normalized_operator:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="operator must not be blank")
+    filename, content = await _read_import_upload(request)
+    try:
+        preview = commit_series_import(db, filename=filename, content=content, operator=normalized_operator)
+        db.commit()
+        return preview
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+
+@router.get("/export.xlsx")
+def export_series_route(db: Session = Depends(get_db)) -> Response:
+    content = export_series_excel(db)
+    return Response(
+        content=content,
+        media_type=EXCEL_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="confirmed_vehicle_series.xlsx"'},
+    )
 
 
 @router.get("/audit", response_model=SeriesAuditResponse)

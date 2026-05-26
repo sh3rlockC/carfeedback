@@ -490,6 +490,30 @@ class SeriesListResponse(BaseModel):
     offset: int
 
 
+class SeriesImportRowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    row_number: int
+    query: str | None = None
+    platform: str | None = None
+    series_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    source: str | None = None
+    status: str
+    query_key: str | None = None
+    error: str | None = None
+    existing_value_json: dict | None = None
+    incoming_value_json: dict | None = None
+
+
+class SeriesImportPreviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    summary: dict[str, int]
+    rows: list[SeriesImportRowResponse] = Field(default_factory=list)
+
+
 class SeriesAuditItemResponse(BaseModel):
     id: int
     record_id: int | None = None
