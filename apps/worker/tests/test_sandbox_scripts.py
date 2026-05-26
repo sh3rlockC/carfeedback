@@ -58,8 +58,17 @@ def test_sync_server_env_copies_only_allowed_keys_without_printing_secrets(tmp_p
     content = output_env.read_text(encoding="utf-8")
     assert "APP_ENV=sandbox" in content
     assert "HTTP_PORT=18080" in content
+    assert "NEXT_PUBLIC_BASE_PATH=/car-user-feedback" in content
     assert "TAVILY_API_KEY=tavily-secret" in content
     assert "LLM_API_KEY=llm-secret" in content
     assert "DATABASE_URL=postgresql+psycopg://koubei:koubei@postgres:5432/koubei" in content
     assert "SESSION_SECRET=server-session-secret" not in content
     assert output_env.parent.name == "sandbox"
+
+
+def test_nginx_redirects_stay_relative_for_preview_ports() -> None:
+    nginx_config = REPO_ROOT / "ops" / "nginx" / "default.conf"
+
+    content = nginx_config.read_text(encoding="utf-8")
+
+    assert "absolute_redirect off;" in content

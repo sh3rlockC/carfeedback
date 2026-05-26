@@ -3,6 +3,13 @@ services:
     ports:
       - "${HTTP_PORT:-18080}:80"
 
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+    environment:
+      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+
   api:
     environment:
       APP_ENV: sandbox
