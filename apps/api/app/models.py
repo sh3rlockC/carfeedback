@@ -251,7 +251,16 @@ class JobCandidate(Base):
 
 class ConfirmedVehicleSeries(Base):
     __tablename__ = "confirmed_vehicle_series"
-    __table_args__ = (UniqueConstraint("query_key", "platform", name="uq_confirmed_vehicle_series_query_platform"),)
+    __table_args__ = (
+        Index(
+            "uq_confirmed_vehicle_series_active_query_platform",
+            "query_key",
+            "platform",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     query_key: Mapped[str] = mapped_column(String(255), nullable=False)

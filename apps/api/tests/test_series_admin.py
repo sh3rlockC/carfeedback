@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import init_db, reset_engine_cache
 from app.models import ConfirmedVehicleSeries, SeriesAlias, SeriesAuditLog, SeriesConflict, SeriesImportBatch
-from app.services.confirmed_vehicle_series import confirmed_vehicle_series_payload
+from app.services.confirmed_vehicle_series import confirmed_vehicle_series_payload, upsert_confirmed_vehicle_series
 from app.services.series_admin import (
     SeriesMutation,
     create_series_record,
@@ -40,6 +40,8 @@ def test_series_admin_tables_and_columns_exist(tmp_path: Path) -> None:
 
     confirmed_columns = {column["name"] for column in inspector.get_columns("confirmed_vehicle_series")}
     assert {"status", "deleted_at", "import_batch_id"}.issubset(confirmed_columns)
+    confirmed_indexes = {index["name"] for index in inspector.get_indexes("confirmed_vehicle_series")}
+    assert "uq_confirmed_vehicle_series_active_query_platform" in confirmed_indexes
 
 
 def test_series_admin_models_persist_status_alias_audit_and_conflict(tmp_path: Path) -> None:
@@ -282,3 +284,177 @@ def test_confirmed_vehicle_series_payload_ignores_deleted_rows(tmp_path: Path) -
         db.commit()
 
         assert confirmed_vehicle_series_payload(db, "风云T11") is not None
+
+
+def test_series_admin_create_replacement_after_soft_delete(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        deleted = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="tester", reason="first"),
+        )
+        soft_delete_series_record(db, deleted.id, operator="tester", reason="replace")
+
+        replacement = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7412", operator="tester", reason="replacement"),
+        )
+
+        assert replacement.id != deleted.id
+        rows = db.query(ConfirmedVehicleSeries).filter_by(query_key="风云t11", platform="autohome").all()
+        assert sorted(row.status for row in rows) == ["active", "deleted"]
+        assert [row.series_id for row in rows if row.status == "active"] == ["7412"]
+
+
+def test_series_admin_update_conflict_is_safe_by_default(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        first = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="tester", reason="first"),
+        )
+        second = create_series_record(
+            db,
+            SeriesMutation(query="风云X3L", platform="autohome", series_id="8208", operator="tester", reason="second"),
+        )
+
+        result = update_series_record(
+            db,
+            second.id,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="8209", operator="tester", reason="rename"),
+        )
+
+        assert result.id == second.id
+        assert result.query == "风云X3L"
+        assert result.series_id == "8208"
+        conflicts = db.query(SeriesConflict).filter_by(status="open").all()
+        assert len(conflicts) == 1
+        assert conflicts[0].existing_value_json["id"] == first.id
+        assert conflicts[0].incoming_value_json["id"] == second.id
+
+
+def test_series_admin_restore_conflict_keeps_deleted_record_unchanged(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        deleted = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7411", operator="tester", reason="first"),
+        )
+        soft_delete_series_record(db, deleted.id, operator="tester", reason="delete")
+        active = create_series_record(
+            db,
+            SeriesMutation(query="风云T11", platform="autohome", series_id="7412", operator="tester", reason="replacement"),
+        )
+
+        restored = restore_series_record(db, deleted.id, operator="tester", reason="restore original")
+
+        assert restored.status == "deleted"
+        assert restored.deleted_at is not None
+        assert db.get(ConfirmedVehicleSeries, active.id).status == "active"
+        conflicts = db.query(SeriesConflict).filter_by(status="open").all()
+        assert len(conflicts) == 1
+        assert conflicts[0].existing_value_json["id"] == active.id
+        assert conflicts[0].incoming_value_json["id"] == deleted.id
+
+
+def test_upsert_confirmed_vehicle_series_does_not_mutate_deleted_row(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        deleted = ConfirmedVehicleSeries(
+            query_key="风云t11",
+            query="风云T11",
+            platform="autohome",
+            series_id="7411",
+            status="deleted",
+        )
+        db.add(deleted)
+        db.commit()
+
+        upsert_confirmed_vehicle_series(
+            db,
+            query="风云T11",
+            selected_candidates={"autohome": {"series_id": "7412", "source": "manual"}},
+        )
+        db.commit()
+
+        rows = db.query(ConfirmedVehicleSeries).filter_by(query_key="风云t11", platform="autohome").all()
+        assert len(rows) == 2
+        assert [row.series_id for row in rows if row.status == "deleted"] == ["7411"]
+        assert [row.series_id for row in rows if row.status == "active"] == ["7412"]
+
+
+def test_series_admin_list_filters_paginates_and_counts(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+
+    with SessionLocal() as db:
+        t11_auto = create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                title="风云T11",
+                source="manual",
+                operator="tester",
+                reason="one",
+            ),
+        )
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="dongchedi",
+                series_id="5498",
+                title="风云T11",
+                source="sync",
+                operator="tester",
+                reason="two",
+            ),
+        )
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云X3L",
+                platform="autohome",
+                series_id="8208",
+                title="风云X3L",
+                source="manual",
+                operator="tester",
+                reason="three",
+            ),
+        )
+        soft_delete_series_record(db, t11_auto.id, operator="tester", reason="delete")
+
+        result = list_series_records(db, search="风云", platform="autohome", source="manual", limit=1, offset=1)
+        assert result.total == 2
+        assert result.limit == 1
+        assert result.offset == 1
+        assert len(result.items) == 1
+
+        deleted = list_series_records(db, status="deleted")
+        assert deleted.total == 1
+        assert deleted.items[0].id == t11_auto.id

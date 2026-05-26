@@ -183,7 +183,7 @@ def update_series_record(
     record_id: int,
     mutation: SeriesMutation,
     *,
-    allow_conflict: bool = True,
+    allow_conflict: bool = False,
 ) -> ConfirmedVehicleSeries:
     record = db.get(ConfirmedVehicleSeries, record_id)
     if record is None:
@@ -193,7 +193,7 @@ def update_series_record(
     normalized_platform = mutation.platform.strip()
     key = query_key(normalized_query)
     conflict = _active_conflict(db, query_key_value=key, platform=normalized_platform, exclude_id=record.id)
-    if conflict is not None and not allow_conflict:
+    if conflict is not None:
         _record_conflict(
             db,
             existing=conflict,
@@ -268,6 +268,19 @@ def restore_series_record(
     record = db.get(ConfirmedVehicleSeries, record_id)
     if record is None:
         raise ValueError(f"series record {record_id} not found")
+
+    conflict = _active_conflict(db, query_key_value=record.query_key, platform=record.platform, exclude_id=record.id)
+    if conflict is not None:
+        _record_conflict(
+            db,
+            existing=conflict,
+            incoming=_snapshot(record),
+            query=record.query,
+            query_key_value=record.query_key,
+            platform=record.platform,
+        )
+        db.flush()
+        return record
 
     old_value = _snapshot(record)
     record.status = "active"

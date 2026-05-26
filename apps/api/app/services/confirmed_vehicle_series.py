@@ -46,6 +46,7 @@ def upsert_confirmed_vehicle_series(
             .filter(
                 ConfirmedVehicleSeries.query_key == key,
                 ConfirmedVehicleSeries.platform == platform,
+                ConfirmedVehicleSeries.status == "active",
             )
             .one_or_none()
         )
