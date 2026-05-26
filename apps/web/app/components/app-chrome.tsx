@@ -109,9 +109,7 @@ export function AppChrome({ children }: { children: ReactNode }) {
     }
 
     if (href === "/tasks") {
-      return currentPathname === "/tasks" || (currentPathname.startsWith("/tasks/") && !currentPathname.startsWith("/tasks/new"))
-        ? "active"
-        : "";
+      return currentPathname === "/tasks" || (currentPathname.startsWith("/tasks/") && currentPathname !== "/tasks/new") ? "active" : "";
     }
 
     if (href === "/result") {
