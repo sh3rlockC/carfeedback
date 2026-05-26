@@ -1752,6 +1752,323 @@ details.card summary {
   overflow-wrap: anywhere;
 }
 
+/* Overview */
+.overview-page {
+  display: grid;
+  min-width: 0;
+  gap: var(--density-gap);
+}
+
+.overview-hero,
+.flat-panel,
+.metric-tile {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.overview-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: end;
+  padding: var(--density-panel-padding);
+}
+
+.overview-hero h1 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: clamp(28px, 4vw, 48px);
+  line-height: 1;
+}
+
+.overview-hero p:not(.eyebrow) {
+  max-width: 740px;
+  margin: 10px 0 0;
+  color: var(--muted-strong);
+  line-height: 1.6;
+}
+
+.overview-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.overview-alert {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--density-gap);
+}
+
+.metric-tile {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+  min-width: 0;
+  padding: var(--density-panel-padding);
+}
+
+.metric-icon {
+  display: inline-flex;
+  grid-row: span 3;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--primary);
+}
+
+.metric-tile span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.metric-tile strong {
+  color: var(--text-strong);
+  font-size: 24px;
+  line-height: 1.05;
+}
+
+.metric-tile p {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: var(--density-gap);
+  align-items: start;
+}
+
+.flat-panel {
+  min-width: 0;
+  padding: var(--density-panel-padding);
+}
+
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.panel-head h2 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  line-height: 1.12;
+}
+
+.overview-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.overview-table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.overview-table th,
+.overview-table td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: var(--density-row-padding);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.overview-table th {
+  color: var(--muted-strong);
+  font-size: 12px;
+}
+
+.overview-table td {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.overview-table td strong,
+.queue-row strong,
+.lane-row strong,
+.quick-create-link strong,
+.result-card strong {
+  display: block;
+  color: var(--text-strong);
+}
+
+.overview-table td span,
+.queue-row span,
+.lane-row span,
+.quick-create-link span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.table-action {
+  display: inline-flex;
+  min-width: 32px;
+  min-height: 32px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-muted);
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.table-action-wide {
+  padding: 0 10px;
+}
+
+.queue-list,
+.lane-list,
+.quick-create-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.queue-row,
+.lane-row,
+.quick-create-link {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  background: var(--bg-soft);
+}
+
+.queue-row:hover,
+.quick-create-link:hover,
+.result-card:hover,
+.table-action:hover {
+  border-color: var(--border-strong);
+  background: var(--primary-soft);
+}
+
+.lane-panel {
+  background: var(--bg-soft);
+}
+
+.lane-row {
+  background: var(--surface);
+}
+
+.lane-row svg,
+.result-card-foot svg {
+  color: var(--primary);
+  flex: 0 0 auto;
+}
+
+.quick-create-panel {
+  align-content: start;
+}
+
+.quick-create-link {
+  justify-content: flex-start;
+}
+
+.quick-create-link svg {
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+
+.recent-result-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--density-gap);
+}
+
+.result-card {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--density-panel-padding);
+  background: var(--bg-soft);
+}
+
+.result-card-head,
+.result-card-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.result-card dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.result-card dl div {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.result-card dt,
+.result-card dd {
+  margin: 0;
+  font-size: 12px;
+}
+
+.result-card dt {
+  color: var(--muted);
+}
+
+.result-card dd {
+  overflow: hidden;
+  color: var(--muted-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.empty-copy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 @keyframes stage-in {
   from {
     opacity: 0;
@@ -1786,6 +2103,8 @@ details.card summary {
   .page-grid,
   .panel-grid,
   .terminal-grid,
+  .overview-hero,
+  .overview-grid,
   .platform-grid,
   .collector-grid,
   .result-cover,
@@ -1848,6 +2167,8 @@ details.card summary {
   .task-filter-grid,
   .task-load-row,
   .task-mode-grid,
+  .metric-grid,
+  .recent-result-grid,
   .artifact-grid {
     grid-template-columns: 1fr;
   }
@@ -1859,9 +2180,15 @@ details.card summary {
   .task-page-head,
   .task-table-head,
   .task-form-head,
-  .task-panel-head {
+  .task-panel-head,
+  .panel-head,
+  .overview-hero-actions {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .overview-hero-actions {
+    justify-content: flex-start;
   }
 
   .time-report-submit {
@@ -1884,6 +2211,8 @@ details.card summary {
   .button,
   .download-link,
   .primary-download,
+  .overview-hero-actions,
+  .overview-hero-actions .button,
   .task-tabs {
     width: 100%;
   }
