@@ -4,85 +4,23 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
+import {
+  formatDateTime,
+  formatEtaCell,
+  labelFor,
+  newestFirst,
+  queuedStatuses,
+  runningStatuses,
+  stageLabels,
+  statusLabels,
+  statusTone,
+  taskTypeLabels,
+} from "@/lib/task-display";
 import type { TaskListItem, TaskLoadResponse } from "@/lib/api-types";
 
 type PlatformStatusFilter = "all" | "available" | "crowded";
 type FlagFilter = "all" | "yes" | "no";
 type LoadIssue = { kind: "missing" | "error"; message: string };
-
-const runningStatuses = new Set(["running"]);
-const queuedStatuses = new Set(["queued", "waiting_agent", "retry_wait"]);
-
-const taskTypeLabels: Record<TaskListItem["task_type"], string> = {
-  single: "单车型",
-  comparison: "对比",
-};
-
-const statusLabels: Record<string, string> = {
-  queued: "排队中",
-  running: "运行中",
-  waiting_agent: "等待车道",
-  retry_wait: "等待重试",
-  retry_paused: "重试暂停",
-  completed: "已完成",
-  completed_degraded: "降级完成",
-  failed: "失败",
-  cancelled: "已取消",
-  expired: "已过期",
-};
-
-function labelFor(value: string, labels: Record<string, string>) {
-  return labels[value] ?? value;
-}
-
-function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
-  if (status === "completed") {
-    return "success";
-  }
-  if (status === "completed_degraded" || status === "queued" || status === "waiting_agent" || status === "retry_wait") {
-    return "warning";
-  }
-  if (status === "failed" || status === "cancelled" || status === "expired") {
-    return "danger";
-  }
-  if (status === "running") {
-    return "accent";
-  }
-  return "default";
-}
-
-function formatDateTime(value: string | null) {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function formatEta(seconds: number | null) {
-  if (seconds === null) {
-    return "-";
-  }
-  if (seconds < 60) {
-    return `${seconds} 秒`;
-  }
-  return `${Math.ceil(seconds / 60)} 分钟`;
-}
-
-function safeTimestamp(value: string | null | undefined) {
-  if (!value) {
-    return 0;
-  }
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? 0 : timestamp;
-}
-
-function newestFirst(a: TaskListItem, b: TaskListItem) {
-  return safeTimestamp(b.created_at) - safeTimestamp(a.created_at) || b.task_id.localeCompare(a.task_id);
-}
 
 function matchesFlag(value: boolean, filter: FlagFilter) {
   return filter === "all" || (filter === "yes" ? value : !value);
@@ -245,8 +183,8 @@ export default function TasksPage() {
             <span>类型</span>
             <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
               <option value="all">全部</option>
-              <option value="single">单车型</option>
-              <option value="comparison">对比</option>
+              <option value="single">{taskTypeLabels.single}</option>
+              <option value="comparison">{taskTypeLabels.comparison}</option>
             </select>
           </label>
           <label className="field">
@@ -324,8 +262,8 @@ export default function TasksPage() {
                   <td>
                     <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
                   </td>
-                  <td>{labelFor(task.current_stage, statusLabels)}</td>
-                  <td>{formatEta(task.eta_seconds)}</td>
+                  <td>{labelFor(task.current_stage, stageLabels)}</td>
+                  <td>{formatEtaCell(task.eta_seconds)}</td>
                   <td>
                     <div className="meta-row">
                       {task.degraded ? <StatusPill tone="warning">降级</StatusPill> : null}

@@ -5,99 +5,25 @@ import { useParams, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
+import {
+  activeStatuses,
+  artifactLabel,
+  completedStatuses,
+  formatDateTime,
+  formatEtaMinutes,
+  labelFor,
+  stageLabels,
+  statusLabels,
+  statusTone,
+} from "@/lib/task-display";
 import type { TaskArtifact, TaskDetailResponse } from "@/lib/api-types";
 
 type DetailView = "progress" | "result";
 
-const completedStatuses = new Set(["completed", "completed_degraded"]);
-const activeStatuses = new Set(["queued", "running", "waiting_agent", "retry_wait", "retry_paused"]);
 const resultArtifactTypes = new Set(["business_zip", "merged_raw_excel", "vehicle_raw_excel"]);
-
-const statusLabels: Record<string, string> = {
-  queued: "排队中",
-  running: "运行中",
-  waiting_agent: "等待车道",
-  retry_wait: "等待重试",
-  retry_paused: "重试暂停",
-  completed: "已完成",
-  completed_degraded: "降级完成",
-  failed: "失败",
-  cancelled: "已取消",
-  expired: "已过期",
-};
-
-const stageLabels: Record<string, string> = {
-  queued: "排队中",
-  running: "运行中",
-  checking_incremental: "检查历史语料",
-  collecting_autohome: "采集汽车之家",
-  collecting_dcd: "采集懂车帝",
-  postprocessing: "汇总整理",
-  summarizing: "摘要生成",
-  rendering_wordcloud: "词云生成",
-  generating_ai_report: "AI 一页纸",
-  building_qa_corpus: "问答索引",
-  collecting_models: "补齐车型",
-  comparing: "生成对比",
-  completed: "已完成",
-  completed_degraded: "降级完成",
-  failed: "失败",
-  cancelled: "已取消",
-  expired: "已过期",
-};
-
-function labelFor(value: string, labels: Record<string, string>) {
-  return labels[value] ?? value;
-}
-
-function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
-  if (status === "completed") {
-    return "success";
-  }
-  if (status === "completed_degraded" || status === "queued" || status === "waiting_agent" || status === "retry_wait" || status === "retry_paused") {
-    return "warning";
-  }
-  if (status === "failed" || status === "cancelled" || status === "expired") {
-    return "danger";
-  }
-  if (status === "running") {
-    return "accent";
-  }
-  return "default";
-}
-
-function formatDateTime(value: string | null) {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function formatEta(seconds: number | null) {
-  if (seconds === null) {
-    return "ETA 计算中";
-  }
-  if (seconds < 60) {
-    return `预计剩余 ${seconds} 秒`;
-  }
-  return `预计剩余 ${Math.ceil(seconds / 60)} 分钟`;
-}
 
 function isResultArtifact(artifact: TaskArtifact) {
   return resultArtifactTypes.has(artifact.artifact_type);
-}
-
-function artifactLabel(artifact: TaskArtifact) {
-  const labels: Record<string, string> = {
-    business_zip: "业务 ZIP",
-    merged_raw_excel: "合并原始 Excel",
-    vehicle_raw_excel: "车型原始 Excel",
-  };
-  return labels[artifact.artifact_type] ?? artifact.artifact_type;
 }
 
 function progressPercent(task: TaskDetailResponse) {
@@ -283,7 +209,9 @@ function TaskDetailContent() {
             <span style={{ width: `${progressPercent(task)}%` }} />
           </div>
           <div className="meta-row">
-            <StatusPill tone="warning">{formatEta(task.eta_seconds)}</StatusPill>
+            <StatusPill tone="warning">
+              {task.eta_seconds === null ? "ETA 计算中" : `预计剩余 ${formatEtaMinutes(task.eta_seconds)}`}
+            </StatusPill>
             {task.eta_reason ? <StatusPill tone="accent">{task.eta_reason}</StatusPill> : null}
           </div>
           <div className="task-table-wrap">
