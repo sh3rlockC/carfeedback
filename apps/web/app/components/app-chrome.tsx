@@ -4,6 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
+import { Columns3, Rows3 } from "lucide-react";
+import { defaultDensityMode, nextDensityMode, readDensityMode, writeDensityMode, type DensityMode } from "@/lib/density";
 import { getFlowState, type FlowState } from "@/lib/flow-state";
 import { StepRail, stepForPath } from "./ui";
 
@@ -69,6 +71,7 @@ export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const activeStep = stepForPath(pathname);
   const [flowState, setLocalFlowState] = useState<FlowState>(emptyFlowState);
+  const [density, setDensity] = useState<DensityMode>(defaultDensityMode);
 
   useEffect(() => {
     const refresh = () => setLocalFlowState(getFlowState());
@@ -84,8 +87,20 @@ export function AppChrome({ children }: { children: ReactNode }) {
     };
   }, [pathname]);
 
+  useEffect(() => {
+    setDensity(readDensityMode());
+  }, []);
+
+  function toggleDensity() {
+    setDensity((current) => {
+      const next = nextDensityMode(current);
+      writeDensityMode(next);
+      return next;
+    });
+  }
+
   return (
-    <div className="app-shell">
+    <div className="app-shell workbench-shell" data-density={density}>
       <header className="command-bar">
         <div className="brand-lockup">
           <p className="eyebrow">VEHICLE KOUBEI INTEL</p>
@@ -114,6 +129,10 @@ export function AppChrome({ children }: { children: ReactNode }) {
       </header>
 
       <nav className="utility-nav" aria-label="全局导航">
+        <button className="icon-text-button" type="button" onClick={toggleDensity}>
+          {density === "compact" ? <Rows3 size={16} /> : <Columns3 size={16} />}
+          {density === "compact" ? "紧凑" : "标准"}
+        </button>
         <Link href="/tasks">任务中心</Link>
       </nav>
 

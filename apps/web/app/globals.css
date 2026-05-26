@@ -76,6 +76,20 @@ button {
   padding: 28px 0 64px;
 }
 
+.workbench-shell {
+  --density-gap: 12px;
+  --density-panel-padding: 14px;
+  --density-row-padding: 10px 12px;
+  --density-control-height: 36px;
+}
+
+.workbench-shell[data-density="compact"] {
+  --density-gap: 8px;
+  --density-panel-padding: 10px;
+  --density-row-padding: 7px 10px;
+  --density-control-height: 30px;
+}
+
 .command-bar {
   display: grid;
   grid-template-columns: minmax(280px, 0.9fr) minmax(520px, 1.1fr);
@@ -185,11 +199,18 @@ button {
 
 .utility-nav {
   display: flex;
+  gap: var(--density-gap);
   justify-content: flex-end;
+  align-items: center;
   margin: 0 0 14px;
 }
 
-.utility-nav a {
+.utility-nav a,
+.icon-text-button {
+  display: inline-flex;
+  min-height: var(--density-control-height);
+  align-items: center;
+  gap: 6px;
   border: 1px solid rgba(126, 203, 255, 0.2);
   border-radius: 999px;
   padding: 8px 12px;
@@ -197,6 +218,15 @@ button {
   color: var(--muted-strong);
   font-size: 13px;
   font-weight: 900;
+}
+
+.icon-text-button {
+  cursor: pointer;
+}
+
+.icon-text-button:hover,
+.utility-nav a:hover {
+  border-color: rgba(115, 208, 255, 0.5);
 }
 
 .step-node {
@@ -774,7 +804,7 @@ details.card summary {
 .comparison-table td {
   border-right: 1px solid rgba(126, 203, 255, 0.1);
   border-bottom: 1px solid rgba(126, 203, 255, 0.1);
-  padding: 12px 14px;
+  padding: var(--density-row-padding);
   text-align: center;
   white-space: nowrap;
 }
@@ -1671,7 +1701,7 @@ details.card summary {
 
 .task-load-row div {
   min-width: 0;
-  padding: 14px;
+  padding: var(--density-panel-padding);
   background: rgba(3, 8, 18, 0.42);
 }
 
@@ -1719,7 +1749,7 @@ details.card summary {
 .task-table td {
   border-right: 1px solid rgba(126, 203, 255, 0.1);
   border-bottom: 1px solid rgba(126, 203, 255, 0.1);
-  padding: 12px 14px;
+  padding: var(--density-row-padding);
   text-align: left;
   vertical-align: middle;
   white-space: nowrap;
@@ -1775,6 +1805,7 @@ details.card summary {
 
 .task-tabs button {
   min-width: 88px;
+  min-height: var(--density-control-height);
   border: 0;
   padding: 10px 14px;
   cursor: pointer;
