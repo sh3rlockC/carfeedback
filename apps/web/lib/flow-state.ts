@@ -42,7 +42,12 @@ function readState(): FlowState {
     return initialState;
   }
 
-  const raw = window.sessionStorage.getItem(FLOW_STATE_KEY);
+  let raw: string | null = null;
+  try {
+    raw = window.sessionStorage.getItem(FLOW_STATE_KEY);
+  } catch {
+    return initialState;
+  }
   if (!raw) {
     return initialState;
   }
@@ -59,7 +64,11 @@ function writeState(state: FlowState) {
     return;
   }
 
-  window.sessionStorage.setItem(FLOW_STATE_KEY, JSON.stringify(state));
+  try {
+    window.sessionStorage.setItem(FLOW_STATE_KEY, JSON.stringify(state));
+  } catch {
+    // Storage can be unavailable in restricted browser contexts; keep the UI usable without persistence.
+  }
 }
 
 export function getFlowState() {
@@ -75,5 +84,9 @@ export function clearFlowState() {
     return;
   }
 
-  window.sessionStorage.removeItem(FLOW_STATE_KEY);
+  try {
+    window.sessionStorage.removeItem(FLOW_STATE_KEY);
+  } catch {
+    // Ignore storage failures so compatibility routes can still render their guard states.
+  }
 }
