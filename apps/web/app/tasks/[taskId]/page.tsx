@@ -232,7 +232,7 @@ function TaskDetailContent() {
                 <button
                   className="button secondary"
                   type="button"
-                  disabled={!manageToken || Boolean(actionLoading)}
+                  disabled
                   title="后端暂未开放该动作"
                 >
                   <ShieldAlert size={16} aria-hidden="true" />
