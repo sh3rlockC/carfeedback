@@ -99,24 +99,32 @@ export function AppChrome({ children }: { children: ReactNode }) {
     });
   }
 
-  function navClass(href: string) {
+  function isNavActive(href: string) {
     if (href === "/") {
-      return currentPathname === "/" ? "active" : "";
+      return currentPathname === "/";
     }
 
     if (href === "/tasks/new") {
-      return currentPathname === "/tasks/new" ? "active" : "";
+      return currentPathname === "/tasks/new";
     }
 
     if (href === "/tasks") {
-      return currentPathname === "/tasks" || (currentPathname.startsWith("/tasks/") && currentPathname !== "/tasks/new") ? "active" : "";
+      return currentPathname === "/tasks" || (currentPathname.startsWith("/tasks/") && currentPathname !== "/tasks/new");
     }
 
     if (href === "/result") {
-      return currentPathname === "/result" ? "active" : "";
+      return currentPathname === "/result";
     }
 
-    return currentPathname === href ? "active" : "";
+    return currentPathname === href;
+  }
+
+  function navClass(href: string) {
+    return isNavActive(href) ? "active" : "";
+  }
+
+  function navAriaCurrent(href: string) {
+    return isNavActive(href) ? "page" : undefined;
   }
 
   return (
@@ -127,19 +135,19 @@ export function AppChrome({ children }: { children: ReactNode }) {
           <span>车型口碑工作台</span>
         </Link>
         <nav className="workbench-nav" aria-label="主导航">
-          <Link className={navClass("/")} href="/">
+          <Link className={navClass("/")} href="/" aria-current={navAriaCurrent("/")}>
             <LayoutDashboard size={17} />
             工作台总览
           </Link>
-          <Link className={navClass("/tasks/new")} href="/tasks/new">
+          <Link className={navClass("/tasks/new")} href="/tasks/new" aria-current={navAriaCurrent("/tasks/new")}>
             <Plus size={17} />
             新建任务
           </Link>
-          <Link className={navClass("/tasks")} href="/tasks">
+          <Link className={navClass("/tasks")} href="/tasks" aria-current={navAriaCurrent("/tasks")}>
             <ListChecks size={17} />
             任务中心
           </Link>
-          <Link className={navClass("/result")} href="/result">
+          <Link className={navClass("/result")} href="/result" aria-current={navAriaCurrent("/result")}>
             <PackageCheck size={17} />
             结果归档
           </Link>

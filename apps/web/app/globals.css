@@ -197,6 +197,21 @@ button {
   .workbench-nav {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
+
+  .workbench-brand span {
+    font-size: 14px;
+  }
+
+  .workbench-nav a {
+    min-height: 46px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+    padding: 4px 6px;
+    font-size: 12px;
+    line-height: 1.15;
+    text-align: center;
+  }
 }
 
 .helper,
