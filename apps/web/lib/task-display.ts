@@ -65,6 +65,22 @@ export function statusTone(status: string): Tone {
   return "default";
 }
 
+export function taskListStatusTone(status: string): Tone {
+  if (status === "completed") {
+    return "success";
+  }
+  if (status === "completed_degraded" || queuedStatuses.has(status)) {
+    return "warning";
+  }
+  if (status === "failed" || status === "cancelled" || status === "expired") {
+    return "danger";
+  }
+  if (status === "running") {
+    return "accent";
+  }
+  return "default";
+}
+
 export function formatDateTime(value: string | null) {
   if (!value) {
     return "-";
@@ -80,10 +96,10 @@ export function formatEtaMinutes(seconds: number | null) {
   if (seconds === null) {
     return "计算中";
   }
-  if (seconds <= 0) {
-    return "少于 1 分钟";
+  if (seconds < 60) {
+    return `${seconds} 秒`;
   }
-  return `${Math.max(1, Math.ceil(seconds / 60))} 分钟`;
+  return `${Math.ceil(seconds / 60)} 分钟`;
 }
 
 export function formatEtaCell(seconds: number | null) {

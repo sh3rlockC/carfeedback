@@ -13,7 +13,7 @@ import {
   runningStatuses,
   stageLabels,
   statusLabels,
-  statusTone,
+  taskListStatusTone,
   taskTypeLabels,
 } from "@/lib/task-display";
 import type { TaskListItem, TaskLoadResponse } from "@/lib/api-types";
@@ -260,7 +260,7 @@ export default function TasksPage() {
                   </td>
                   <td>{taskTypeLabels[task.task_type]}</td>
                   <td>
-                    <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
+                    <StatusPill tone={taskListStatusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
                   </td>
                   <td>{labelFor(task.current_stage, stageLabels)}</td>
                   <td>{formatEtaCell(task.eta_seconds)}</td>

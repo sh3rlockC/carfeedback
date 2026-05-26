@@ -12,6 +12,7 @@ import {
   formatDateTime,
   formatEtaMinutes,
   labelFor,
+  queuedStatuses,
   stageLabels,
   statusLabels,
   statusTone,
@@ -33,7 +34,7 @@ function progressPercent(task: TaskDetailResponse) {
   if (task.status === "running") {
     return 55;
   }
-  if (task.status === "queued" || task.status === "waiting_agent" || task.status === "retry_wait") {
+  if (queuedStatuses.has(task.status)) {
     return 12;
   }
   return 0;
