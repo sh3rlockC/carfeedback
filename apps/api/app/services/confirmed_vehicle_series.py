@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import ConfirmedVehicleSeries
@@ -23,6 +24,19 @@ def _candidate_value(candidate: Any, field: str) -> Any:
     if isinstance(candidate, Mapping):
         return candidate.get(field)
     return getattr(candidate, field, None)
+
+
+def _insert_for_bind(db: Session):
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+
+        return insert
+    if dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+
+        return insert
+    raise RuntimeError(f"unsupported database dialect for confirmed vehicle series upsert: {dialect_name}")
 
 
 def candidate_canonical_key(candidate: Any) -> str | None:
@@ -76,37 +90,33 @@ def upsert_confirmed_vehicle_series(
         if not series_id:
             continue
 
-        record = (
-            db.query(ConfirmedVehicleSeries)
-            .filter(
-                ConfirmedVehicleSeries.query_key == key,
-                ConfirmedVehicleSeries.platform == platform,
-                ConfirmedVehicleSeries.status == "active",
-            )
-            .one_or_none()
+        values = {
+            "query_key": key,
+            "query": normalized_query,
+            "platform": platform,
+            "series_id": series_id,
+            "status": "active",
+            "url": _candidate_value(candidate, "url"),
+            "title": _candidate_value(candidate, "title"),
+            "source": _candidate_value(candidate, "source"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        table = ConfirmedVehicleSeries.__table__
+        statement = _insert_for_bind(db)(table).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[table.c.query_key, table.c.platform],
+            index_where=text("status = 'active'"),
+            set_={
+                "query": normalized_query,
+                "series_id": series_id,
+                "url": values["url"],
+                "title": values["title"],
+                "source": values["source"],
+                "updated_at": now,
+            },
         )
-        if record is None:
-            db.add(
-                ConfirmedVehicleSeries(
-                    query_key=key,
-                    query=normalized_query,
-                    platform=platform,
-                    series_id=series_id,
-                    url=_candidate_value(candidate, "url"),
-                    title=_candidate_value(candidate, "title"),
-                    source=_candidate_value(candidate, "source"),
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            continue
-
-        record.query = normalized_query
-        record.series_id = series_id
-        record.url = _candidate_value(candidate, "url")
-        record.title = _candidate_value(candidate, "title")
-        record.source = _candidate_value(candidate, "source")
-        record.updated_at = now
+        db.execute(statement)
 
 
 def confirmed_vehicle_series_payload(db: Session | None, query: str) -> dict[str, Any] | None:

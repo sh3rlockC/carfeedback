@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import sys
+from threading import Barrier
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
@@ -650,6 +652,42 @@ def test_upsert_confirmed_vehicle_series_does_not_mutate_deleted_row(tmp_path: P
         assert len(rows) == 2
         assert [row.series_id for row in rows if row.status == "deleted"] == ["7411"]
         assert [row.series_id for row in rows if row.status == "active"] == ["7412"]
+
+
+def test_upsert_confirmed_vehicle_series_handles_concurrent_same_vehicle(tmp_path: Path) -> None:
+    reset_engine_cache()
+    settings = Settings(app_env="test", database_url=f"sqlite+pysqlite:///{tmp_path / 'series.db'}")
+    init_db(settings)
+    engine = create_engine(settings.database_url, future=True, connect_args={"check_same_thread": False})
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    start = Barrier(4)
+
+    def worker(index: int) -> None:
+        start.wait()
+        with SessionLocal() as db:
+            upsert_confirmed_vehicle_series(
+                db,
+                query="风云T11",
+                selected_candidates={
+                    "autohome": {"series_id": str(7411 + index), "source": "concurrent"},
+                    "dongchedi": {"series_id": str(9436 + index), "source": "concurrent"},
+                },
+            )
+            db.commit()
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        for future in [executor.submit(worker, index) for index in range(4)]:
+            future.result()
+
+    with SessionLocal() as db:
+        rows = (
+            db.query(ConfirmedVehicleSeries)
+            .filter(ConfirmedVehicleSeries.query_key == "风云t11", ConfirmedVehicleSeries.status == "active")
+            .all()
+        )
+        assert {row.platform for row in rows} == {"autohome", "dongchedi"}
+        assert len(rows) == 2
+        assert all(row.source == "concurrent" for row in rows)
 
 
 def test_series_admin_list_filters_paginates_and_counts(tmp_path: Path) -> None:
