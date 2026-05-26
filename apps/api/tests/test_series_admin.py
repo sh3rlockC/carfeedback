@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import Settings
-from app.db import init_db, reset_engine_cache
+from app.db import _active_status_predicate_is_valid, _postgres_active_index_is_valid, init_db, reset_engine_cache
 from app.models import ConfirmedVehicleSeries, SeriesAlias, SeriesAuditLog, SeriesConflict, SeriesImportBatch
 from app.services.confirmed_vehicle_series import confirmed_vehicle_series_payload, upsert_confirmed_vehicle_series
 from app.services.series_admin import (
@@ -22,6 +22,21 @@ from app.services.series_admin import (
     soft_delete_series_record,
     update_series_record,
 )
+
+
+def test_active_series_index_predicate_validation_is_exact() -> None:
+    assert _active_status_predicate_is_valid("status = 'active'")
+    assert _active_status_predicate_is_valid("status = 'active'::text")
+    assert _active_status_predicate_is_valid("((status)::text = 'active'::text)")
+    assert _postgres_active_index_is_valid(
+        {"indisunique": True, "columns": ["query_key", "platform"], "predicate": "(status)::text = 'active'::text"}
+    )
+
+    assert not _active_status_predicate_is_valid("status <> 'inactive'")
+    assert not _active_status_predicate_is_valid("status in ('active', 'pending')")
+    assert not _postgres_active_index_is_valid(
+        {"indisunique": True, "columns": ["platform", "query_key"], "predicate": "status = 'active'"}
+    )
 
 
 def test_series_admin_tables_and_columns_exist(tmp_path: Path) -> None:

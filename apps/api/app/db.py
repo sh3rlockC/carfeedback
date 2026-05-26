@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import re
 from typing import Any
 
 from sqlalchemy import create_engine, inspect, text
@@ -72,34 +73,28 @@ def _sync_existing_schema(engine) -> None:
             if dialect == "postgresql":
                 conn.execute(text("ALTER TABLE confirmed_vehicle_series DROP CONSTRAINT IF EXISTS uq_confirmed_vehicle_series_query_platform"))
                 conn.execute(text("DROP INDEX IF EXISTS uq_confirmed_vehicle_series_query_platform"))
-                conn.execute(
+                active_index = conn.execute(
                     text(
                         """
-                        DO $$
-                        DECLARE
-                            existing_definition text;
-                        BEGIN
-                            SELECT indexdef INTO existing_definition
-                            FROM pg_indexes
-                            WHERE schemaname = current_schema()
-                              AND tablename = 'confirmed_vehicle_series'
-                              AND indexname = 'uq_confirmed_vehicle_series_active_query_platform';
-
-                            IF existing_definition IS NOT NULL
-                               AND (
-                                   lower(existing_definition) NOT LIKE 'create unique index%'
-                                   OR lower(existing_definition) NOT LIKE '%query_key%'
-                                   OR lower(existing_definition) NOT LIKE '%platform%'
-                                   OR lower(existing_definition) NOT LIKE '%where%'
-                                   OR lower(existing_definition) NOT LIKE '%status%'
-                                   OR lower(existing_definition) NOT LIKE '%active%'
-                               ) THEN
-                                DROP INDEX uq_confirmed_vehicle_series_active_query_platform;
-                            END IF;
-                        END $$;
+                        SELECT
+                            i.indisunique,
+                            array_agg(a.attname ORDER BY ord.ordinality) AS columns,
+                            pg_get_expr(i.indpred, i.indrelid) AS predicate
+                        FROM pg_class idx
+                        JOIN pg_index i ON i.indexrelid = idx.oid
+                        JOIN pg_class tbl ON tbl.oid = i.indrelid
+                        JOIN pg_namespace ns ON ns.oid = tbl.relnamespace
+                        JOIN unnest(i.indkey) WITH ORDINALITY AS ord(attnum, ordinality) ON true
+                        JOIN pg_attribute a ON a.attrelid = tbl.oid AND a.attnum = ord.attnum
+                        WHERE ns.nspname = current_schema()
+                          AND tbl.relname = 'confirmed_vehicle_series'
+                          AND idx.relname = 'uq_confirmed_vehicle_series_active_query_platform'
+                        GROUP BY i.indisunique, i.indpred, i.indrelid
                         """
                     )
-                )
+                ).mappings().one_or_none()
+                if active_index is not None and not _postgres_active_index_is_valid(active_index):
+                    conn.execute(text("DROP INDEX uq_confirmed_vehicle_series_active_query_platform"))
                 conn.execute(
                     text(
                         """
@@ -111,6 +106,26 @@ def _sync_existing_schema(engine) -> None:
                 )
             elif dialect == "sqlite":
                 _sync_confirmed_vehicle_series_sqlite_indexes(conn)
+
+
+def _postgres_active_index_is_valid(index_row) -> bool:
+    columns = list(index_row["columns"] or [])
+    return (
+        bool(index_row["indisunique"])
+        and columns == ["query_key", "platform"]
+        and _active_status_predicate_is_valid(index_row["predicate"])
+    )
+
+
+def _active_status_predicate_is_valid(predicate: str | None) -> bool:
+    if not predicate:
+        return False
+    normalized = predicate.lower()
+    normalized = normalized.replace('"', "")
+    normalized = re.sub(r"::\s*(?:text|varchar|character varying)", "", normalized)
+    normalized = re.sub(r"\bconfirmed_vehicle_series\.", "", normalized)
+    normalized = re.sub(r"[\s()]+", "", normalized)
+    return normalized == "status='active'"
 
 
 def _sync_confirmed_vehicle_series_sqlite_indexes(conn) -> None:
@@ -153,13 +168,12 @@ def _sqlite_index_sql(conn, index_name: str) -> str | None:
 
 def _sqlite_active_index_is_valid(conn, index_row) -> bool:
     index_sql = (_sqlite_index_sql(conn, index_row["name"]) or "").lower()
+    predicate = index_sql.split(" where ", 1)[1] if " where " in index_sql else ""
     return (
         bool(index_row["unique"])
         and bool(index_row["partial"])
         and _sqlite_index_columns(conn, index_row["name"]) == ["query_key", "platform"]
-        and "where" in index_sql
-        and "status" in index_sql
-        and "active" in index_sql
+        and _active_status_predicate_is_valid(predicate)
     )
 
 
