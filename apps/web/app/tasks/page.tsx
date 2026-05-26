@@ -55,50 +55,49 @@ export default function TasksPage() {
   const [upgradedFilter, setUpgradedFilter] = useState<FlagFilter>("all");
   const [platformStatus, setPlatformStatus] = useState<PlatformStatusFilter>("all");
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadTasks = async (cancelled?: () => boolean) => {
+    setLoading(true);
+    setError("");
+    try {
+      const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
+      if (cancelled?.()) {
+        return;
+      }
+      setTasks(taskPayload);
 
-    const loadTasks = async () => {
-      setLoading(true);
-      setError("");
       try {
-        const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
-        if (cancelled) {
-          return;
-        }
-        setTasks(taskPayload);
-
-        try {
-          const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
-          if (!cancelled) {
-            setLoad(loadPayload);
-            setLoadIssue(null);
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setLoad(null);
-            if (err instanceof ApiError && err.status === 404) {
-              setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
-            } else {
-              setLoadIssue({
-                kind: "error",
-                message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
-              });
-            }
-          }
+        const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
+        if (!cancelled?.()) {
+          setLoad(loadPayload);
+          setLoadIssue(null);
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
+        if (!cancelled?.()) {
+          setLoad(null);
+          if (err instanceof ApiError && err.status === 404) {
+            setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
+          } else {
+            setLoadIssue({
+              kind: "error",
+              message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
+            });
+          }
         }
       }
-    };
+    } catch (err) {
+      if (!cancelled?.()) {
+        setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
+      }
+    } finally {
+      if (!cancelled?.()) {
+        setLoading(false);
+      }
+    }
+  };
 
-    void loadTasks();
+  useEffect(() => {
+    let cancelled = false;
+    void loadTasks(() => cancelled);
     return () => {
       cancelled = true;
     };
@@ -220,9 +219,9 @@ export default function TasksPage() {
               筛选
             </h2>
           </div>
-          <button className="icon-text-button" type="button" onClick={() => window.location.reload()}>
+          <button className="icon-text-button" type="button" onClick={() => void loadTasks()} disabled={loading}>
             <RotateCw size={16} />
-            刷新
+            {loading ? "刷新中" : "刷新"}
           </button>
         </div>
         <div className="task-filter-grid">
@@ -333,7 +332,7 @@ export default function TasksPage() {
                   <td>{formatDateTime(task.created_at)}</td>
                   <td>{formatDateTime(task.completed_at)}</td>
                   <td>
-                    <Link className="table-action" href={`/tasks/${task.task_id}`}>
+                    <Link className="table-action" href={`/tasks/${task.task_id}`} aria-label={`查看 ${task.display_name}`}>
                       查看
                     </Link>
                   </td>

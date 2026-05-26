@@ -2326,6 +2326,7 @@ details.card summary {
     grid-column: auto;
   }
 
+  .page-head,
   .task-page-head,
   .task-table-head,
   .task-form-head,
