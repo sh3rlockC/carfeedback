@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from io import BytesIO
 from pathlib import Path
+import subprocess
 import sys
 
 from openpyxl import Workbook, load_workbook
@@ -17,7 +18,7 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import init_db, reset_engine_cache
 from app.main import create_app
-from app.models import ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
+from app.models import Base, ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
 from app.services.passphrase import hash_passphrase
 from app.services.confirmed_vehicle_series import query_key
 from app.services.series_admin import SeriesMutation, create_series_record
@@ -735,3 +736,47 @@ def test_series_import_export_routes_require_admin_access_when_enabled(tmp_path:
 
     authorized_export = client.get("/api/admin/series/export.xlsx")
     assert authorized_export.status_code == 200
+
+
+def test_sync_confirmed_series_script_imports_non_conflicting_rows(tmp_path: Path) -> None:
+    source_url = f"sqlite+pysqlite:///{tmp_path / 'source.db'}"
+    target_url = f"sqlite+pysqlite:///{tmp_path / 'target.db'}"
+    source_engine = create_engine(source_url, future=True)
+    Base.metadata.create_all(source_engine)
+    SourceSession = sessionmaker(bind=source_engine, future=True)
+    with SourceSession() as db:
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                url="https://k.autohome.com.cn/7411",
+                title="风云T11",
+                source="manual",
+                operator="source",
+                reason="seed",
+            ),
+        )
+        db.commit()
+
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [
+            "python",
+            "scripts/series-admin/sync_confirmed_series.py",
+            "--source-url",
+            source_url,
+            "--target-url",
+            target_url,
+            "--operator",
+            "tester",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "new=1" in result.stdout
