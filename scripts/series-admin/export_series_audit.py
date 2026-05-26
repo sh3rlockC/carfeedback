@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from openpyxl import Workbook
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import sessionmaker
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +15,7 @@ API_ROOT = REPO_ROOT / "apps" / "api"
 if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
-from app.models import Base, SeriesAuditLog, SeriesConflict
+from app.models import SeriesAuditLog, SeriesConflict
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,9 +40,17 @@ def append_model_rows(worksheet, model: type[Any], rows: list[Any]) -> None:
         worksheet.append([cell_value(getattr(row, column)) for column in columns])
 
 
-def export_series_audit(*, database_url: str, output: Path) -> Path:
+def require_tables(database_url: str, *table_names: str) -> None:
     engine = create_engine(database_url, future=True)
-    Base.metadata.create_all(engine)
+    inspector = inspect(engine)
+    missing = [table_name for table_name in table_names if not inspector.has_table(table_name)]
+    if missing:
+        raise RuntimeError(f"database is missing required tables: {', '.join(missing)}")
+
+
+def export_series_audit(*, database_url: str, output: Path) -> Path:
+    require_tables(database_url, SeriesAuditLog.__tablename__, SeriesConflict.__tablename__)
+    engine = create_engine(database_url, future=True)
     SessionLocal = sessionmaker(bind=engine, future=True)
 
     workbook = Workbook()
@@ -61,11 +69,16 @@ def export_series_audit(*, database_url: str, output: Path) -> Path:
     return output
 
 
-def main() -> None:
+def main() -> int:
     args = parse_args()
-    output = export_series_audit(database_url=args.database_url, output=Path(args.output))
+    try:
+        output = export_series_audit(database_url=args.database_url, output=Path(args.output))
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     print(output)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

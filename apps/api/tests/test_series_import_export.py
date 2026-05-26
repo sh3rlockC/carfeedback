@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import init_db, reset_engine_cache
 from app.main import create_app
-from app.models import Base, ConfirmedVehicleSeries, SeriesConflict, SeriesImportBatch
+from app.models import Base, ConfirmedVehicleSeries, SeriesAuditLog, SeriesConflict, SeriesImportBatch
 from app.services.passphrase import hash_passphrase
 from app.services.confirmed_vehicle_series import query_key
 from app.services.series_admin import SeriesMutation, create_series_record
@@ -89,6 +89,39 @@ def _xlsx_with_header(header: list[str]) -> bytes:
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _database_url(path: Path) -> str:
+    return f"sqlite+pysqlite:///{path}"
+
+
+def _create_schema(database_url: str):
+    engine = create_engine(database_url, future=True)
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, future=True)
+
+
+def _run_series_sync(source_url: str, target_url: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "scripts/series-admin/sync_confirmed_series.py",
+            "--source-url",
+            source_url,
+            "--target-url",
+            target_url,
+            "--operator",
+            "tester",
+        ],
+        cwd=_repo_root(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def _empty_xlsx() -> bytes:
@@ -739,11 +772,9 @@ def test_series_import_export_routes_require_admin_access_when_enabled(tmp_path:
 
 
 def test_sync_confirmed_series_script_imports_non_conflicting_rows(tmp_path: Path) -> None:
-    source_url = f"sqlite+pysqlite:///{tmp_path / 'source.db'}"
-    target_url = f"sqlite+pysqlite:///{tmp_path / 'target.db'}"
-    source_engine = create_engine(source_url, future=True)
-    Base.metadata.create_all(source_engine)
-    SourceSession = sessionmaker(bind=source_engine, future=True)
+    source_url = _database_url(tmp_path / "source.db")
+    target_url = _database_url(tmp_path / "target.db")
+    SourceSession = _create_schema(source_url)
     with SourceSession() as db:
         create_series_record(
             db,
@@ -760,23 +791,130 @@ def test_sync_confirmed_series_script_imports_non_conflicting_rows(tmp_path: Pat
         )
         db.commit()
 
-    repo_root = Path(__file__).resolve().parents[3]
+    result = _run_series_sync(source_url, target_url)
+
+    assert result.returncode == 0, result.stderr
+    assert "new=1" in result.stdout
+    TargetSession = sessionmaker(bind=create_engine(target_url, future=True), future=True)
+    with TargetSession() as db:
+        record = db.query(ConfirmedVehicleSeries).one()
+        assert record.query_key == query_key("风云T11")
+        assert record.series_id == "7411"
+        audit = db.query(SeriesAuditLog).one()
+        assert audit.operator == "tester"
+        assert audit.reason == "legacy sync"
+
+
+def test_sync_confirmed_series_script_counts_duplicate_and_stale_key_conflict(tmp_path: Path) -> None:
+    duplicate_source_url = _database_url(tmp_path / "duplicate-source.db")
+    duplicate_target_url = _database_url(tmp_path / "duplicate-target.db")
+    for database_url in [duplicate_source_url, duplicate_target_url]:
+        SessionLocal = _create_schema(database_url)
+        with SessionLocal() as db:
+            create_series_record(
+                db,
+                SeriesMutation(
+                    query="风云T11",
+                    platform="autohome",
+                    series_id="7411",
+                    operator="seed",
+                    reason="seed",
+                ),
+            )
+            db.commit()
+
+    duplicate = _run_series_sync(duplicate_source_url, duplicate_target_url)
+
+    assert duplicate.returncode == 0, duplicate.stderr
+    assert "new=0 duplicate=1 conflict=0" in duplicate.stdout
+
+    conflict_source_url = _database_url(tmp_path / "conflict-source.db")
+    conflict_target_url = _database_url(tmp_path / "conflict-target.db")
+    SourceSession = _create_schema(conflict_source_url)
+    TargetSession = _create_schema(conflict_target_url)
+    with SourceSession() as db:
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key="legacy-stale-key",
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                status="active",
+            )
+        )
+        db.commit()
+    with TargetSession() as db:
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="8888",
+                operator="seed",
+                reason="seed",
+            ),
+        )
+        db.commit()
+
+    conflict = _run_series_sync(conflict_source_url, conflict_target_url)
+
+    assert conflict.returncode == 0, conflict.stderr
+    assert "new=0 duplicate=0 conflict=1" in conflict.stdout
+    with TargetSession() as db:
+        records = db.query(ConfirmedVehicleSeries).all()
+        assert len(records) == 1
+        assert records[0].series_id == "8888"
+        assert db.query(SeriesConflict).count() == 1
+
+
+def test_export_series_audit_script_writes_audit_and_conflict_sheets(tmp_path: Path) -> None:
+    database_url = _database_url(tmp_path / "audit.db")
+    SessionLocal = _create_schema(database_url)
+    with SessionLocal() as db:
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                operator="tester",
+                reason="seed",
+            ),
+        )
+        db.add(
+            SeriesConflict(
+                conflict_type="query_platform",
+                query_key=query_key("风云T11"),
+                query="风云T11",
+                platform="autohome",
+                existing_value_json={"series_id": "7411"},
+                incoming_value_json={"series_id": "8888"},
+                status="open",
+            )
+        )
+        db.commit()
+    output = tmp_path / "exports" / "series-audit.xlsx"
+
     result = subprocess.run(
         [
-            "python",
-            "scripts/series-admin/sync_confirmed_series.py",
-            "--source-url",
-            source_url,
-            "--target-url",
-            target_url,
-            "--operator",
-            "tester",
+            sys.executable,
+            "scripts/series-admin/export_series_audit.py",
+            "--database-url",
+            database_url,
+            "--output",
+            str(output),
         ],
-        cwd=repo_root,
+        cwd=_repo_root(),
         text=True,
         capture_output=True,
         check=False,
     )
 
     assert result.returncode == 0, result.stderr
-    assert "new=1" in result.stdout
+    assert str(output) in result.stdout
+    workbook = load_workbook(output)
+    assert {"series_audit", "series_conflicts"}.issubset(workbook.sheetnames)
+    audit_sheet = workbook["series_audit"]
+    conflict_sheet = workbook["series_conflicts"]
+    assert audit_sheet["D2"].value == "tester"
+    assert '"series_id": "8888"' in conflict_sheet["G2"].value
