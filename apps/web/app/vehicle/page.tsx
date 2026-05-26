@@ -43,8 +43,8 @@ export default function VehiclePage() {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 2 步 / 共 5 步</p>
-        <h2>需要先输入口令</h2>
-        <p className="helper">请先完成访问口令校验，再进入车型识别。</p>
+        <h2>旧流程已并入工作台</h2>
+        <p className="helper">当前版本可直接进入新建任务，无需单独校验。</p>
         <div className="actions">
           <Link className="button" href="/">
             返回工作台
@@ -89,7 +89,7 @@ export default function VehiclePage() {
       router.push("/candidates");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError("访问会话已过期，请重新输入口令。");
+        setError("访问会话已过期，请返回工作台重新发起任务。");
       } else if (err instanceof ApiError) {
         setError(err.message);
       } else {
@@ -139,7 +139,7 @@ export default function VehiclePage() {
       router.push("/candidates");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError("访问会话已过期，请重新输入口令。");
+        setError("访问会话已过期，请返回工作台重新发起任务。");
       } else if (err instanceof ApiError) {
         setError(err.message);
       } else {
@@ -288,7 +288,7 @@ export default function VehiclePage() {
           <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据会进入长期语料库并按增量方式更新。</p>
           <div className="meta-row" style={{ marginTop: 14 }}>
             <StatusPill>后端识别</StatusPill>
-            <StatusPill tone="success">会话口令</StatusPill>
+            <StatusPill tone="success">会话状态</StatusPill>
             <StatusPill tone="accent">支持手动兜底</StatusPill>
           </div>
           <p className="field-hint" style={{ marginTop: 14 }}>
