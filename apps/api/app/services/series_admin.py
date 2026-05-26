@@ -193,6 +193,8 @@ def update_series_record(
     normalized_platform = mutation.platform.strip()
     key = query_key(normalized_query)
     conflict = _active_conflict(db, query_key_value=key, platform=normalized_platform, exclude_id=record.id)
+    # Keep allow_conflict for API compatibility, but active identity conflicts are always safe:
+    # record the conflict and leave the target row unchanged instead of relying on DB errors.
     if conflict is not None:
         _record_conflict(
             db,

@@ -75,6 +75,34 @@ def _sync_existing_schema(engine) -> None:
                 conn.execute(
                     text(
                         """
+                        DO $$
+                        DECLARE
+                            existing_definition text;
+                        BEGIN
+                            SELECT indexdef INTO existing_definition
+                            FROM pg_indexes
+                            WHERE schemaname = current_schema()
+                              AND tablename = 'confirmed_vehicle_series'
+                              AND indexname = 'uq_confirmed_vehicle_series_active_query_platform';
+
+                            IF existing_definition IS NOT NULL
+                               AND (
+                                   lower(existing_definition) NOT LIKE 'create unique index%'
+                                   OR lower(existing_definition) NOT LIKE '%query_key%'
+                                   OR lower(existing_definition) NOT LIKE '%platform%'
+                                   OR lower(existing_definition) NOT LIKE '%where%'
+                                   OR lower(existing_definition) NOT LIKE '%status%'
+                                   OR lower(existing_definition) NOT LIKE '%active%'
+                               ) THEN
+                                DROP INDEX uq_confirmed_vehicle_series_active_query_platform;
+                            END IF;
+                        END $$;
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
                         CREATE UNIQUE INDEX IF NOT EXISTS uq_confirmed_vehicle_series_active_query_platform
                         ON confirmed_vehicle_series (query_key, platform)
                         WHERE status = 'active'
@@ -87,14 +115,113 @@ def _sync_existing_schema(engine) -> None:
 
 def _sync_confirmed_vehicle_series_sqlite_indexes(conn) -> None:
     index_rows = conn.execute(text("PRAGMA index_list('confirmed_vehicle_series')")).mappings().all()
-    has_active_index = any(row["name"] == "uq_confirmed_vehicle_series_active_query_platform" for row in index_rows)
-    has_full_unique_index = any(
-        row["unique"] and row["name"] != "uq_confirmed_vehicle_series_active_query_platform"
+    active_index_name = "uq_confirmed_vehicle_series_active_query_platform"
+    active_index = next((row for row in index_rows if row["name"] == active_index_name), None)
+    if active_index is not None and not _sqlite_active_index_is_valid(conn, active_index):
+        conn.execute(text(f"DROP INDEX {active_index_name}"))
+        index_rows = [row for row in index_rows if row["name"] != active_index_name]
+        active_index = None
+
+    legacy_unique_indexes = [
+        row
         for row in index_rows
-    )
-    if has_active_index and not has_full_unique_index:
+        if _sqlite_index_is_legacy_confirmed_series_unique(conn, row)
+    ]
+    if not legacy_unique_indexes:
+        if active_index is None:
+            _create_confirmed_vehicle_series_sqlite_active_index(conn)
         return
 
+    _assert_confirmed_vehicle_series_sqlite_rebuild_safe(conn, index_rows, legacy_unique_indexes)
+    _rebuild_confirmed_vehicle_series_sqlite_table(conn)
+    _create_confirmed_vehicle_series_sqlite_active_index(conn)
+
+
+def _sqlite_index_columns(conn, index_name: str) -> list[str]:
+    return [
+        row["name"]
+        for row in conn.execute(text(f"PRAGMA index_info('{index_name}')")).mappings().all()
+    ]
+
+
+def _sqlite_index_sql(conn, index_name: str) -> str | None:
+    return conn.execute(
+        text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name"),
+        {"name": index_name},
+    ).scalar_one_or_none()
+
+
+def _sqlite_active_index_is_valid(conn, index_row) -> bool:
+    index_sql = (_sqlite_index_sql(conn, index_row["name"]) or "").lower()
+    return (
+        bool(index_row["unique"])
+        and bool(index_row["partial"])
+        and _sqlite_index_columns(conn, index_row["name"]) == ["query_key", "platform"]
+        and "where" in index_sql
+        and "status" in index_sql
+        and "active" in index_sql
+    )
+
+
+def _sqlite_index_is_legacy_confirmed_series_unique(conn, index_row) -> bool:
+    if not index_row["unique"] or index_row["partial"]:
+        return False
+    return _sqlite_index_columns(conn, index_row["name"]) == ["query_key", "platform"]
+
+
+def _assert_confirmed_vehicle_series_sqlite_rebuild_safe(conn, index_rows, legacy_unique_indexes) -> None:
+    expected_columns = {
+        "id",
+        "query_key",
+        "query",
+        "platform",
+        "series_id",
+        "status",
+        "url",
+        "title",
+        "source",
+        "import_batch_id",
+        "deleted_at",
+        "created_at",
+        "updated_at",
+    }
+    actual_columns = {
+        row["name"]
+        for row in conn.execute(text("PRAGMA table_info('confirmed_vehicle_series')")).mappings().all()
+    }
+    if actual_columns != expected_columns:
+        raise RuntimeError(
+            "Cannot rebuild confirmed_vehicle_series because it has unexpected columns; "
+            f"expected {sorted(expected_columns)}, found {sorted(actual_columns)}"
+        )
+
+    legacy_names = {row["name"] for row in legacy_unique_indexes}
+    unknown_indexes = [
+        row["name"]
+        for row in index_rows
+        if row["name"] not in legacy_names
+        and row["name"] != "uq_confirmed_vehicle_series_active_query_platform"
+    ]
+    if unknown_indexes:
+        raise RuntimeError(
+            "Cannot rebuild confirmed_vehicle_series because it has indexes that would need manual migration: "
+            f"{sorted(unknown_indexes)}"
+        )
+
+    triggers = [
+        row["name"]
+        for row in conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'confirmed_vehicle_series'")
+        ).mappings().all()
+    ]
+    if triggers:
+        raise RuntimeError(
+            "Cannot rebuild confirmed_vehicle_series because it has triggers that would need manual migration: "
+            f"{sorted(triggers)}"
+        )
+
+
+def _rebuild_confirmed_vehicle_series_sqlite_table(conn) -> None:
     conn.execute(text("DROP TABLE IF EXISTS confirmed_vehicle_series_new"))
     conn.execute(
         text(
@@ -156,6 +283,9 @@ def _sync_confirmed_vehicle_series_sqlite_indexes(conn) -> None:
     )
     conn.execute(text("DROP TABLE confirmed_vehicle_series"))
     conn.execute(text("ALTER TABLE confirmed_vehicle_series_new RENAME TO confirmed_vehicle_series"))
+
+
+def _create_confirmed_vehicle_series_sqlite_active_index(conn) -> None:
     conn.execute(
         text(
             """
