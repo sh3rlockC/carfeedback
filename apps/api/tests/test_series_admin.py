@@ -78,6 +78,7 @@ def test_series_admin_models_persist_status_alias_audit_and_conflict(tmp_path: P
         db.add(conflict)
         db.commit()
 
+        assert db.query(SeriesImportBatch).one().source == "legacy_sync"
         assert db.query(ConfirmedVehicleSeries).one().status == "active"
         assert db.query(SeriesAlias).one().canonical_query == "风云T11"
         assert db.query(SeriesAuditLog).one().operator == "tester"
