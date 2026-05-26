@@ -113,7 +113,7 @@ export default function ProgressPage() {
 
     const state = getFlowState();
     if (state.mode === "comparison") {
-      if (!state.accessVersion || !state.comparisonId) {
+      if (!state.comparisonId) {
         return;
       }
 
@@ -151,7 +151,7 @@ export default function ProgressPage() {
       };
     }
 
-    if (!state.accessVersion || !state.jobId) {
+    if (!state.jobId) {
       return;
     }
 
@@ -202,7 +202,7 @@ export default function ProgressPage() {
 
   const flowState = getFlowState();
   if (flowState.mode === "comparison") {
-    if (!flowState.accessVersion || !flowState.comparisonId) {
+    if (!flowState.comparisonId) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 4 步 / 共 5 步</p>
@@ -270,7 +270,7 @@ export default function ProgressPage() {
     );
   }
 
-  if (!flowState.accessVersion || !flowState.jobId) {
+  if (!flowState.jobId) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 4 步 / 共 5 步</p>

@@ -25,7 +25,7 @@ export default function VehiclePage() {
   useEffect(() => {
     setReady(true);
     const state = getFlowState();
-    if (state.accessVersion) {
+    if (state.mode) {
       setMode(state.mode === "comparison" ? "comparison" : "single");
       setQuery(state.vehicleQuery ?? "");
       if (state.comparisonVehicles?.length) {
@@ -39,24 +39,6 @@ export default function VehiclePage() {
   }
 
   const flowState = getFlowState();
-  if (!flowState.accessVersion) {
-    return (
-      <main className="panel guard">
-        <p className="eyebrow">第 2 步 / 共 5 步</p>
-        <h2>旧流程已并入工作台</h2>
-        <p className="helper">当前版本可直接进入新建任务，无需单独校验。</p>
-        <div className="actions">
-          <Link className="button" href="/">
-            返回工作台
-          </Link>
-          <Link className="button secondary" href="/tasks/new">
-            前往新建任务
-          </Link>
-        </div>
-      </main>
-    );
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = query.trim();
@@ -75,6 +57,7 @@ export default function VehiclePage() {
       });
 
       setFlowState({
+        accessVersion: flowState.accessVersion ?? "direct",
         mode: "single",
         vehicleQuery: trimmed,
         vehicleResolve: payload,
@@ -120,6 +103,7 @@ export default function VehiclePage() {
         body: toJsonBody({ vehicles: vehicles.map((vehicle) => ({ query: vehicle })) }),
       });
       setFlowState({
+        accessVersion: flowState.accessVersion ?? "direct",
         mode: "comparison",
         vehicleQuery: vehicles.join(" / "),
         vehicleResolve: null,

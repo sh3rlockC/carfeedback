@@ -176,7 +176,7 @@ export default function CandidatesPage() {
 
   if (flowState.mode === "comparison") {
     const options = flowState.comparisonOptions?.vehicles ?? [];
-    if (!flowState.accessVersion || options.length < 2) {
+    if (options.length < 2) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 3 步 / 共 5 步</p>
@@ -312,7 +312,7 @@ export default function CandidatesPage() {
     );
   }
 
-  if (!flowState.accessVersion || !flowState.vehicleQuery || !resolve) {
+  if (!flowState.vehicleQuery || !resolve) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 3 步 / 共 5 步</p>

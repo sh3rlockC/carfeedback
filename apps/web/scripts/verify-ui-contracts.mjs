@@ -95,6 +95,18 @@ for (const path of copyTargets) {
   assertNotIncludes(path, "情报舱");
 }
 
+const directAccessTargets = [
+  "apps/web/app/vehicle/page.tsx",
+  "apps/web/app/candidates/page.tsx",
+  "apps/web/app/progress/page.tsx",
+  "apps/web/app/result/page.tsx",
+];
+
+for (const path of directAccessTargets) {
+  assertNotIncludes(path, "!flowState.accessVersion");
+  assertNotIncludes(path, "!state.accessVersion");
+}
+
 if (failures.length > 0) {
   console.error("UI contract verification failed:");
   for (const failure of failures) {

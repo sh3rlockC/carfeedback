@@ -298,7 +298,7 @@ export default function ResultPage() {
     }
 
     if (flowState.mode === "comparison") {
-      if (!flowState.accessVersion || !flowState.comparisonId) {
+      if (!flowState.comparisonId) {
         return;
       }
 
@@ -339,7 +339,7 @@ export default function ResultPage() {
       };
     }
 
-    if (!flowState.accessVersion || !flowState.jobId) {
+    if (!flowState.jobId) {
       return;
     }
 
@@ -387,10 +387,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [flowState.accessVersion, flowState.comparisonId, flowState.jobId, flowState.mode, ready]);
+  }, [flowState.comparisonId, flowState.jobId, flowState.mode, ready]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+    if (!ready || !flowState.jobId || !result || result.status === "expired") {
       return;
     }
 
@@ -430,10 +430,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, result]);
+  }, [ready, flowState.jobId, result]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+    if (!ready || !flowState.jobId || !result || result.status === "expired") {
       return;
     }
 
@@ -470,10 +470,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, result, timeStart, timeEnd]);
+  }, [ready, flowState.jobId, result, timeStart, timeEnd]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || activeTimeReportCount === 0) {
+    if (!ready || !flowState.jobId || activeTimeReportCount === 0) {
       return;
     }
 
@@ -485,7 +485,7 @@ export default function ResultPage() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, activeTimeReportCount]);
+  }, [ready, flowState.jobId, activeTimeReportCount]);
 
   async function loadTimeReports(jobId: string) {
     const payload = await apiRequest<TimeReportListResponse>(`/api/jobs/${jobId}/time-reports`);
@@ -561,7 +561,7 @@ export default function ResultPage() {
   }
 
   if (flowState.mode === "comparison") {
-    if (!flowState.accessVersion || !flowState.comparisonId) {
+    if (!flowState.comparisonId) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 5 步 / 共 5 步</p>
@@ -706,7 +706,7 @@ export default function ResultPage() {
     );
   }
 
-  if (!flowState.accessVersion || !flowState.jobId) {
+  if (!flowState.jobId) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 5 步 / 共 5 步</p>
