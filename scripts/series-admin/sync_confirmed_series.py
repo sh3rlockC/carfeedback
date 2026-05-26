@@ -52,6 +52,7 @@ def sync_confirmed_series(*, source_url: str, target_url: str, operator: str) ->
         for row in rows:
             normalized_query_key = query_key(row.query)
             normalized_platform = row.platform.strip()
+            normalized_series_id = row.series_id.strip()
             existing = (
                 target_db.query(ConfirmedVehicleSeries)
                 .filter(
@@ -61,7 +62,7 @@ def sync_confirmed_series(*, source_url: str, target_url: str, operator: str) ->
                 )
                 .one_or_none()
             )
-            if existing is not None and existing.series_id == row.series_id:
+            if existing is not None and existing.series_id == normalized_series_id:
                 summary["duplicate"] += 1
                 continue
 

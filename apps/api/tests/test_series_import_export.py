@@ -828,6 +828,42 @@ def test_sync_confirmed_series_script_counts_duplicate_and_stale_key_conflict(tm
     assert duplicate.returncode == 0, duplicate.stderr
     assert "new=0 duplicate=1 conflict=0" in duplicate.stdout
 
+    whitespace_source_url = _database_url(tmp_path / "whitespace-source.db")
+    whitespace_target_url = _database_url(tmp_path / "whitespace-target.db")
+    SourceSession = _create_schema(whitespace_source_url)
+    TargetSession = _create_schema(whitespace_target_url)
+    with SourceSession() as db:
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key=query_key("风云T11"),
+                query="风云T11",
+                platform="autohome",
+                series_id=" 7411 ",
+                status="active",
+            )
+        )
+        db.commit()
+    with TargetSession() as db:
+        create_series_record(
+            db,
+            SeriesMutation(
+                query="风云T11",
+                platform="autohome",
+                series_id="7411",
+                operator="seed",
+                reason="seed",
+            ),
+        )
+        db.commit()
+
+    whitespace_duplicate = _run_series_sync(whitespace_source_url, whitespace_target_url)
+
+    assert whitespace_duplicate.returncode == 0, whitespace_duplicate.stderr
+    assert "new=0 duplicate=1 conflict=0" in whitespace_duplicate.stdout
+    with TargetSession() as db:
+        assert db.query(ConfirmedVehicleSeries).count() == 1
+        assert db.query(SeriesConflict).count() == 0
+
     conflict_source_url = _database_url(tmp_path / "conflict-source.db")
     conflict_target_url = _database_url(tmp_path / "conflict-target.db")
     SourceSession = _create_schema(conflict_source_url)
