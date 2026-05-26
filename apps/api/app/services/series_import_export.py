@@ -78,6 +78,7 @@ def _read_csv_rows(content: bytes) -> list[dict[str, str]]:
     if reader.fieldnames is None:
         raise ValueError(HEADER_ERROR)
     _validate_headers(reader.fieldnames)
+    reader.fieldnames = [field.strip() for field in reader.fieldnames]
     return [_normalize_row(raw, index) for index, raw in enumerate(reader, start=2)]
 
 
@@ -158,11 +159,12 @@ def _invalid_reason(row: dict[str, str]) -> str | None:
 
 
 def _classify_rows(db: Session, *, filename: str, content: bytes) -> ImportPreview:
+    parsed_rows = _read_rows(filename, content)
     summary = {key: 0 for key in IMPORT_SUMMARY_KEYS}
     previews: list[ImportRowPreview] = []
     working_set = _active_working_set(db)
 
-    for row in _read_rows(filename, content):
+    for row in parsed_rows:
         row_number = int(row["_row_number"])
         error = _invalid_reason(row)
         key = query_key(row["query"]) if row["query"] else None

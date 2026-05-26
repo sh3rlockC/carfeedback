@@ -342,6 +342,52 @@ def test_invalid_utf8_csv_is_rejected_with_clean_value_error(tmp_path: Path) -> 
             preview_series_import(db, filename="series.csv", content=b"\xff\xfe\x80")
 
 
+def test_parse_errors_happen_before_autoflush_of_pending_duplicates(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    with SessionLocal() as db:
+        _seed_existing(db)
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key=query_key("风云T11"),
+                query="风云T11",
+                platform="autohome",
+                series_id="9999",
+                status="active",
+            )
+        )
+
+        with pytest.raises(ValueError, match="invalid csv encoding"):
+            preview_series_import(db, filename="series.csv", content=b"\xff\xfe\x80")
+        db.rollback()
+
+    with SessionLocal() as db:
+        _seed_existing(db)
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key=query_key("风云T11"),
+                query="风云T11",
+                platform="autohome",
+                series_id="9999",
+                status="active",
+            )
+        )
+
+        with pytest.raises(ValueError, match="invalid excel file"):
+            commit_series_import(db, filename="series.xlsx", content=b"not a workbook", operator="operator-1")
+
+
+def test_csv_headers_are_stripped_before_row_mapping(tmp_path: Path) -> None:
+    SessionLocal = _session(tmp_path)
+    content = b" query, platform, series_id\n \xe9\xa3\x8e\xe4\xba\x91T11 , autohome , 7411\n"
+    with SessionLocal() as db:
+        preview = preview_series_import(db, filename="series.csv", content=content)
+
+        assert preview.summary == {"new": 1, "duplicate": 0, "conflict": 0, "invalid": 0}
+        assert preview.rows[0].query == "风云T11"
+        assert preview.rows[0].platform == "autohome"
+        assert preview.rows[0].series_id == "7411"
+
+
 def test_corrupt_xlsx_is_rejected_with_clean_value_error(tmp_path: Path) -> None:
     SessionLocal = _session(tmp_path)
     with SessionLocal() as db:
