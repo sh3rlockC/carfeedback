@@ -16,6 +16,7 @@ from worker_app.corpus import (
     load_platform_state,
     read_validation_incremental_stats,
     read_workbook_rows,
+    sync_vehicle_corpus_files,
     upsert_platform_rows,
     write_known_links_file,
 )
@@ -265,6 +266,27 @@ def _summary_payload(collection_plan: dict[str, dict]) -> dict[str, dict]:
     return payload
 
 
+def _sync_vehicle_corpus_files_if_configured(
+    *,
+    database_url: str,
+    query: str,
+    model_name: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+) -> dict | None:
+    corpus_root = os.getenv("CORPUS_ROOT") or os.getenv("KOUBEI_CORPUS_ROOT")
+    if not corpus_root:
+        return None
+    return sync_vehicle_corpus_files(
+        database_url=database_url,
+        corpus_root=corpus_root,
+        query=query,
+        model_name=model_name,
+        autohome_series_id=autohome_series_id,
+        dongchedi_series_id=dongchedi_series_id,
+    )
+
+
 def run_job(
     *,
     job_id: str,
@@ -314,6 +336,13 @@ def run_job(
                     stage_name=str(event["stage"]),
                     series_id=series_by_stage[str(event["stage"])],
                     collection_plan=collection_plan,
+                )
+                _sync_vehicle_corpus_files_if_configured(
+                    database_url=database_url,
+                    query=job_inputs.query,
+                    model_name=job_inputs.model_name,
+                    autohome_series_id=job_inputs.autohome_series_id,
+                    dongchedi_series_id=job_inputs.dongchedi_series_id,
                 )
                 if hasattr(store, "update_collection_summary"):
                     store.update_collection_summary(job_id, _summary_payload(collection_plan))

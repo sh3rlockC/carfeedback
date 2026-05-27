@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import get_session_local
 from app.main import create_app
-from app.models import Job, JobArtifact, JobStageRun, KoubeiRawComment
+from app.models import ConfirmedVehicleSeries, Job, JobArtifact, JobStageRun, KoubeiRawComment
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import hash_passphrase
 
@@ -52,6 +52,7 @@ def make_client(
         database_url=f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
+        access_control_enabled=True,
         session_secret="test-secret",
         artifact_root=str(tmp_path / "artifacts"),
         workspace_root="/Users/xyc/Documents/codexwork",
@@ -187,6 +188,132 @@ def test_create_job_accepts_full_refresh_collection_mode(tmp_path: Path) -> None
         assert job.collection_mode == "full_refresh"
     finally:
         session.close()
+
+
+def test_create_job_rejects_mismatched_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+                "dongchedi": {
+                    "series_id": "25545",
+                    "title": "风云X3L",
+                    "canonical_query": "风云X3L",
+                    "canonical_query_key": "fengyun x3l",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+
+
+def test_create_job_accepts_matching_alias_canonical_candidates(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+                "dongchedi": {
+                    "series_id": "9436",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                    "canonical_query_key": "fengyun t11",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
+
+    session = get_session_local()()
+    try:
+        records = session.query(ConfirmedVehicleSeries).filter(ConfirmedVehicleSeries.status == "active").all()
+        assert {record.query_key for record in records} == {"风云t11"}
+        assert {record.query for record in records} == {"风云T11"}
+        assert {record.platform: record.series_id for record in records} == {
+            "autohome": "7411",
+            "dongchedi": "9436",
+        }
+    finally:
+        session.close()
+
+
+def test_create_job_rejects_mismatched_alias_canonical_queries_without_keys(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                },
+                "dongchedi": {
+                    "series_id": "25545",
+                    "title": "风云X3L",
+                    "canonical_query": "风云X3L",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "selected candidates must belong to the same canonical vehicle"
+
+
+def test_create_job_accepts_matching_alias_canonical_queries_without_keys(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    verify_response = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify_response.status_code == 200
+
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云",
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "7411",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                },
+                "dongchedi": {
+                    "series_id": "9436",
+                    "title": "风云T11",
+                    "canonical_query": "风云T11",
+                },
+            },
+        },
+    )
+
+    assert response.status_code == 200
 
 
 def test_progress_endpoint_supports_incremental_check_stage(tmp_path: Path) -> None:

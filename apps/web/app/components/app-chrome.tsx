@@ -4,8 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
+import { Columns3, LayoutDashboard, ListChecks, PackageCheck, Plus, Rows3 } from "lucide-react";
+import { defaultDensityMode, nextDensityMode, readDensityMode, writeDensityMode, type DensityMode } from "@/lib/density";
 import { getFlowState, type FlowState } from "@/lib/flow-state";
-import { StepRail, stepForPath } from "./ui";
+import { withoutBasePath } from "@/lib/paths";
 
 const stageLabels: Record<string, string> = {
   queued: "排队中",
@@ -67,8 +69,9 @@ function activeTaskId(state: FlowState) {
 
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const activeStep = stepForPath(pathname);
+  const currentPathname = withoutBasePath(pathname) ?? "/";
   const [flowState, setLocalFlowState] = useState<FlowState>(emptyFlowState);
+  const [density, setDensity] = useState<DensityMode>(defaultDensityMode);
 
   useEffect(() => {
     const refresh = () => setLocalFlowState(getFlowState());
@@ -84,42 +87,95 @@ export function AppChrome({ children }: { children: ReactNode }) {
     };
   }, [pathname]);
 
-  return (
-    <div className="app-shell">
-      <header className="command-bar">
-        <div className="brand-lockup">
-          <p className="eyebrow">VEHICLE KOUBEI INTEL</p>
-          <h1>车型口碑情报舱</h1>
-          <p className="topbar-copy">双平台采集、AI 一页纸、词云和智能问答的内部演示工作台。</p>
-        </div>
+  useEffect(() => {
+    setDensity(readDensityMode());
+  }, []);
 
-        <div className="mission-status" aria-label="当前任务状态">
+  function toggleDensity() {
+    setDensity((current) => {
+      const next = nextDensityMode(current);
+      writeDensityMode(next);
+      return next;
+    });
+  }
+
+  function isNavActive(href: string) {
+    if (href === "/") {
+      return currentPathname === "/";
+    }
+
+    if (href === "/tasks/new") {
+      return currentPathname === "/tasks/new";
+    }
+
+    if (href === "/tasks") {
+      return currentPathname === "/tasks" || (currentPathname.startsWith("/tasks/") && currentPathname !== "/tasks/new");
+    }
+
+    if (href === "/result") {
+      return currentPathname === "/result";
+    }
+
+    return currentPathname === href;
+  }
+
+  function navClass(href: string) {
+    return isNavActive(href) ? "active" : "";
+  }
+
+  function navAriaCurrent(href: string) {
+    return isNavActive(href) ? "page" : undefined;
+  }
+
+  return (
+    <div className="workbench-shell" data-density={density}>
+      <aside className="workbench-sidebar">
+        <Link className="workbench-brand" href="/">
+          <LayoutDashboard size={20} />
+          <span>车型口碑工作台</span>
+        </Link>
+        <nav className="workbench-nav" aria-label="主导航">
+          <Link className={navClass("/")} href="/" aria-current={navAriaCurrent("/")}>
+            <LayoutDashboard size={17} />
+            工作台总览
+          </Link>
+          <Link className={navClass("/tasks/new")} href="/tasks/new" aria-current={navAriaCurrent("/tasks/new")}>
+            <Plus size={17} />
+            新建任务
+          </Link>
+          <Link className={navClass("/tasks")} href="/tasks" aria-current={navAriaCurrent("/tasks")}>
+            <ListChecks size={17} />
+            任务中心
+          </Link>
+          <Link className={navClass("/result")} href="/result" aria-current={navAriaCurrent("/result")}>
+            <PackageCheck size={17} />
+            结果归档
+          </Link>
+        </nav>
+      </aside>
+      <div className="workbench-main">
+        <header className="workbench-topbar">
           <div>
-            <span>车型</span>
-            <strong>{flowState.mode === "comparison" ? `${flowState.comparisonVehicles?.length ?? 0} 车对比` : flowState.vehicleQuery || "待输入"}</strong>
-          </div>
-          <div>
-            <span>任务</span>
-            <strong>{shortJobId(activeTaskId(flowState))}</strong>
-          </div>
-          <div>
-            <span>阶段</span>
+            <p className="topbar-label">当前工作区</p>
             <strong>{currentStageLabel(flowState)}</strong>
           </div>
-          <div>
-            <span>访问</span>
-            <strong>{flowState.accessVersion ? "已授权" : "待口令"}</strong>
+          <div className="topbar-metrics">
+            <span>{flowState.mode === "comparison" ? `${flowState.comparisonVehicles?.length ?? 0} 车对比` : flowState.vehicleQuery || "暂无运行任务"}</span>
+            <span>{shortJobId(activeTaskId(flowState))}</span>
           </div>
-        </div>
-      </header>
-
-      <nav className="utility-nav" aria-label="全局导航">
-        <Link href="/tasks">任务中心</Link>
-      </nav>
-
-      <StepRail activeStep={activeStep} />
-
-      <div className="content-stage">{children}</div>
+          <button
+            className="icon-text-button"
+            type="button"
+            onClick={toggleDensity}
+            aria-label={`切换显示密度，当前为${density === "compact" ? "紧凑" : "标准"}`}
+            aria-pressed={density === "compact"}
+          >
+            {density === "compact" ? <Rows3 size={16} /> : <Columns3 size={16} />}
+            {density === "compact" ? "紧凑" : "标准"}
+          </button>
+        </header>
+        <main className="workbench-content">{children}</main>
+      </div>
     </div>
   );
 }

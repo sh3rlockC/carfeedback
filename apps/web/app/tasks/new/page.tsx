@@ -1,5 +1,6 @@
 "use client";
 
+import { GitCompareArrows, Plus, Search, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
@@ -82,17 +83,33 @@ export default function NewTaskPage() {
   };
 
   return (
-    <main className="stack-lg task-workbench">
+    <main className="stack-lg task-workbench task-create-layout">
       <SignalPanel className="stack">
         <SectionHeader eyebrow="CREATE TASK" title="创建任务" />
-        <div className="task-mode-grid">
-          <button className={`card ${mode === "single" ? "selected" : ""}`} type="button" onClick={() => setMode("single")}>
-            <h3>单车型</h3>
-            <p>创建一个车型的采集与分析任务。</p>
+        <div className="task-mode-grid" role="group" aria-label="任务类型">
+          <button
+            className={`mode-card ${mode === "single" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("single")}
+            aria-pressed={mode === "single"}
+          >
+            <Search size={18} aria-hidden="true" />
+            <span>
+              <strong>单车型查询</strong>
+              <small>一个车型的增量采集、报告和交付物。</small>
+            </span>
           </button>
-          <button className={`card ${mode === "comparison" ? "selected" : ""}`} type="button" onClick={() => setMode("comparison")}>
-            <h3>对比</h3>
-            <p>2 到 5 个车型生成对比任务。</p>
+          <button
+            className={`mode-card ${mode === "comparison" ? "selected" : ""}`}
+            type="button"
+            onClick={() => setMode("comparison")}
+            aria-pressed={mode === "comparison"}
+          >
+            <GitCompareArrows size={18} aria-hidden="true" />
+            <span>
+              <strong>多车型对比</strong>
+              <small>2 到 5 个车型并行采集并生成对比结果。</small>
+            </span>
           </button>
         </div>
       </SignalPanel>
@@ -117,25 +134,29 @@ export default function NewTaskPage() {
                     <input value={query} onChange={(event) => updateComparisonQuery(index, event.target.value)} placeholder="输入车型名称" />
                   </label>
                   {comparisonQueries.length > 2 ? (
-                    <button className="button secondary" type="button" onClick={() => removeComparisonSlot(index)}>
-                      移除
+                    <button className="button secondary task-remove-button" type="button" onClick={() => removeComparisonSlot(index)} aria-label={`移除车型 ${index + 1}`}>
+                      <Trash2 size={16} aria-hidden="true" />
                     </button>
                   ) : null}
                 </div>
               ))}
               <div className="actions">
                 <button className="button secondary" type="button" onClick={addComparisonSlot} disabled={comparisonQueries.length >= 5}>
+                  <Plus size={16} aria-hidden="true" />
                   添加车型
                 </button>
               </div>
             </div>
           )}
 
+          <p className="helper task-create-helper">系统会先对照历史语料库，再采集新增评论。多车型任务会进入可用车道排队。</p>
+
           {error ? <p className="error">{error}</p> : null}
 
           <div className="actions">
             <button className="button" type="submit" disabled={!canSubmit || submitting}>
-              {submitting ? "创建中" : "创建任务"}
+              <Plus size={16} aria-hidden="true" />
+              {submitting ? "正在创建" : "创建增量采集任务"}
             </button>
           </div>
         </form>

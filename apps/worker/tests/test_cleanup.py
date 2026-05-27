@@ -389,7 +389,37 @@ def test_start_cleanup_process_uses_daemon_process(monkeypatch, tmp_path: Path) 
     }
 
 
-def test_worker_main_starts_cleanup_process_with_environment_settings(monkeypatch, tmp_path: Path) -> None:
+def test_worker_main_skips_cleanup_process_by_default(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeWorker:
+        def __init__(self, queues, connection):
+            captured["queues"] = queues
+            captured["connection"] = connection
+
+        def work(self, *, with_scheduler: bool):
+            captured["with_scheduler"] = with_scheduler
+
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/9")
+    monkeypatch.setenv("WORKER_QUEUE_NAME", "cleanup-test")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.delenv("JOB_ARTIFACT_CLEANUP_ENABLED", raising=False)
+    monkeypatch.setattr(worker_module, "make_redis_connection", lambda redis_url: f"connection:{redis_url}")
+    monkeypatch.setattr(
+        worker_module,
+        "start_cleanup_process",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("cleanup should not start")),
+    )
+    monkeypatch.setattr(worker_module, "Worker", FakeWorker)
+
+    assert worker_module.main() == 0
+    assert captured["queues"] == ["cleanup-test"]
+    assert captured["connection"] == "connection:redis://127.0.0.1:6379/9"
+    assert captured["with_scheduler"] is False
+
+
+def test_worker_main_starts_cleanup_process_when_enabled(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class FakeWorker:
@@ -410,6 +440,7 @@ def test_worker_main_starts_cleanup_process_with_environment_settings(monkeypatc
     monkeypatch.setenv("WORKER_QUEUE_NAME", "cleanup-test")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'worker.db'}")
     monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setenv("JOB_ARTIFACT_CLEANUP_ENABLED", "true")
     monkeypatch.setenv("JOB_ARTIFACT_RETENTION_DAYS", "5")
     monkeypatch.setenv("JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS", "60")
     monkeypatch.setattr(worker_module, "make_redis_connection", lambda redis_url: f"connection:{redis_url}")

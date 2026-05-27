@@ -50,6 +50,11 @@ def _created_at_sort_key(item):
     return (*_datetime_asc_key(item.created_at), item.id or 0)
 
 
+def _run_sort_key(item):
+    run = item.run
+    return (run.platform if run is not None else "", *_datetime_asc_key(run.created_at if run is not None else None), item.id or 0)
+
+
 def _task_base(task: Task) -> dict:
     return {
         "task_id": task.task_id,
@@ -102,5 +107,33 @@ def task_detail_payload(task: Task) -> dict:
             "created_at": _dt(artifact.created_at),
         }
         for artifact in sorted(task.artifacts, key=_created_at_sort_key)
+    ]
+    payload["collection_runs"] = [
+        {
+            "run_id": link.run.run_id,
+            "platform": link.run.platform,
+            "query_key": link.run.query_key,
+            "model_name": link.run.model_name,
+            "series_id": link.run.series_id,
+            "status": link.run.status,
+            "mode": link.run.mode,
+            "agent_id": link.run.agent_id,
+            "failure_category": link.run.failure_category,
+            "output_path": link.run.output_path,
+            "created_at": _dt(link.run.created_at),
+            "started_at": _dt(link.run.started_at),
+            "finished_at": _dt(link.run.finished_at),
+            "events": [
+                {
+                    "event_id": event.id,
+                    "event_type": event.event_type,
+                    "payload": event.payload_json or {},
+                    "created_at": _dt(event.created_at),
+                }
+                for event in sorted(link.run.collector_events, key=_created_at_sort_key)
+            ],
+        }
+        for link in sorted(task.collection_run_links, key=_run_sort_key)
+        if link.run is not None
     ]
     return payload

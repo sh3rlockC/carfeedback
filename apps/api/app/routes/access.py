@@ -15,6 +15,9 @@ def verify_access(
     response: Response,
     settings: Settings = Depends(get_settings),
 ) -> AccessVerifyResponse:
+    if not settings.access_control_enabled:
+        return AccessVerifyResponse(ok=True, passphrase_version=settings.pass_phrase_version)
+
     if not verify_passphrase(payload.passphrase, settings.pass_phrase_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid passphrase")
 

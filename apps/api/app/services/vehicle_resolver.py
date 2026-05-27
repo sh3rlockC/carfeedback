@@ -11,6 +11,7 @@ from app.models import VehicleResolveCache
 from app.services.confirmed_vehicle_series import PLATFORMS, confirmed_vehicle_series_payload, query_key
 from app.services.dependencies import discover_manifest_path, load_dependency_map
 from app.services.tool_runner import ToolRunner
+from app.services.vehicle_aliases import confirmed_payload_for_canonical_candidates, resolve_alias
 
 try:
     from sqlalchemy.orm import Session
@@ -146,6 +147,20 @@ class VehicleResolver:
 
     def resolve(self, query: str) -> dict[str, Any]:
         normalized_query = query.strip()
+        alias_resolution = resolve_alias(self.db, normalized_query)
+        if len(alias_resolution.canonical_queries) == 1:
+            confirmed = confirmed_vehicle_series_payload(self.db, alias_resolution.canonical_queries[0])
+            if confirmed is not None:
+                return confirmed
+        elif len(alias_resolution.canonical_queries) > 1:
+            alias_candidates = confirmed_payload_for_canonical_candidates(
+                self.db,
+                normalized_query,
+                alias_resolution.canonical_queries,
+            )
+            if alias_candidates is not None:
+                return alias_candidates
+
         confirmed = confirmed_vehicle_series_payload(self.db, normalized_query)
         if confirmed is not None:
             return confirmed

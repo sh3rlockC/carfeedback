@@ -25,7 +25,7 @@ export default function VehiclePage() {
   useEffect(() => {
     setReady(true);
     const state = getFlowState();
-    if (state.accessVersion) {
+    if (state.mode) {
       setMode(state.mode === "comparison" ? "comparison" : "single");
       setQuery(state.vehicleQuery ?? "");
       if (state.comparisonVehicles?.length) {
@@ -39,21 +39,6 @@ export default function VehiclePage() {
   }
 
   const flowState = getFlowState();
-  if (!flowState.accessVersion) {
-    return (
-      <main className="panel guard">
-        <p className="eyebrow">第 2 步 / 共 5 步</p>
-        <h2>需要先输入口令</h2>
-        <p className="helper">请先完成访问口令校验，再进入车型识别。</p>
-        <div className="actions">
-          <Link className="button" href="/passphrase">
-            返回口令页
-          </Link>
-        </div>
-      </main>
-    );
-  }
-
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmed = query.trim();
@@ -72,6 +57,7 @@ export default function VehiclePage() {
       });
 
       setFlowState({
+        accessVersion: flowState.accessVersion ?? "direct",
         mode: "single",
         vehicleQuery: trimmed,
         vehicleResolve: payload,
@@ -86,7 +72,7 @@ export default function VehiclePage() {
       router.push("/candidates");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError("访问会话已过期，请重新输入口令。");
+        setError("访问会话已过期，请返回工作台重新发起任务。");
       } else if (err instanceof ApiError) {
         setError(err.message);
       } else {
@@ -117,6 +103,7 @@ export default function VehiclePage() {
         body: toJsonBody({ vehicles: vehicles.map((vehicle) => ({ query: vehicle })) }),
       });
       setFlowState({
+        accessVersion: flowState.accessVersion ?? "direct",
         mode: "comparison",
         vehicleQuery: vehicles.join(" / "),
         vehicleResolve: null,
@@ -136,7 +123,7 @@ export default function VehiclePage() {
       router.push("/candidates");
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
-        setError("访问会话已过期，请重新输入口令。");
+        setError("访问会话已过期，请返回工作台重新发起任务。");
       } else if (err instanceof ApiError) {
         setError(err.message);
       } else {
@@ -155,10 +142,15 @@ export default function VehiclePage() {
     <main className="page-grid">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 2 步 / 任务启动台"
-          title="输入车型名称"
-          copy="系统会先锁定汽车之家和懂车帝的车系 ID，确认后再投递给两个采集 agent。"
+          eyebrow="LEGACY FLOW"
+          title="旧流程车型输入"
+          copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
         />
+        <div className="actions">
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
+          </Link>
+        </div>
 
         <div className="meta-row">
           <button className={`quick-chip ${mode === "single" ? "selected" : ""}`} type="button" onClick={() => setMode("single")}>
@@ -241,7 +233,7 @@ export default function VehiclePage() {
               <input id="comparison-end" type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} />
             </div>
           </div>
-          <p className="field-hint">每个车型仍需确认汽车之家和懂车帝编号；72 小时内完整 JSON 结果会作为可复用选项。</p>
+          <p className="field-hint">每个车型仍需确认汽车之家和懂车帝编号；新任务会优先对照长期语料库并采集新增评论。</p>
           {error ? <p className="error">{error}</p> : null}
           <div className="actions">
             <button className="button" type="submit" disabled={loading || comparisonQueries.filter((item) => item.trim()).length < 2}>
@@ -277,10 +269,10 @@ export default function VehiclePage() {
 
         <div className="card">
           <h3>当前会话</h3>
-          <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据仍会在每次任务中重新采集。</p>
+          <p className="status-copy">确认后的车系编号会保存到服务器，后续同车型可优先复用；评论数据会进入长期语料库并按增量方式更新。</p>
           <div className="meta-row" style={{ marginTop: 14 }}>
             <StatusPill>后端识别</StatusPill>
-            <StatusPill tone="success">会话口令</StatusPill>
+            <StatusPill tone="success">会话状态</StatusPill>
             <StatusPill tone="accent">支持手动兜底</StatusPill>
           </div>
           <p className="field-hint" style={{ marginTop: 14 }}>

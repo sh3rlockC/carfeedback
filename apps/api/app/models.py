@@ -251,18 +251,84 @@ class JobCandidate(Base):
 
 class ConfirmedVehicleSeries(Base):
     __tablename__ = "confirmed_vehicle_series"
-    __table_args__ = (UniqueConstraint("query_key", "platform", name="uq_confirmed_vehicle_series_query_platform"),)
+    __table_args__ = (
+        Index(
+            "uq_confirmed_vehicle_series_active_query_platform",
+            "query_key",
+            "platform",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     query_key: Mapped[str] = mapped_column(String(255), nullable=False)
     query: Mapped[str] = mapped_column(String(255), nullable=False)
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    import_batch_id: Mapped[int | None] = mapped_column(ForeignKey("series_import_batches.id"), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesImportBatch(Base):
+    __tablename__ = "series_import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesAuditLog(Base):
+    __tablename__ = "series_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    record_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    new_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesConflict(Base):
+    __tablename__ = "series_conflicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conflict_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    existing_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    incoming_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    import_batch_id: Mapped[int | None] = mapped_column(ForeignKey("series_import_batches.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class SeriesAlias(Base):
+    __tablename__ = "series_aliases"
+    __table_args__ = (Index("ix_series_aliases_alias_key", "alias_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alias_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    alias: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_query: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
 class JobStageRun(Base):

@@ -1,88 +1,27 @@
 "use client";
 
 import Link from "next/link";
+import { Filter, ListChecks, Plus, RotateCw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
+import { StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
+import {
+  formatDateTime,
+  formatEtaCell,
+  labelFor,
+  newestFirst,
+  queuedStatuses,
+  runningStatuses,
+  stageLabels,
+  statusLabels,
+  taskListStatusTone,
+  taskTypeLabels,
+} from "@/lib/task-display";
 import type { TaskListItem, TaskLoadResponse } from "@/lib/api-types";
 
 type PlatformStatusFilter = "all" | "available" | "crowded";
 type FlagFilter = "all" | "yes" | "no";
 type LoadIssue = { kind: "missing" | "error"; message: string };
-
-const runningStatuses = new Set(["running"]);
-const queuedStatuses = new Set(["queued", "waiting_agent", "retry_wait"]);
-
-const taskTypeLabels: Record<TaskListItem["task_type"], string> = {
-  single: "单车型",
-  comparison: "对比",
-};
-
-const statusLabels: Record<string, string> = {
-  queued: "排队中",
-  running: "运行中",
-  waiting_agent: "等待车道",
-  retry_wait: "等待重试",
-  retry_paused: "重试暂停",
-  completed: "已完成",
-  completed_degraded: "降级完成",
-  failed: "失败",
-  cancelled: "已取消",
-  expired: "已过期",
-};
-
-function labelFor(value: string, labels: Record<string, string>) {
-  return labels[value] ?? value;
-}
-
-function statusTone(status: string): "default" | "success" | "warning" | "danger" | "accent" {
-  if (status === "completed") {
-    return "success";
-  }
-  if (status === "completed_degraded" || status === "queued" || status === "waiting_agent" || status === "retry_wait") {
-    return "warning";
-  }
-  if (status === "failed" || status === "cancelled" || status === "expired") {
-    return "danger";
-  }
-  if (status === "running") {
-    return "accent";
-  }
-  return "default";
-}
-
-function formatDateTime(value: string | null) {
-  if (!value) {
-    return "-";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString("zh-CN", { hour12: false });
-}
-
-function formatEta(seconds: number | null) {
-  if (seconds === null) {
-    return "-";
-  }
-  if (seconds < 60) {
-    return `${seconds} 秒`;
-  }
-  return `${Math.ceil(seconds / 60)} 分钟`;
-}
-
-function safeTimestamp(value: string | null | undefined) {
-  if (!value) {
-    return 0;
-  }
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? 0 : timestamp;
-}
-
-function newestFirst(a: TaskListItem, b: TaskListItem) {
-  return safeTimestamp(b.created_at) - safeTimestamp(a.created_at) || b.task_id.localeCompare(a.task_id);
-}
 
 function matchesFlag(value: boolean, filter: FlagFilter) {
   return filter === "all" || (filter === "yes" ? value : !value);
@@ -116,50 +55,49 @@ export default function TasksPage() {
   const [upgradedFilter, setUpgradedFilter] = useState<FlagFilter>("all");
   const [platformStatus, setPlatformStatus] = useState<PlatformStatusFilter>("all");
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadTasks = async (cancelled?: () => boolean) => {
+    setLoading(true);
+    setError("");
+    try {
+      const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
+      if (cancelled?.()) {
+        return;
+      }
+      setTasks(taskPayload);
 
-    const loadTasks = async () => {
-      setLoading(true);
-      setError("");
       try {
-        const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
-        if (cancelled) {
-          return;
-        }
-        setTasks(taskPayload);
-
-        try {
-          const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
-          if (!cancelled) {
-            setLoad(loadPayload);
-            setLoadIssue(null);
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setLoad(null);
-            if (err instanceof ApiError && err.status === 404) {
-              setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
-            } else {
-              setLoadIssue({
-                kind: "error",
-                message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
-              });
-            }
-          }
+        const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
+        if (!cancelled?.()) {
+          setLoad(loadPayload);
+          setLoadIssue(null);
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
+        if (!cancelled?.()) {
+          setLoad(null);
+          if (err instanceof ApiError && err.status === 404) {
+            setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
+          } else {
+            setLoadIssue({
+              kind: "error",
+              message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
+            });
+          }
         }
       }
-    };
+    } catch (err) {
+      if (!cancelled?.()) {
+        setError("暂时无法读取任务列表。");
+      }
+    } finally {
+      if (!cancelled?.()) {
+        setLoading(false);
+      }
+    }
+  };
 
-    void loadTasks();
+  useEffect(() => {
+    let cancelled = false;
+    void loadTasks(() => cancelled);
     return () => {
       cancelled = true;
     };
@@ -180,6 +118,28 @@ export default function TasksPage() {
     return entries;
   }, [effectiveLoad.platforms, platformStatus]);
 
+  const platformLaneSummary = useMemo(() => {
+    if (loadIssue) {
+      return loadIssue.message;
+    }
+    if (!filteredPlatforms.length) {
+      return "暂无匹配车道";
+    }
+    return filteredPlatforms.map(([platform, value]) => `${platform} ${value.available}/${value.total}`).join(" / ");
+  }, [filteredPlatforms, loadIssue]);
+
+  const filteredLaneCounts = useMemo(
+    () =>
+      filteredPlatforms.reduce(
+        (total, [, value]) => ({
+          available: total.available + value.available,
+          total: total.total + value.total,
+        }),
+        { available: 0, total: 0 },
+      ),
+    [filteredPlatforms],
+  );
+
   const filteredTasks = useMemo(() => {
     const normalizedKeyword = keyword.trim().toLowerCase();
     return tasks
@@ -195,40 +155,75 @@ export default function TasksPage() {
 
   return (
     <main className="stack-lg task-workbench">
-      <SignalPanel className="stack">
-        <div className="task-page-head">
-          <SectionHeader eyebrow="TASK CENTER" title="任务中心" />
+      <section className="flat-panel">
+        <div className="page-head">
+          <div>
+            <p className="eyebrow">TASK CENTER</p>
+            <h1>
+              <ListChecks size={24} />
+              任务中心
+            </h1>
+            <p className="helper">筛选历史任务、查看运行状态，并进入结果交付页。</p>
+          </div>
           <Link className="button" href="/tasks/new">
-            创建任务
+            <Plus size={16} />
+            新建任务
           </Link>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
 
-        <div className="task-load-row">
-          <div>
+        <section className="metric-grid task-metric-grid" aria-label="任务中心指标">
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <ListChecks size={18} />
+            </div>
             <span>运行中</span>
-            <strong>{effectiveLoad.running_task_count}</strong>
-          </div>
-          <div>
+            <strong>{loading ? "-" : effectiveLoad.running_task_count}</strong>
+            <p>当前执行任务</p>
+          </article>
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <ListChecks size={18} />
+            </div>
             <span>排队中</span>
-            <strong>{effectiveLoad.queued_task_count}</strong>
-          </div>
-          <div className="task-load-platforms">
+            <strong>{loading ? "-" : effectiveLoad.queued_task_count}</strong>
+            <p>等待调度任务</p>
+          </article>
+          <article className="metric-tile task-platform-metric">
+            <div className="metric-icon">
+              <Filter size={18} />
+            </div>
             <span>平台可用车道</span>
-            <strong>
-              {filteredPlatforms.length
-                ? filteredPlatforms.map(([platform, value]) => `${platform} ${value.available}/${value.total}`).join(" / ")
-                : loadIssue
-                  ? loadIssue.message
-                  : "暂无平台数据"}
-            </strong>
-          </div>
-        </div>
+            <strong>{loading ? "-" : filteredLaneCounts.total ? `${filteredLaneCounts.available}/${filteredLaneCounts.total}` : "未知"}</strong>
+            <p>{platformLaneSummary}</p>
+          </article>
+          <article className="metric-tile">
+            <div className="metric-icon">
+              <Filter size={18} />
+            </div>
+            <span>筛选结果</span>
+            <strong>{loading ? "-" : filteredTasks.length}</strong>
+            <p>任务总数 {tasks.length}</p>
+          </article>
+        </section>
         {loadIssue?.kind === "error" ? <p className="error">{loadIssue.message}</p> : null}
-      </SignalPanel>
+      </section>
 
-      <SignalPanel className="stack" tone="accent">
+      <section className="flat-panel filter-panel">
+        <div className="panel-head">
+          <div>
+            <p className="eyebrow">FILTERS</p>
+            <h2>
+              <Filter size={18} />
+              筛选
+            </h2>
+          </div>
+          <button className="icon-text-button" type="button" onClick={() => void loadTasks()} disabled={loading}>
+            <RotateCw size={16} />
+            {loading ? "刷新中" : "刷新"}
+          </button>
+        </div>
         <div className="task-filter-grid">
           <label className="field">
             <span>状态</span>
@@ -245,8 +240,8 @@ export default function TasksPage() {
             <span>类型</span>
             <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
               <option value="all">全部</option>
-              <option value="single">单车型</option>
-              <option value="comparison">对比</option>
+              <option value="single">{taskTypeLabels.single}</option>
+              <option value="comparison">{taskTypeLabels.comparison}</option>
             </select>
           </label>
           <label className="field">
@@ -281,14 +276,14 @@ export default function TasksPage() {
             <span>平台状态</span>
             <select value={platformStatus} onChange={(event) => setPlatformStatus(event.target.value as PlatformStatusFilter)}>
               <option value="all">全部</option>
-              <option value="available">可用</option>
-              <option value="crowded">拥挤</option>
+              <option value="available">有空闲车道</option>
+              <option value="crowded">车道占满</option>
             </select>
           </label>
         </div>
-      </SignalPanel>
+      </section>
 
-      <SignalPanel className="stack">
+      <section className="flat-panel">
         <div className="task-table-head">
           <strong>{loading ? "读取中" : `${filteredTasks.length} 个任务`}</strong>
           {loadIssue ? (
@@ -305,10 +300,11 @@ export default function TasksPage() {
                 <th>类型</th>
                 <th>状态</th>
                 <th>阶段</th>
-                <th>ETA</th>
+                <th>预计</th>
                 <th>标记</th>
                 <th>创建</th>
                 <th>完成</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -322,10 +318,10 @@ export default function TasksPage() {
                   </td>
                   <td>{taskTypeLabels[task.task_type]}</td>
                   <td>
-                    <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
+                    <StatusPill tone={taskListStatusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
                   </td>
-                  <td>{labelFor(task.current_stage, statusLabels)}</td>
-                  <td>{formatEta(task.eta_seconds)}</td>
+                  <td>{labelFor(task.current_stage, stageLabels)}</td>
+                  <td>{formatEtaCell(task.eta_seconds)}</td>
                   <td>
                     <div className="meta-row">
                       {task.degraded ? <StatusPill tone="warning">降级</StatusPill> : null}
@@ -335,17 +331,22 @@ export default function TasksPage() {
                   </td>
                   <td>{formatDateTime(task.created_at)}</td>
                   <td>{formatDateTime(task.completed_at)}</td>
+                  <td>
+                    <Link className="table-action" href={`/tasks/${task.task_id}`} aria-label={`查看 ${task.display_name}`}>
+                      查看
+                    </Link>
+                  </td>
                 </tr>
               ))}
               {!filteredTasks.length ? (
                 <tr>
-                  <td colSpan={8}>没有匹配任务。</td>
+                  <td colSpan={9}>没有匹配任务。</td>
                 </tr>
               ) : null}
             </tbody>
           </table>
         </div>
-      </SignalPanel>
+      </section>
     </main>
   );
 }

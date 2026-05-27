@@ -11,6 +11,8 @@ export type PlatformCandidate = {
   evidence_url?: string | null;
   kind?: string | null;
   note?: string | null;
+  canonical_query?: string | null;
+  canonical_query_key?: string | null;
 };
 
 export type PlatformCandidateGroup = {
@@ -325,9 +327,33 @@ export type TaskArtifact = {
   created_at: string | null;
 };
 
+export type CollectorEvent = {
+  event_id: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string | null;
+};
+
+export type TaskCollectionRun = {
+  run_id: string;
+  platform: string;
+  query_key: string;
+  model_name: string;
+  series_id: string;
+  status: string;
+  mode: string;
+  agent_id: string | null;
+  failure_category: string | null;
+  output_path: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  events: CollectorEvent[];
+};
+
 export type TaskListItem = {
   task_id: string;
-  task_type: "single" | "comparison";
+  task_type: "single" | "single_vehicle" | "comparison";
   display_name: string;
   status: string;
   current_stage: string;
@@ -343,6 +369,7 @@ export type TaskDetailResponse = TaskListItem & {
   vehicles: TaskVehicle[];
   events: TaskEvent[];
   artifacts: TaskArtifact[];
+  collection_runs: TaskCollectionRun[];
 };
 
 export type TaskCreateVehicle = {
@@ -365,4 +392,134 @@ export type TaskLoadResponse = {
   running_task_count: number;
   queued_task_count: number;
   platforms: Record<string, { available: number; total: number }>;
+};
+
+export type TaskResultArtifact = {
+  id: number;
+  type: string;
+  path: string;
+  url: string;
+  downloadable: boolean;
+  created_at: string | null;
+};
+
+export type TaskResultEvidence = {
+  comment_id: string;
+  platform: string;
+  text: string;
+};
+
+export type TaskResultResponse = {
+  task_id: string;
+  status: string;
+  current_stage: string;
+  degraded: boolean;
+  model_name: string;
+  display_name: string;
+  generated_at: string | null;
+  report_ready: boolean;
+  report_pdf_url: string | null;
+  zip_url: string;
+  sample_summary: SampleSummary;
+  collection_summary: CollectionSummary;
+  template_report: TemplateReport;
+  structured_sections: StructuredSections;
+  wordcloud: Wordcloud;
+  ai_report: Record<string, unknown> | null;
+  ai_available: boolean;
+  evidence_samples: TaskResultEvidence[];
+  artifacts: TaskResultArtifact[];
+  retention_days: number;
+};
+
+export type SeriesPlatform = "autohome" | "dongchedi";
+export type SeriesStatus = "active" | "deleted";
+export type SeriesImportStatus = "new" | "duplicate" | "conflict" | "invalid";
+
+export type SeriesRecord = {
+  id: number;
+  query_key: string;
+  query: string;
+  platform: SeriesPlatform;
+  series_id: string;
+  status: SeriesStatus;
+  url: string | null;
+  title: string | null;
+  source: string | null;
+  import_batch_id: number | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SeriesListResponse = {
+  items: SeriesRecord[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesMutationRequest = {
+  query: string;
+  platform: SeriesPlatform;
+  series_id: string;
+  operator: string;
+  reason: string;
+  url?: string | null;
+  title?: string | null;
+  source?: string | null;
+};
+
+export type SeriesAuditItem = {
+  id: number;
+  record_id: number | null;
+  action: string;
+  operator: string;
+  reason: string;
+  old_value: Record<string, unknown>;
+  new_value: Record<string, unknown>;
+  created_at: string;
+};
+
+export type SeriesAuditResponse = {
+  items: SeriesAuditItem[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesAlias = {
+  id: number;
+  alias_key: string;
+  alias: string;
+  canonical_query: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SeriesAliasListResponse = {
+  items: SeriesAlias[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type SeriesImportRow = {
+  row_number: number;
+  query: string | null;
+  platform: SeriesPlatform | null;
+  series_id: string | null;
+  url: string | null;
+  title: string | null;
+  source: string | null;
+  status: SeriesImportStatus;
+  query_key: string | null;
+  error: string | null;
+  existing_value_json: Record<string, unknown> | null;
+  incoming_value_json: Record<string, unknown> | null;
+};
+
+export type SeriesImportPreviewResponse = {
+  summary: Record<string, number>;
+  rows: SeriesImportRow[];
 };

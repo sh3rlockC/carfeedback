@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -11,9 +12,12 @@ ActivityRunner = Callable[[str, Any, timedelta], Awaitable[dict[str, Any]]]
 ChildWorkflowRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 ChildCompletionRunner = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 CancelRequested = Callable[[], bool]
+SleepRunner = Callable[[timedelta], Awaitable[None]]
 PLATFORMS = ("autohome", "dongchedi")
 MAX_COMPARISON_VEHICLES = 5
 MIN_COMPARISON_RESULTS = 2
+REPORT_GENERATION_MAX_ATTEMPTS = 3
+REPORT_RETRY_DELAYS = (timedelta(minutes=10), timedelta(minutes=20))
 
 
 def _failed_platform_name(failure: Any) -> str | None:
@@ -202,17 +206,23 @@ def _required_artifact_failure(
     postprocessed: dict[str, Any],
     report: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if postprocessed.get("skipped") is True or report.get("skipped") is True:
+    paths = [
+        *[str(path) for path in postprocessed.get("artifact_paths") or []],
+        *[str(path) for path in report.get("artifact_paths") or []],
+    ]
+    if report.get("skipped") is True:
         return {
             "platform": "postprocess_or_report",
-            "failure_category": "postprocess_or_report_deferred",
-            "retryable": False,
+            "failure_category": str(report.get("failure_category") or "postprocess_or_report_deferred"),
+            "message": str(report.get("message") or "report generation was skipped"),
+            "retryable": True,
         }
-    if not postprocessed.get("artifact_paths") or not report.get("artifact_paths"):
+    if not any(path.endswith("final_report.json") for path in paths) or not any(path.endswith("analysis_facts.jsonl") for path in paths):
         return {
             "platform": "postprocess_or_report",
             "failure_category": "postprocess_or_report_deferred",
-            "retryable": False,
+            "message": "required report artifacts were not generated",
+            "retryable": True,
         }
     return None
 
@@ -224,21 +234,51 @@ async def _publish_full_pipeline(
     results: dict[str, Any],
     activity_runner: ActivityRunner,
     cancel_requested: CancelRequested | None = None,
+    sleep_runner: SleepRunner | None = None,
 ) -> dict[str, str]:
     payload = {"task_id": task_id, "task": task, "results": results}
-    artifacts = await _generate_result_artifacts(payload=payload, activity_runner=activity_runner)
-    postprocessed = artifacts["postprocess_result"]
-    report = artifacts["report_result"]
-    artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
-    if artifact_failure is not None:
-        return await _mark_artifact_pipeline_failed(
-            task_id=task_id,
-            payload=payload,
-            results=results,
-            artifacts=artifacts,
+    imported = await activity_runner("import_run_rows_to_corpus", payload, timedelta(minutes=10))
+    exported = await activity_runner(
+        "export_vehicle_workbooks",
+        {**payload, "import_result": imported},
+        timedelta(minutes=10),
+    )
+    last_artifacts: dict[str, Any] = {"import_result": imported, "export_result": exported}
+    last_failure: dict[str, Any] | None = None
+    for attempt in range(1, REPORT_GENERATION_MAX_ATTEMPTS + 1):
+        artifacts = await _generate_report_artifacts(
+            payload={**payload, "import_result": imported, "export_result": exported, "report_attempt": attempt},
             activity_runner=activity_runner,
-            cancel_requested=cancel_requested,
+            allow_degraded=False,
         )
+        last_artifacts = {**last_artifacts, **artifacts}
+        postprocessed = artifacts["postprocess_result"]
+        report = artifacts["report_result"]
+        artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
+        if artifact_failure is None:
+            cancellation = await _cancel_if_requested(
+                task_id=task_id,
+                activity_runner=activity_runner,
+                cancel_requested=cancel_requested,
+            )
+            if cancellation is not None:
+                return cancellation
+            await activity_runner(
+                "publish_full_result",
+                {**payload, **last_artifacts},
+                timedelta(minutes=20),
+            )
+            return {"task_id": task_id, "status": "completed"}
+        last_failure = artifact_failure
+        if attempt < REPORT_GENERATION_MAX_ATTEMPTS:
+            await activity_runner(
+                "schedule_retry",
+                {"task_id": task_id, "stage": "generating_ai_report", "attempt": attempt, "failure": artifact_failure},
+                timedelta(minutes=2),
+            )
+            if sleep_runner is not None:
+                await sleep_runner(REPORT_RETRY_DELAYS[attempt - 1])
+
     cancellation = await _cancel_if_requested(
         task_id=task_id,
         activity_runner=activity_runner,
@@ -247,11 +287,16 @@ async def _publish_full_pipeline(
     if cancellation is not None:
         return cancellation
     await activity_runner(
-        "publish_full_result",
-        {**payload, **artifacts},
-        timedelta(minutes=20),
+        "pause_report_retry",
+        {
+            **payload,
+            **last_artifacts,
+            "failure_category": str((last_failure or {}).get("failure_category") or "report_generation_failed"),
+            "failure": last_failure or {},
+        },
+        timedelta(minutes=2),
     )
-    return {"task_id": task_id, "status": "completed"}
+    return {"task_id": task_id, "status": "retry_paused"}
 
 
 async def _publish_degraded_pipeline(
@@ -263,7 +308,7 @@ async def _publish_degraded_pipeline(
     cancel_requested: CancelRequested | None = None,
 ) -> dict[str, str]:
     payload = {"task_id": task_id, "task": task, "results": results}
-    artifacts = await _generate_result_artifacts(payload=payload, activity_runner=activity_runner)
+    artifacts = await _generate_result_artifacts(payload=payload, activity_runner=activity_runner, allow_degraded=True)
     postprocessed = artifacts["postprocess_result"]
     report = artifacts["report_result"]
     artifact_failure = _required_artifact_failure(postprocessed=postprocessed, report=report)
@@ -295,6 +340,7 @@ async def _generate_result_artifacts(
     *,
     payload: dict[str, Any],
     activity_runner: ActivityRunner,
+    allow_degraded: bool = False,
 ) -> dict[str, Any]:
     imported = await activity_runner("import_run_rows_to_corpus", payload, timedelta(minutes=10))
     exported = await activity_runner(
@@ -302,24 +348,39 @@ async def _generate_result_artifacts(
         {**payload, "import_result": imported},
         timedelta(minutes=10),
     )
+    report_artifacts = await _generate_report_artifacts(
+        payload={**payload, "import_result": imported, "export_result": exported},
+        activity_runner=activity_runner,
+        allow_degraded=allow_degraded,
+    )
+    return {
+        "import_result": imported,
+        "export_result": exported,
+        **report_artifacts,
+    }
+
+
+async def _generate_report_artifacts(
+    *,
+    payload: dict[str, Any],
+    activity_runner: ActivityRunner,
+    allow_degraded: bool,
+) -> dict[str, Any]:
     postprocessed = await activity_runner(
         "run_postprocess",
-        {**payload, "import_result": imported, "export_result": exported},
+        payload,
         timedelta(minutes=10),
     )
     report = await activity_runner(
         "run_llm_report",
         {
             **payload,
-            "import_result": imported,
-            "export_result": exported,
             "postprocess_result": postprocessed,
+            "allow_degraded": allow_degraded,
         },
         timedelta(minutes=20),
     )
     return {
-        "import_result": imported,
-        "export_result": exported,
         "postprocess_result": postprocessed,
         "report_result": report,
     }
@@ -365,8 +426,31 @@ async def run_single_vehicle_task(
     activity_runner: ActivityRunner,
     *,
     cancel_requested: CancelRequested | None = None,
+    sleep_runner: SleepRunner | None = None,
 ) -> dict[str, str]:
     task = await activity_runner("load_task", task_id, timedelta(seconds=30))
+    if task.get("current_stage") == "generating_degraded_report":
+        return await _publish_degraded_pipeline(
+            task_id=task_id,
+            task=task,
+            results={"successful_platforms": [], "failed_platforms": [{"platform": "report", "failure_category": "user_requested_degraded_result"}], "runs": {}},
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+    if task.get("current_stage") == "generating_ai_report":
+        return await _publish_full_pipeline(
+            task_id=task_id,
+            task=task,
+            results={"successful_platforms": list(PLATFORMS), "failed_platforms": [], "runs": {}},
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+            sleep_runner=sleep_runner,
+        )
+    await activity_runner(
+        "mark_task_stage",
+        {"task_id": task_id, "stage": "checking_incremental", "status": "running"},
+        timedelta(minutes=2),
+    )
     cancellation = await _cancel_if_requested(
         task_id=task_id,
         activity_runner=activity_runner,
@@ -400,6 +484,22 @@ async def run_single_vehicle_task(
         )
         if cancellation is not None:
             return cancellation
+
+    dispatches = [
+        activity_runner(
+            "dispatch_collection_run",
+            {"task_id": task_id, **run},
+            timedelta(minutes=45),
+        )
+        for run in runs.values()
+    ]
+    if dispatches:
+        await activity_runner(
+            "mark_task_stage",
+            {"task_id": task_id, "stage": "collecting_models", "status": "running"},
+            timedelta(minutes=2),
+        )
+        await asyncio.gather(*dispatches)
 
     if not runs:
         results = {
@@ -485,6 +585,7 @@ async def run_single_vehicle_task(
                 results=results,
                 activity_runner=activity_runner,
                 cancel_requested=cancel_requested,
+                sleep_runner=sleep_runner,
             )
         return {"task_id": task_id, "status": "completed_degraded"}
 
@@ -502,6 +603,7 @@ async def run_single_vehicle_task(
             results=results,
             activity_runner=activity_runner,
             cancel_requested=cancel_requested,
+            sleep_runner=sleep_runner,
         )
 
     cancellation = await _cancel_if_requested(
@@ -736,6 +838,7 @@ class SingleVehicleTaskWorkflow:
             task_id,
             activity_runner,
             cancel_requested=lambda: self.cancel_requested,
+            sleep_runner=workflow.sleep,
         )
 
 
