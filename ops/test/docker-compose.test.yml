@@ -43,6 +43,7 @@ services:
       ARTIFACT_ROOT: /srv/koubei/jobs
       CORPUS_ROOT: /srv/koubei/corpus
       WORKSPACE_ROOT: /workspace
+      WORKER_QUEUE_NAME: vehicle-koubei-test
       TEMPORAL_ADDRESS: temporal:7233
       TEMPORAL_NAMESPACE: default
       TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-test

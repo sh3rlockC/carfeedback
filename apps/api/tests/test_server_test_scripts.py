@@ -32,6 +32,7 @@ def test_isolated_test_compose_contains_full_real_flow_stack() -> None:
         assert "OPENCLAW_DCD_AGENT_IDS" in env
         assert "OPENCLAW_AGENT_LEASE_SECONDS" in env
         assert "OPENCLAW_AGENT_POOL_WAIT_SECONDS" in env
+    assert services["api"]["environment"]["WORKER_QUEUE_NAME"] == "vehicle-koubei-test"
 
 
 def test_setup_test_env_scales_workers_by_default() -> None:
