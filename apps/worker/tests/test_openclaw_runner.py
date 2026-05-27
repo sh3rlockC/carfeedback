@@ -628,6 +628,45 @@ def test_run_autohome_via_openclaw_fails_fast_when_accepted_task_fails(tmp_path:
     assert "provider rejected the request schema" in exc_info.value.message
 
 
+def test_run_autohome_via_openclaw_accepts_artifacts_written_before_failure_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+
+    class AcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            return {"status": "accepted", "taskId": "task-1", "runId": "run-1"}
+
+    def fake_failed_status(**kwargs):
+        for artifact in stage.expected_artifacts:
+            Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+            Path(artifact).write_text("artifact", encoding="utf-8")
+        return {"task_id": "task-1", "run_id": "run-1", "status": "failed", "error": "rate limited"}
+
+    monkeypatch.setattr(openclaw_runner, "_read_openclaw_task_status", fake_failed_status, raising=False)
+
+    result = run_autohome_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(enabled=True, timeout_seconds=1, artifact_poll_interval_seconds=0.01),
+        gateway_client=AcceptedGatewayClient(),
+    )
+
+    assert set(result.artifact_paths) == set(stage.expected_artifacts)
+
+
 def test_run_autohome_via_openclaw_fails_when_related_child_task_fails(tmp_path: Path) -> None:
     stage = make_autohome_stage(tmp_path)
     job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")

@@ -35,6 +35,7 @@ services:
     build:
       context: ../..
       dockerfile: ./ops/docker/api.Dockerfile
+    command: ["sh", "-c", "umask 000 && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     environment:
       APP_ENV: test
       BASE_URL: ${TEST_BASE_URL:-http://localhost:18080/car-user-feedback}
@@ -62,7 +63,7 @@ services:
     volumes:
       - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ${TEST_CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
-      - /opt/codexwork-test:/workspace:ro
+      - ${TEST_WORKSPACE_HOST_PATH:-/opt/codexwork}:/workspace:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,11 +80,14 @@ services:
     build:
       context: ../..
       dockerfile: ./ops/docker/worker.Dockerfile
+    command: ["sh", "-c", "umask 000 && exec /start-worker.sh"]
     environment:
       APP_ENV: test
       DATABASE_URL: postgresql+psycopg://koubei_test:${TEST_POSTGRES_PASSWORD:-koubei_test}@postgres:5432/koubei_test
       REDIS_URL: redis://redis:6379/0
       ARTIFACT_ROOT: /srv/koubei/jobs
+      CORPUS_ROOT: /srv/koubei/corpus
+      KOUBEI_CORPUS_ROOT: /srv/koubei/corpus
       WORKSPACE_ROOT: /workspace
       WORKER_QUEUE_NAME: vehicle-koubei-test
       JOB_ARTIFACT_CLEANUP_ENABLED: "false"
@@ -130,7 +134,8 @@ services:
       WORDCLOUD_FONT_PATH: ${WORDCLOUD_FONT_PATH:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}
     volumes:
       - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
-      - /opt/codexwork-test:/workspace:ro
+      - ${TEST_CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
+      - ${TEST_WORKSPACE_HOST_PATH:-/opt/codexwork}:/workspace:ro
       - ${TEST_OPENCLAW_STATE_HOST_PATH:-./storage/openclaw-state}:/openclaw-state:ro
     secrets:
       - openclaw_gateway_token
@@ -152,7 +157,7 @@ services:
     build:
       context: ../..
       dockerfile: ./ops/docker/worker.Dockerfile
-    command: ["python", "temporal_worker.py"]
+    command: ["sh", "-c", "umask 000 && exec python temporal_worker.py"]
     environment:
       APP_ENV: test
       DATABASE_URL: postgresql+psycopg://koubei_test:${TEST_POSTGRES_PASSWORD:-koubei_test}@postgres:5432/koubei_test
@@ -207,7 +212,7 @@ services:
     volumes:
       - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ${TEST_CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
-      - /opt/codexwork-test:/workspace:ro
+      - ${TEST_WORKSPACE_HOST_PATH:-/opt/codexwork}:/workspace:ro
       - ${TEST_OPENCLAW_STATE_HOST_PATH:-./storage/openclaw-state}:/openclaw-state:ro
     secrets:
       - openclaw_gateway_token

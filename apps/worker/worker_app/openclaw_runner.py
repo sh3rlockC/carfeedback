@@ -827,13 +827,19 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
     run_id = str(response.get("runId") or response.get("run_id") or response.get("sourceId") or "") if response else ""
     related_markers = _openclaw_task_markers(command, settings)
     deadline = time.monotonic() + max(settings.timeout_seconds, 1)
+
+    def missing_artifacts() -> list[str]:
+        return [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
+
     while True:
-        missing = [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
+        missing = missing_artifacts()
         if not missing:
             return
 
         task_status = _read_openclaw_task_status(settings=settings, task_id=task_id or None, run_id=run_id or None)
         if task_status and task_status["status"] in {"failed", "timed_out", "cancelled", "lost"}:
+            if not missing_artifacts():
+                return
             error_detail = task_status["error"] or f"OpenClaw task ended with status={task_status['status']}"
             raise StageExecutionError(
                 stage=command.name,
@@ -843,6 +849,8 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
 
         related_failure = _read_related_openclaw_failure(settings=settings, markers=related_markers)
         if related_failure:
+            if not missing_artifacts():
+                return
             error_detail = related_failure["error"] or f"Related OpenClaw task ended with status={related_failure['status']}"
             raise StageExecutionError(
                 stage=command.name,

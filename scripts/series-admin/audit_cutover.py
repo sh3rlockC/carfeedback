@@ -8,6 +8,7 @@ import sys
 
 from openpyxl import Workbook
 from sqlalchemy import create_engine, inspect
+from sqlalchemy import text
 from sqlalchemy.orm import Session, sessionmaker
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -16,6 +17,12 @@ if str(API_ROOT) not in sys.path:
     sys.path.insert(0, str(API_ROOT))
 
 from app.models import ComparisonJob, ConfirmedVehicleSeries, Job, KoubeiRawComment
+
+
+@dataclass(frozen=True)
+class SeriesSnapshot:
+    series_id: str
+    status: str
 
 
 @dataclass(frozen=True)
@@ -49,10 +56,26 @@ def session_for(database_url: str) -> Session:
     return sessionmaker(bind=engine, future=True)()
 
 
-def series_rows(db: Session) -> dict[tuple[str, str], ConfirmedVehicleSeries]:
+def series_rows(db: Session) -> dict[tuple[str, str], SeriesSnapshot]:
+    inspector = inspect(db.get_bind())
+    columns = {column["name"] for column in inspector.get_columns(ConfirmedVehicleSeries.__tablename__)}
+    status_select = "status" if "status" in columns else "'active' AS status"
+    status_filter = "WHERE status = 'active'" if "status" in columns else ""
+    rows = db.execute(
+        text(
+            f"""
+            SELECT query_key, platform, series_id, {status_select}
+            FROM {ConfirmedVehicleSeries.__tablename__}
+            {status_filter}
+            """
+        )
+    ).mappings()
     return {
-        (row.query_key, row.platform): row
-        for row in db.query(ConfirmedVehicleSeries).filter(ConfirmedVehicleSeries.status == "active").all()
+        (str(row["query_key"]), str(row["platform"])): SeriesSnapshot(
+            series_id=str(row["series_id"]),
+            status=str(row["status"]),
+        )
+        for row in rows
     }
 
 
