@@ -1,0 +1,25 @@
+services:
+  api:
+    environment:
+      APP_ENV: production
+      WORKER_QUEUE_NAME: vehicle-koubei-20260527
+      TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-20260527
+      TASK_CENTER_CREATE_ENABLED: "true"
+
+  worker:
+    environment:
+      APP_ENV: production
+      WORKER_QUEUE_NAME: vehicle-koubei-20260527
+
+  temporal-worker:
+    environment:
+      APP_ENV: production
+      TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-20260527
+
+volumes:
+  postgres_test_data:
+    external: true
+    name: koubei-20260527_postgres_test_data
+  redis_test_data:
+    external: true
+    name: koubei-20260527_redis_test_data
