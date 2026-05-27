@@ -58,3 +58,26 @@ python scripts/series-admin/export_series_audit.py \
   --database-url "$TEST_DATABASE_URL" \
   --output /opt/codexwork-test/audit/series-audit.xlsx
 ```
+
+## Resource Watch
+
+Run during real testing:
+
+```bash
+scripts/server-test/resource-watch.sh
+```
+
+Alerts are printed to the terminal only. The script does not stop or downscale services.
+
+## Cutover Audit
+
+Before production cutover:
+
+```bash
+python scripts/series-admin/audit_cutover.py \
+  --prod-url "$PROD_DATABASE_URL" \
+  --test-url "$TEST_DATABASE_URL" \
+  --output /opt/codexwork-test/audit/cutover-audit.xlsx
+```
+
+Use `docs/server-test-real-validation.md` as the real-environment result log.
