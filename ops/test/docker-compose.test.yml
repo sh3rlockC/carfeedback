@@ -1,0 +1,98 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    depends_on:
+      web:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    ports:
+      - "${TEST_HTTP_PORT:-18080}:80"
+    volumes:
+      - ../nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      BACKEND_ORIGIN: http://api:8000
+      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"const base = process.env.NEXT_PUBLIC_BASE_PATH || ''; fetch('http://127.0.0.1:3000' + base + '/passphrase').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/api.Dockerfile
+    environment:
+      APP_ENV: test
+      BASE_URL: ${TEST_BASE_URL:-http://localhost:18080/car-user-feedback}
+      DATABASE_URL: postgresql+psycopg://koubei_test:${TEST_POSTGRES_PASSWORD:-koubei_test}@postgres:5432/koubei_test
+      REDIS_URL: redis://redis:6379/0
+      ARTIFACT_ROOT: /srv/koubei/jobs
+      CORPUS_ROOT: /srv/koubei/corpus
+      WORKSPACE_ROOT: /workspace
+      ACCESS_CONTROL_ENABLED: "false"
+      JOB_ARTIFACT_CLEANUP_ENABLED: "false"
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL_REPORT: ${LLM_MODEL_REPORT:-}
+      LLM_MODEL_QA: ${LLM_MODEL_QA:-}
+    volumes:
+      - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
+      - ${TEST_CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
+      - /opt/codexwork-test:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: koubei_test
+      POSTGRES_USER: koubei_test
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:-koubei_test}
+    volumes:
+      - postgres_test_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U koubei_test -d koubei_test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    volumes:
+      - redis_test_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_test_data:
+  redis_test_data:
