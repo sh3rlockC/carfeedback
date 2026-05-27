@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
 from typing import Any
@@ -74,6 +74,8 @@ def _artifact_type(path: str) -> str:
         return "excel"
     if lowered.endswith(".png"):
         return "image_png"
+    if lowered.endswith(".pdf"):
+        return "pdf"
     return "artifact"
 
 
@@ -129,7 +131,9 @@ class CollectionRunRecord:
     status: str
     mode: str
     shared_by_task_ids: list[str]
+    agent_id: str | None = None
     failure_category: str | None = None
+    resume_cursor: dict[str, Any] = field(default_factory=dict)
     output_path: str | None = None
 
 
@@ -402,6 +406,58 @@ class TaskStore:
             self.append_task_event(task_id, "upgraded_to_full", payload)
         self.append_task_event(task_id, "full_result_published", payload)
 
+    def publish_comparison_task_result(self, task_id: str, payload: dict[str, Any], *, status: str) -> None:
+        now = utc_now_iso()
+        degraded = status == "completed_degraded" or bool(payload.get("degraded"))
+        artifact_paths: list[str] = []
+        report = payload.get("report") if isinstance(payload.get("report"), dict) else {}
+        artifact_paths.extend(str(path) for path in report.get("artifact_paths") or [] if path)
+        for vehicle in payload.get("vehicles") or []:
+            if isinstance(vehicle, dict):
+                artifact_paths.extend(str(path) for path in vehicle.get("artifact_paths") or [] if path)
+        unique_paths = list(dict.fromkeys(artifact_paths))
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = :current_stage,
+                        status = :status,
+                        degraded = :degraded,
+                        completed_at = COALESCE(completed_at, :completed_at),
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "current_stage": status,
+                    "status": status,
+                    "degraded": degraded,
+                    "completed_at": now,
+                    "updated_at": now,
+                },
+            )
+            if _table_exists(self.engine, "task_artifacts"):
+                for path in unique_paths:
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO task_artifacts (task_id, artifact_type, path, downloadable, created_at)
+                            VALUES (:task_id, :artifact_type, :path, :downloadable, :created_at)
+                            """
+                        ),
+                        {
+                            "task_id": task_id,
+                            "artifact_type": _artifact_type(path),
+                            "path": path,
+                            "downloadable": True,
+                            "created_at": now,
+                        },
+                    )
+        self.append_task_event(task_id, "comparison_result_published", payload)
+
     def _persist_comparison_snapshot(self, conn: Any, *, task_id: str, payload: dict[str, Any], updated_at: str) -> None:
         paths = _payload_artifact_paths(payload)
         final_report_path = _first_path_with_suffix(paths, "final_report.json")
@@ -474,6 +530,29 @@ class TaskStore:
 
     def schedule_retry(self, task_id: str, payload: dict[str, Any]) -> None:
         self.append_task_event(task_id, "retry_scheduled", payload)
+
+    def pause_report_retry(self, task_id: str, payload: dict[str, Any]) -> None:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE tasks
+                    SET current_stage = 'retry_paused',
+                        status = 'retry_paused',
+                        eta_seconds = NULL,
+                        eta_reason = :eta_reason,
+                        updated_at = :updated_at
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "eta_reason": "智能一页纸生成失败，请选择降级结果或继续等待重试并输出全结果",
+                    "updated_at": now,
+                },
+            )
+        self.append_task_event(task_id, "report_retry_paused", payload)
 
     def mark_task_failed(self, task_id: str, payload: dict[str, Any]) -> None:
         now = utc_now_iso()
@@ -647,6 +726,76 @@ class TaskStore:
             self._insert_run_task_link(conn, run_id=run_id, task_id=task_id)
             return self._load_collection_run(conn, run_id)
 
+    def claim_collection_run_for_dispatch(self, run_id: str, *, mode: str | None = None) -> tuple[CollectionRunRecord, bool]:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            row = self._get_collection_run_row_for_update(conn, run_id)
+            if row is None:
+                raise RuntimeError(f"collection run not found: {run_id}")
+            status = str(row["status"])
+            if status not in {"queued", "waiting_agent", "retry_wait"}:
+                return self._load_collection_run(conn, run_id), False
+            conn.execute(
+                text(
+                    """
+                    UPDATE collection_runs
+                    SET status = 'running',
+                        mode = :mode,
+                        failure_category = NULL,
+                        started_at = COALESCE(started_at, :started_at),
+                        updated_at = :updated_at
+                    WHERE run_id = :run_id
+                    """
+                ),
+                {
+                    "run_id": run_id,
+                    "mode": mode or str(row["mode"]),
+                    "started_at": now,
+                    "updated_at": now,
+                },
+            )
+            return self._load_collection_run(conn, run_id), True
+
+    def finish_collection_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        output_path: str | None = None,
+        failure_category: str | None = None,
+        agent_id: str | None = None,
+        resume_cursor: dict[str, Any] | None = None,
+    ) -> CollectionRunRecord:
+        now = utc_now_iso()
+        statement = text(
+            """
+            UPDATE collection_runs
+            SET status = :status,
+                output_path = :output_path,
+                failure_category = :failure_category,
+                agent_id = :agent_id,
+                resume_cursor = :resume_cursor,
+                finished_at = :finished_at,
+                updated_at = :updated_at
+            WHERE run_id = :run_id
+            """
+        ).bindparams(bindparam("resume_cursor", type_=SAJSON))
+        with self.engine.begin() as conn:
+            conn.execute(
+                statement,
+                {
+                    "run_id": run_id,
+                    "status": status,
+                    "output_path": output_path,
+                    "failure_category": failure_category,
+                    "agent_id": agent_id,
+                    "resume_cursor": resume_cursor or {},
+                    "finished_at": now,
+                    "updated_at": now,
+                },
+            )
+            return self._load_collection_run(conn, run_id)
+
     def load_collection_run(self, run_id: str) -> CollectionRunRecord:
         with self.engine.begin() as conn:
             return self._load_collection_run(conn, run_id)
@@ -746,7 +895,7 @@ class TaskStore:
             text(
                 """
                 SELECT run_id, platform, query_key, model_name, series_id, status, mode,
-                       shared_by_task_ids, failure_category, output_path
+                       shared_by_task_ids, agent_id, failure_category, retry_count, resume_cursor, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id
                 """
@@ -760,7 +909,7 @@ class TaskStore:
             text(
                 f"""
                 SELECT run_id, platform, query_key, model_name, series_id, status, mode,
-                       shared_by_task_ids, failure_category, output_path
+                       shared_by_task_ids, agent_id, failure_category, retry_count, resume_cursor, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id{lock_clause}
                 """
@@ -781,7 +930,9 @@ class TaskStore:
             status=str(row["status"]),
             mode=str(row["mode"]),
             shared_by_task_ids=self._shared_task_ids(row),
+            agent_id=str(row["agent_id"]) if row["agent_id"] else None,
             failure_category=str(row["failure_category"]) if row["failure_category"] else None,
+            resume_cursor=dict(_json_value(row["resume_cursor"], {})),
             output_path=str(row["output_path"]) if row["output_path"] else None,
         )
 

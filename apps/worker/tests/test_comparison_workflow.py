@@ -120,6 +120,22 @@ def usable_vehicle(vehicle_id: int, model_name: str, *, reused: bool = False, **
     }
 
 
+def complete_report_payloads(tmp_path: Path, task_id: str, model_name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    ai_root = tmp_path / "artifacts" / task_id / "outputs" / "ai"
+    ai_root.mkdir(parents=True, exist_ok=True)
+    final_report = ai_root / "final_report.json"
+    analysis_facts = ai_root / "analysis_facts.jsonl"
+    final_report.write_text(
+        json.dumps({"headline": f"{model_name} 智能报告", "executive_summary": "ok"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    analysis_facts.write_text('{"comment_id":"1","summary":"ok"}\n', encoding="utf-8")
+    return (
+        {"artifact_paths": [str(analysis_facts)], "skipped": False},
+        {"artifact_paths": [str(final_report)], "skipped": False},
+    )
+
+
 def test_comparison_collects_two_vehicles_and_reuses_existing_corpus_snapshot() -> None:
     def wait_result(payload: dict[str, Any]) -> dict[str, Any]:
         vehicle = payload["vehicle"]
@@ -659,17 +675,7 @@ def test_default_single_vehicle_activities_publish_snapshot_consumable_by_compar
         "vehicles": [{"query": "测试车A", "model_name": "测试车A"}],
     }
     results = {"successful_platforms": ["autohome", "dongchedi"], "failed_platforms": []}
-    postprocess = asyncio.run(activities.run_postprocess({"task_id": "task_child", "task": task, "results": results}))
-    report = asyncio.run(
-        activities.run_llm_report(
-            {
-                "task_id": "task_child",
-                "task": task,
-                "results": results,
-                "postprocess_result": postprocess,
-            }
-        )
-    )
+    postprocess, report = complete_report_payloads(tmp_path, "task_child", "测试车A")
     asyncio.run(
         activities.publish_full_result(
             {
@@ -746,17 +752,7 @@ def test_default_degraded_single_vehicle_result_is_usable_by_comparison(
             {"platform": "dongchedi", "failure_category": "timeout", "retryable": True},
         ],
     }
-    postprocess = asyncio.run(activities.run_postprocess({"task_id": "task_child", "task": task, "results": results}))
-    report = asyncio.run(
-        activities.run_llm_report(
-            {
-                "task_id": "task_child",
-                "task": task,
-                "results": results,
-                "postprocess_result": postprocess,
-            }
-        )
-    )
+    postprocess, report = complete_report_payloads(tmp_path, "task_child", "测试车A")
     asyncio.run(
         activities.publish_degraded_result(
             {

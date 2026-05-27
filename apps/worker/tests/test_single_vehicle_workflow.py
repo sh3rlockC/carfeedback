@@ -14,6 +14,8 @@ if str(ROOT) not in sys.path:
 
 from test_task_store import create_schema, seed_task
 from worker_app.task_store import TaskStore
+from worker_app.jobs import StageResult
+from worker_app.stages import StageCommand
 from worker_app.temporal_activities import (
     DEFAULT_COLLECTOR_WAIT_POLL_SECONDS,
     DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS,
@@ -59,12 +61,19 @@ class FakeActivityRunner:
             self.task.events.append(FakeEvent("task_failed"))
         elif name == "schedule_retry":
             self.task.events.append(FakeEvent("retry_scheduled"))
+        elif name == "pause_report_retry":
+            self.task.status = "retry_paused"
+            self.task.events.append(FakeEvent("report_retry_paused"))
         elif name == "cancel_task":
             self.task.status = "cancelled"
             self.task.events.append(FakeEvent("task_cancelled"))
+        elif name == "mark_task_stage":
+            self.task.status = str(payload.get("status") or self.task.status)
 
         values = self.responses.get(name)
         if not values:
+            if name == "dispatch_collection_run":
+                return {**dict(payload), "status": "completed", "dispatched": True}
             return {}
         value = values.pop(0)
         if callable(value):
@@ -140,8 +149,8 @@ def test_both_platforms_succeed_completes_full_result() -> None:
             ],
             "import_run_rows_to_corpus": [{"imported_rows": 24}],
             "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
-            "run_postprocess": [{"artifact_paths": ["/tmp/post.xlsx"], "skipped": False}],
-            "run_llm_report": [{"artifact_paths": ["/tmp/report.json"], "skipped": False}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
             "publish_full_result": [{"status": "completed"}],
         },
     )
@@ -154,9 +163,13 @@ def test_both_platforms_succeed_completes_full_result() -> None:
     assert task.upgraded_to_full is False
     assert runner.call_names() == [
         "load_task",
+        "mark_task_stage",
         "resolve_vehicle_inputs",
         "create_or_join_collection_run",
         "create_or_join_collection_run",
+        "mark_task_stage",
+        "dispatch_collection_run",
+        "dispatch_collection_run",
         "wait_for_collection_runs",
         "import_run_rows_to_corpus",
         "export_vehicle_workbooks",
@@ -164,6 +177,50 @@ def test_both_platforms_succeed_completes_full_result() -> None:
         "run_llm_report",
         "publish_full_result",
     ]
+
+
+def test_ai_report_failure_retries_then_pauses_without_publishing_fallback() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome", "dongchedi"],
+                    "failed_platforms": [],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "import_run_rows_to_corpus": [{"imported_rows": 24}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [
+                {"artifact_paths": [], "deferred_to_report": True, "skipped": False},
+                {"artifact_paths": [], "deferred_to_report": True, "skipped": False},
+                {"artifact_paths": [], "deferred_to_report": True, "skipped": False},
+            ],
+            "run_llm_report": [
+                {"artifact_paths": [], "skipped": True, "failure_category": "llm_unavailable"},
+                {"artifact_paths": [], "skipped": True, "failure_category": "llm_unavailable"},
+                {"artifact_paths": [], "skipped": True, "failure_category": "llm_unavailable"},
+            ],
+            "schedule_retry": [{"scheduled": True}, {"scheduled": True}],
+            "pause_report_retry": [{"status": "retry_paused"}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "retry_paused"}
+    assert task.status == "retry_paused"
+    assert runner.call_names().count("run_llm_report") == 3
+    assert runner.call_names().count("schedule_retry") == 2
+    assert "publish_full_result" not in runner.call_names()
+    assert "publish_degraded_result" not in runner.call_names()
+    pause_payload = runner.calls[-1][1]
+    assert pause_payload["failure_category"] == "llm_unavailable"
 
 
 def test_default_collector_wait_timeout_is_below_activity_timeout() -> None:
@@ -248,11 +305,11 @@ def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
             "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/degraded_raw.xlsx"]}, {"artifact_paths": ["/tmp/raw.xlsx"]}],
             "run_postprocess": [
                 {"artifact_paths": ["/tmp/degraded_analysis_facts.jsonl"], "skipped": False},
-                {"artifact_paths": ["/tmp/post.xlsx"], "skipped": False},
+                {"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False},
             ],
             "run_llm_report": [
                 {"artifact_paths": ["/tmp/degraded_final_report.json"], "skipped": False},
-                {"artifact_paths": ["/tmp/report.json"], "skipped": False},
+                {"artifact_paths": ["/tmp/final_report.json"], "skipped": False},
             ],
             "publish_full_result": [{"status": "completed"}],
         },
@@ -482,7 +539,7 @@ def test_cancellation_orchestration_calls_cancel_task_before_publish() -> None:
     assert cancel_payload == {"task_id": "task_1"}
 
 
-def test_skipped_postprocess_prevents_full_publish_and_marks_failed() -> None:
+def test_skipped_postprocess_pauses_report_retry_without_full_publish() -> None:
     task = FakeTask()
     runner = FakeActivityRunner(
         task,
@@ -501,22 +558,19 @@ def test_skipped_postprocess_prevents_full_publish_and_marks_failed() -> None:
             "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
             "run_postprocess": [{"artifact_paths": [], "skipped": True}],
             "run_llm_report": [{"artifact_paths": [], "skipped": True}],
-            "mark_task_failed": [{"status": "failed"}],
+            "schedule_retry": [{"scheduled": True}, {"scheduled": True}],
+            "pause_report_retry": [{"status": "retry_paused"}],
         },
     )
 
     result = run_workflow(runner)
 
-    assert result == {"task_id": "task_1", "status": "failed"}
+    assert result == {"task_id": "task_1", "status": "retry_paused"}
     assert "publish_full_result" not in runner.call_names()
-    failure_payload = dict(runner.calls)["mark_task_failed"]
-    assert failure_payload["results"]["failed_platforms"] == [
-        {
-            "platform": "postprocess_or_report",
-            "failure_category": "postprocess_or_report_deferred",
-            "retryable": False,
-        }
-    ]
+    assert "mark_task_failed" not in runner.call_names()
+    assert runner.call_names().count("schedule_retry") == 2
+    pause_payload = dict(runner.calls)["pause_report_retry"]
+    assert pause_payload["failure_category"] == "postprocess_or_report_deferred"
 
 
 def test_single_vehicle_workflow_exposes_cancel_signal() -> None:
@@ -659,3 +713,62 @@ def test_wait_for_collection_runs_polls_until_terminal_before_returning_pending(
     assert sleep_calls == [1.0]
     assert result["successful_platforms"] == ["autohome", "dongchedi"]
     assert result["pending_platforms"] == []
+
+
+def test_dispatch_collection_run_claims_executes_and_persists_result(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(str(db_path), "task_1")
+    database_url = f"sqlite+pysqlite:///{db_path}"
+    store = TaskStore(database_url)
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    def fake_build_stage_commands(**kwargs):
+        job_paths = kwargs["job_paths"]
+        return [
+            StageCommand(
+                name="collecting_autohome",
+                dependency_name="fake",
+                command=[
+                    "collector",
+                    "--series-id",
+                    "8089",
+                    "--output",
+                    str(job_paths.outputs.raw / "autohome.xlsx"),
+                    "--progress-file",
+                    str(job_paths.progress / "collecting_autohome.progress.json"),
+                ],
+                cwd=tmp_path,
+            )
+        ]
+
+    def fake_build_stage_runner(**_kwargs):
+        def runner(command, _job_paths, _progress_sink):
+            output = command.command[command.command.index("--output") + 1]
+            return StageResult(
+                status="success",
+                artifact_paths=[output],
+                output_metadata={"openclaw_agent_id": "autohome-1"},
+            )
+
+        return runner
+
+    monkeypatch.setattr(temporal_activities, "build_stage_commands", fake_build_stage_commands)
+    monkeypatch.setattr(temporal_activities, "build_stage_runner", fake_build_stage_runner)
+
+    result = asyncio.run(TaskActivities(database_url).dispatch_collection_run({"run_id": run.run_id}))
+    stored = store.load_collection_run(run.run_id)
+
+    assert result["status"] == "completed"
+    assert result["agent_id"] == "autohome-1"
+    assert stored.status == "completed"
+    assert stored.output_path.endswith("autohome.xlsx")
+    assert stored.agent_id == "autohome-1"

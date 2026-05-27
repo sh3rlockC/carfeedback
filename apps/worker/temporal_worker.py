@@ -25,8 +25,10 @@ async def main() -> None:
         activities=[
             activities.load_task,
             activities.load_comparison_task,
+            activities.mark_task_stage,
             activities.resolve_vehicle_inputs,
             activities.create_or_join_collection_run,
+            activities.dispatch_collection_run,
             activities.wait_for_collection_run,
             activities.wait_for_collection_runs,
             activities.ensure_vehicle_subworkflow,
@@ -41,6 +43,7 @@ async def main() -> None:
             activities.publish_degraded_result,
             activities.publish_full_result,
             activities.schedule_retry,
+            activities.pause_report_retry,
             activities.retry_failed_platforms,
             activities.mark_task_failed,
             activities.cancel_task,

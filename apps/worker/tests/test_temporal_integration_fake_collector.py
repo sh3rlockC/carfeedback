@@ -33,15 +33,15 @@ from worker_app.task_eta import estimate_queue_seconds, eta_reason_for_platform
 from worker_app.task_scheduler import QueuedRun, plan_dispatch_order
 from worker_app.task_store import TaskStore, utc_now_iso
 from worker_app.temporal_activities import TaskActivities
-from worker_app.temporal_workflows import run_single_vehicle_task
+from worker_app.temporal_workflows import run_comparison_task, run_single_vehicle_task
 
 
 class FakeTaskWorkflowClient:
     def __init__(self) -> None:
-        self.started: list[str] = []
+        self.started: list[tuple[str, str]] = []
 
-    def start_task(self, task_id: str) -> None:
-        self.started.append(task_id)
+    def start_task(self, task_id: str, task_type: str) -> None:
+        self.started.append((task_id, task_type))
 
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, FakeTaskWorkflowClient, str]:
@@ -52,6 +52,7 @@ def _make_client(tmp_path: Path) -> tuple[TestClient, FakeTaskWorkflowClient, st
         database_url=database_url,
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
+        task_center_create_enabled=True,
         session_secret="test-secret",
         artifact_root=str(tmp_path / "artifacts"),
         workspace_root=str(tmp_path),
@@ -106,6 +107,35 @@ def _set_vehicle_series(database_url: str, task_id: str, series_by_query: dict[s
     engine.dispose()
 
 
+def _seed_confirmed_series(database_url: str, query: str, autohome_series_id: str, dcd_series_id: str) -> None:
+    engine = create_engine(database_url, future=True, connect_args={"check_same_thread": False})
+    now = utc_now_iso()
+    query_key = query.strip().lower()
+    with engine.begin() as connection:
+        for platform, series_id in (("autohome", autohome_series_id), ("dongchedi", dcd_series_id)):
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO confirmed_vehicle_series (
+                        query_key, query, platform, series_id, status, created_at, updated_at
+                    )
+                    VALUES (
+                        :query_key, :query, :platform, :series_id, 'active', :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "query_key": query_key,
+                    "query": query,
+                    "platform": platform,
+                    "series_id": series_id,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+    engine.dispose()
+
+
 def _write_platform_workbook(path: Path, *, platform: str, model_name: str, run_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
@@ -135,6 +165,49 @@ def _write_platform_workbook(path: Path, *, platform: str, model_name: str, run_
     workbook.save(path)
 
 
+def _task_model_name(payload: dict[str, Any]) -> str:
+    task = payload.get("task") if isinstance(payload, dict) else {}
+    vehicles = task.get("vehicles") if isinstance(task, dict) else []
+    if vehicles and isinstance(vehicles[0], dict):
+        return str(vehicles[0].get("model_name") or vehicles[0].get("query") or "车型A")
+    return str(task.get("display_name") or "车型A") if isinstance(task, dict) else "车型A"
+
+
+def _write_fake_summary_workbook(path: Path, model_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    overview = workbook.active
+    overview.title = "总览摘要"
+    overview.append(["模块", "内容"])
+    overview.append(["平台样本", "汽车之家 1 条 / 懂车帝 1 条"])
+    compare = workbook.create_sheet("跨平台对比")
+    compare.append(["维度", "汽车之家", "懂车帝"])
+    compare.append(["空间", "正向集中", "正向集中"])
+    business = workbook.create_sheet("综合业务摘要")
+    business.append(["模块", "结论"])
+    business.append(["核心卖点", f"{model_name} 双平台评论样本稳定"])
+    opportunities = workbook.create_sheet("产品机会点")
+    opportunities.append(["机会", "建议"])
+    opportunities.append(["车机", "持续观察新增负向评论"])
+    one_pager = workbook.create_sheet("一页纸总结")
+    one_pager.append([f"{model_name} 双平台口碑一页纸总结"])
+    one_pager.append(["当前 fake collector 样本已生成完整智能报告产物。"])
+    workbook.save(path)
+
+
+def _write_fake_terms_workbook(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook = Workbook()
+    positive = workbook.active
+    positive.title = "positive_terms"
+    positive.append(["term", "weight"])
+    positive.append(["空间", 12])
+    negative = workbook.create_sheet("negative_terms")
+    negative.append(["term", "weight"])
+    negative.append(["车机", 8])
+    workbook.save(path)
+
+
 class FakeCollectorActivityRunner:
     def __init__(self, database_url: str, output_root: Path, *, fail_dongchedi_once: bool = False) -> None:
         self.database_url = database_url
@@ -148,16 +221,102 @@ class FakeCollectorActivityRunner:
         self.calls.append(name)
         if name == "create_or_join_collection_run":
             run = await self.activities.create_or_join_collection_run(payload)
-            if run["platform"] == "dongchedi" and self.fail_dongchedi_once and not self.failed_dongchedi:
-                self.failed_dongchedi = True
-                self._finish_run(run, status="failed", failure_category="timeout")
-            else:
-                self._finish_run(run, status="completed")
             return run
+        if name == "dispatch_collection_run":
+            run = TaskStore(self.database_url).load_collection_run(str(payload["run_id"]))
+            run_payload = _run_to_dict(run)
+            if run_payload["platform"] == "dongchedi" and self.fail_dongchedi_once and not self.failed_dongchedi:
+                self.failed_dongchedi = True
+                return self._finish_run(run_payload, status="failed", failure_category="timeout")
+            else:
+                return self._finish_run(run_payload, status="completed")
         if name == "retry_failed_platforms":
             return self._retry_failed_platforms(payload)
+        if name == "run_postprocess":
+            return self._write_fake_analysis_facts(payload)
+        if name == "run_llm_report":
+            return self._write_fake_report_outputs(payload)
         method = getattr(self.activities, name)
         return await method(payload)
+
+    def _task_output_root(self, payload: dict[str, Any]) -> Path:
+        task_id = str(payload.get("task_id") or "task")
+        artifact_root = Path(os.environ.get("ARTIFACT_ROOT") or self.output_root)
+        return artifact_root / task_id / "outputs"
+
+    def _write_fake_analysis_facts(self, payload: dict[str, Any]) -> dict[str, Any]:
+        model_name = _task_model_name(payload)
+        output_root = self._task_output_root(payload) / "ai"
+        output_root.mkdir(parents=True, exist_ok=True)
+        facts_path = output_root / "analysis_facts.jsonl"
+        facts_path.write_text(
+            json.dumps(
+                {
+                    "comment_id": "fake-1",
+                    "platform": "autohome",
+                    "summary": f"{model_name} 空间表现获得正向反馈",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return {"artifact_paths": [str(facts_path)], "skipped": False}
+
+    def _write_fake_report_outputs(self, payload: dict[str, Any]) -> dict[str, Any]:
+        model_name = _task_model_name(payload)
+        output_root = self._task_output_root(payload)
+        ai_root = output_root / "ai"
+        summary_root = output_root / "summary"
+        wordcloud_root = output_root / "wordcloud"
+        ai_root.mkdir(parents=True, exist_ok=True)
+        wordcloud_root.mkdir(parents=True, exist_ok=True)
+        report_path = ai_root / "final_report.json"
+        metrics_path = ai_root / "llm_metrics.json"
+        pdf_path = output_root / f"{model_name}_智能一页纸完整报告.pdf"
+        summary_path = summary_root / f"{model_name}_双平台口碑摘要.xlsx"
+        terms_path = wordcloud_root / f"{model_name}_词云词项清单.xlsx"
+        positive_png = wordcloud_root / f"{model_name}_优点词云.png"
+        negative_png = wordcloud_root / f"{model_name}_槽点词云.png"
+        _write_fake_summary_workbook(summary_path, model_name)
+        _write_fake_terms_workbook(terms_path)
+        report_path.write_text(
+            json.dumps(
+                {
+                    "headline": f"{model_name} 双平台口碑表现稳定",
+                    "executive_summary": f"{model_name} 当前增量样本已完成智能报告生成。",
+                    "key_findings": [
+                        {
+                            "title": "空间反馈稳定",
+                            "summary": "正向评论集中在空间和配置。",
+                            "evidence": ["车主反馈空间够用。"],
+                        }
+                    ],
+                    "dimension_matrix": [
+                        {"dimension": "空间", "sentiment": "positive", "summary": "正向集中"}
+                    ],
+                    "boss_brief": ["继续关注车机负向评论。"],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        metrics_path.write_text('{"mode":"fake"}', encoding="utf-8")
+        pdf_path.write_bytes(b"%PDF-1.4\n% fake report\n")
+        positive_png.write_bytes(b"fake-png")
+        negative_png.write_bytes(b"fake-png")
+        return {
+            "artifact_paths": [
+                str(report_path),
+                str(metrics_path),
+                str(pdf_path),
+                str(summary_path),
+                str(terms_path),
+                str(positive_png),
+                str(negative_png),
+            ],
+            "skipped": False,
+        }
 
     def _finish_run(self, run: dict[str, Any], *, status: str, failure_category: str | None = None) -> dict[str, Any]:
         output_path: Path | None = None
@@ -238,7 +397,7 @@ def test_api_created_single_task_runs_fake_collector_workflow_to_detail_payload(
     result = asyncio.run(run_single_vehicle_task(payload["task_id"], runner))
 
     assert result == {"task_id": payload["task_id"], "status": "completed"}
-    assert workflow_client.started == [payload["task_id"]]
+    assert workflow_client.started == [(payload["task_id"], "single")]
     detail_response = client.get(f"/api/tasks/{payload['task_id']}")
     assert detail_response.status_code == 200
     detail = detail_response.json()
@@ -247,6 +406,99 @@ def test_api_created_single_task_runs_fake_collector_workflow_to_detail_payload(
     assert any(event["event_type"] == "collection_run_shared" for event in detail["events"]) is False
     assert load_platform_state(database_url, query="车型A", platform="autohome", series_id="8089").existing_count == 1
     assert load_platform_state(database_url, query="车型A", platform="dongchedi", series_id="25398").existing_count == 1
+
+
+def test_resolve_vehicle_inputs_backfills_missing_series_from_confirmed_table(tmp_path: Path) -> None:
+    client, _workflow_client, database_url = _make_client(tmp_path)
+    _authenticate(client)
+    payload = _create_task(client, "single", ["车型A"])
+    _seed_confirmed_series(database_url, "车型A", "8089", "25398")
+
+    task = TaskStore(database_url).load_task(payload["task_id"])
+    result = asyncio.run(
+        TaskActivities(database_url=database_url).resolve_vehicle_inputs(
+            {
+                "task_id": payload["task_id"],
+                "vehicles": [
+                    {
+                        "id": task.vehicles[0].id,
+                        "query": task.vehicles[0].query,
+                        "model_name": task.vehicles[0].model_name,
+                        "autohome_series_id": task.vehicles[0].autohome_series_id,
+                        "dcd_series_id": task.vehicles[0].dcd_series_id,
+                    }
+                ],
+                "mode": "incremental",
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["platforms"]["autohome"]["series_id"] == "8089"
+    assert result["platforms"]["dongchedi"]["series_id"] == "25398"
+
+    updated = TaskStore(database_url).load_task(payload["task_id"])
+    assert updated.vehicles[0].autohome_series_id == "8089"
+    assert updated.vehicles[0].dcd_series_id == "25398"
+
+
+def test_single_task_export_uses_backfilled_series_ids_for_corpus_dir(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    corpus_root = tmp_path / "corpus"
+    monkeypatch.setenv("KOUBEI_CORPUS_ROOT", str(corpus_root))
+    client, _workflow_client, database_url = _make_client(tmp_path)
+    _authenticate(client)
+    payload = _create_task(client, "single", ["车型A"])
+    _seed_confirmed_series(database_url, "车型A", "8089", "25398")
+
+    runner = FakeCollectorActivityRunner(database_url, tmp_path / "collector")
+    result = asyncio.run(run_single_vehicle_task(payload["task_id"], runner))
+
+    assert result == {"task_id": payload["task_id"], "status": "completed"}
+    expected_dir = corpus_root / "车型A__autohome-8089__dcd-25398"
+    assert (expected_dir / "manifest.json").exists()
+    assert (expected_dir / "autohome" / "raw.xlsx").exists()
+    assert (expected_dir / "dongchedi" / "raw.xlsx").exists()
+    assert not (corpus_root / "车型A__autohome-vehicle__dcd-vehicle").exists()
+
+
+def test_api_created_comparison_task_runs_child_task_workflows_to_task_result(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("KOUBEI_CORPUS_ROOT", str(tmp_path / "corpus"))
+    client, workflow_client, database_url = _make_client(tmp_path)
+    _authenticate(client)
+    payload = _create_task(client, "comparison", ["车型A", "车型B"])
+    _seed_confirmed_series(database_url, "车型A", "8089", "25398")
+    _seed_confirmed_series(database_url, "车型B", "8090", "25399")
+
+    runner = FakeCollectorActivityRunner(database_url, tmp_path / "collector")
+    child_tasks: dict[str, asyncio.Task] = {}
+
+    async def child_workflow_runner(child_payload: dict[str, Any]) -> dict[str, Any]:
+        child_task_id = str(child_payload["child_task_id"])
+        child_tasks[child_task_id] = asyncio.create_task(run_single_vehicle_task(child_task_id, runner))
+        return {"child_task_id": child_task_id, "started": True}
+
+    async def child_completion_runner(child_payload: dict[str, Any]) -> dict[str, Any]:
+        return await child_tasks[str(child_payload["child_task_id"])]
+
+    result = asyncio.run(
+        run_comparison_task(
+            payload["task_id"],
+            runner,
+            child_workflow_runner=child_workflow_runner,
+            child_completion_runner=child_completion_runner,
+        )
+    )
+
+    assert result["status"] == "completed"
+    assert workflow_client.started == [(payload["task_id"], "comparison")]
+    detail_response = client.get(f"/api/tasks/{payload['task_id']}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["status"] == "completed"
+    assert len(detail["vehicles"]) == 2
+    assert detail["artifacts"]
 
 
 def test_four_user_fake_load_shares_runs_limits_lanes_and_records_upgrade(tmp_path: Path, monkeypatch) -> None:

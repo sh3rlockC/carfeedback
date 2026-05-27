@@ -116,6 +116,13 @@ class TaskDetailResponse(TaskListItem):
     vehicles: list[dict]
     events: list[dict]
     artifacts: list[dict]
+    collection_runs: list[dict] = Field(default_factory=list)
+
+
+class TaskLoadResponse(BaseModel):
+    running_task_count: int
+    queued_task_count: int
+    platforms: dict[str, dict[str, int]]
 
 
 class JobOverviewResponse(BaseModel):

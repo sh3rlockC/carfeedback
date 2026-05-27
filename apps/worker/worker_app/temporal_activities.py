@@ -3,12 +3,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from worker_app.artifacts import ensure_job_dirs
+from worker_app.corpus import (
+    INCREMENTAL_MAX_SCAN_PAGES,
+    INCREMENTAL_STOP_AFTER_KNOWN_PAGES,
+    load_platform_state,
+    write_known_links_file,
+)
+from worker_app.openclaw_runner import OpenClawSettings, build_stage_runner
+from worker_app.progress import ProgressSink
+from worker_app.stages import StageCommand, StageExecutionError, build_stage_commands
 from sqlalchemy import inspect as inspect_database
 from sqlalchemy import text
 from temporalio import activity
@@ -79,7 +90,9 @@ def _run_to_dict(run: CollectionRunRecord) -> dict[str, Any]:
         "status": run.status,
         "mode": run.mode,
         "shared_by_task_ids": run.shared_by_task_ids,
+        "agent_id": run.agent_id,
         "failure_category": run.failure_category,
+        "resume_cursor": run.resume_cursor,
         "output_path": run.output_path,
     }
 
@@ -216,6 +229,144 @@ def _db_truthy(value: Any) -> bool:
     return bool(value)
 
 
+def _query_key(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
+
+
+def _confirmed_series_for_query(store: TaskStore, query: str) -> dict[str, str]:
+    columns = _table_columns(store, "confirmed_vehicle_series")
+    if not {"query_key", "platform", "series_id"}.issubset(columns):
+        return {}
+    status_filter = "AND status = 'active'" if "status" in columns else ""
+    with store.engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT platform, series_id
+                FROM confirmed_vehicle_series
+                WHERE query_key = :query_key
+                  {status_filter}
+                """
+            ),
+            {"query_key": _query_key(query)},
+        ).mappings().all()
+    return {
+        str(row["platform"]): str(row["series_id"])
+        for row in rows
+        if row["platform"] and row["series_id"]
+    }
+
+
+def _persist_vehicle_series(store: TaskStore, *, vehicle_id: int | None, series_ids: dict[str, str]) -> None:
+    if not vehicle_id:
+        return
+    columns = _table_columns(store, "task_vehicles")
+    assignments: list[str] = []
+    params: dict[str, Any] = {"vehicle_id": int(vehicle_id)}
+    if "autohome_series_id" in columns and series_ids.get("autohome"):
+        assignments.append("autohome_series_id = :autohome_series_id")
+        params["autohome_series_id"] = series_ids["autohome"]
+    if "dcd_series_id" in columns and series_ids.get("dongchedi"):
+        assignments.append("dcd_series_id = :dcd_series_id")
+        params["dcd_series_id"] = series_ids["dongchedi"]
+    if "updated_at" in columns and assignments:
+        assignments.append("updated_at = :updated_at")
+        params["updated_at"] = datetime.now(UTC)
+    if not assignments:
+        return
+    with store.engine.begin() as conn:
+        conn.execute(
+            text(
+                f"""
+                UPDATE task_vehicles
+                SET {", ".join(assignments)}
+                WHERE id = :vehicle_id
+                """
+            ),
+            params,
+        )
+
+
+def _collector_stage_name(platform: str) -> str:
+    if platform == "autohome":
+        return "collecting_autohome"
+    if platform == "dongchedi":
+        return "collecting_dcd"
+    raise StageExecutionError(
+        stage="collection_run",
+        error_code="CONFIG_ERROR",
+        message=f"unsupported collection platform: {platform}",
+    )
+
+
+def _command_arg(command: StageCommand, option: str) -> str:
+    try:
+        index = command.command.index(option)
+        return command.command[index + 1]
+    except (ValueError, IndexError) as exc:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="CONFIG_ERROR",
+            message=f"missing required command option: {option}",
+        ) from exc
+
+
+def _collector_failure_category(exc: StageExecutionError) -> str:
+    code = exc.error_code.upper()
+    if "TIMEOUT" in code:
+        return "timeout"
+    if "NETWORK" in code or "CONNECTION" in code:
+        return "network_error"
+    if code == "AGENT_POOL_TIMEOUT":
+        return "agent_busy"
+    if code in {"CONFIG_ERROR", "CONTRACT_ERROR"}:
+        return "config_error" if code == "CONFIG_ERROR" else "output_schema_mismatch"
+    if code in {"PARSING_ERROR", "OPENCLAW_ARTIFACTS_MISSING"}:
+        return "schema_changed"
+    if code.startswith("OPENCLAW"):
+        return "collector_runtime_error"
+    return "collector_runtime_error"
+
+
+def _effective_collection_plan(
+    *,
+    database_url: str,
+    run: CollectionRunRecord,
+    job_inputs_dir: Path,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    requested_mode = run.mode or "incremental"
+    if requested_mode == "full_refresh":
+        return "full_refresh", {}, {"existing_count": 0, "known_links_count": 0, "mode_reason": "requested_full_refresh"}
+
+    state = load_platform_state(
+        database_url,
+        query=run.query_key,
+        platform=run.platform,
+        series_id=run.series_id,
+    )
+    summary = {
+        "existing_count": state.existing_count,
+        "known_links_count": len(state.known_links),
+        "mode_reason": "history_found" if state.existing_count else "no_history_full_refresh",
+    }
+    if state.existing_count <= 0:
+        return "full_refresh", {}, summary
+
+    known_links_file = job_inputs_dir / f"{run.platform}.known-links.txt"
+    write_known_links_file(known_links_file, state.known_links)
+    return (
+        "incremental",
+        {
+            run.platform: {
+                "known_links_file": str(known_links_file),
+                "max_scan_pages": INCREMENTAL_MAX_SCAN_PAGES,
+                "stop_after_known_pages": INCREMENTAL_STOP_AFTER_KNOWN_PAGES,
+            }
+        },
+        {**summary, "known_links_file": str(known_links_file)},
+    )
+
+
 class TaskActivities:
     def __init__(self, database_url: str | None = None) -> None:
         self.database_url = database_url
@@ -241,6 +392,36 @@ class TaskActivities:
                 "end_date": None,
                 "passphrase_version": "",
                 "vehicles": [],
+            }
+        task_store = self._store()
+        try:
+            task = task_store.load_task(comparison_id)
+        except RuntimeError:
+            task = None
+        if task is not None and task.task_type == "comparison":
+            task_store.mark_task_stage(comparison_id, "collecting_models", "running")
+            return {
+                "comparison_id": task.task_id,
+                "source": "tasks",
+                "status": "running",
+                "start_date": None,
+                "end_date": None,
+                "passphrase_version": "",
+                "vehicles": [
+                    {
+                        "vehicle_id": vehicle.id,
+                        "position": vehicle.position,
+                        "query": vehicle.query,
+                        "model_name": vehicle.model_name,
+                        "status": vehicle.status,
+                        "source_job_id": None,
+                        "child_job_id": None,
+                        "autohome_series_id": vehicle.autohome_series_id,
+                        "dcd_series_id": vehicle.dcd_series_id,
+                        "selected_candidates": {},
+                    }
+                    for vehicle in task.vehicles
+                ],
             }
         store = DatabaseJobStore(self.database_url)
         inputs = store.fetch_comparison_inputs(comparison_id)
@@ -284,6 +465,7 @@ class TaskActivities:
     async def wait_for_vehicle_results(self, payload: dict[str, Any]) -> dict:
         comparison_id = str(payload["comparison_id"])
         vehicle = dict(payload.get("vehicle") or {})
+        task_source = (payload.get("task") or {}).get("source") == "tasks"
         subworkflow = dict(payload.get("subworkflow") or {})
         reused = bool(payload.get("reused"))
         source_job_id = str(vehicle.get("source_job_id") or subworkflow.get("source_job_id") or subworkflow.get("child_task_id") or "")
@@ -330,6 +512,7 @@ class TaskActivities:
                 task_id=source_job_id,
                 task=task,
                 reused=reused,
+                task_source=task_source,
             )
 
         job = await self._wait_for_job_terminal(store, source_job_id)
@@ -405,14 +588,16 @@ class TaskActivities:
         task_id: str,
         task: dict[str, Any],
         reused: bool,
+        task_source: bool = False,
     ) -> dict[str, Any]:
         if str(task.get("status")) not in {"completed", "completed_degraded"}:
-            store.mark_comparison_vehicle_status(
-                vehicle_id,
-                status="excluded",
-                error_code=str(task.get("error_code") or "collection_failed"),
-                error_message=str(task.get("error_message") or "vehicle collection failed"),
-            )
+            if not task_source:
+                store.mark_comparison_vehicle_status(
+                    vehicle_id,
+                    status="excluded",
+                    error_code=str(task.get("error_code") or "collection_failed"),
+                    error_message=str(task.get("error_message") or "vehicle collection failed"),
+                )
             return {
                 "vehicle_id": vehicle_id,
                 "model_name": model_name,
@@ -425,7 +610,8 @@ class TaskActivities:
         source_artifacts = self._task_source_artifacts(store, task_id)
         if "final_report.json" not in source_artifacts or "analysis_facts.jsonl" not in source_artifacts:
             reason = f"source task missing comparison JSON artifacts: {task_id}"
-            store.mark_comparison_vehicle_status(vehicle_id, status="excluded", error_code="missing_snapshot", error_message=reason)
+            if not task_source:
+                store.mark_comparison_vehicle_status(vehicle_id, status="excluded", error_code="missing_snapshot", error_message=reason)
             return {
                 "vehicle_id": vehicle_id,
                 "model_name": model_name,
@@ -449,7 +635,8 @@ class TaskActivities:
             )
         )
         status = "reused" if reused else "completed"
-        store.mark_comparison_vehicle_status(vehicle_id, status=status, source_job_id=task_id)
+        if not task_source:
+            store.mark_comparison_vehicle_status(vehicle_id, status=status, source_job_id=task_id)
         upgraded_to_full = _db_truthy(task.get("upgraded_to_full")) or self._task_upgraded_to_full(store, task_id)
         degraded = str(task.get("status")) == "completed_degraded" or (
             _db_truthy(task.get("degraded")) and not upgraded_to_full
@@ -717,21 +904,28 @@ class TaskActivities:
         comparison_id = str(payload["comparison_id"])
         status = str(payload.get("status") or "completed")
         if self.database_url:
-            store = DatabaseJobStore(self.database_url)
-            if status == "failed":
-                store.mark_comparison_failed(
-                    comparison_id,
-                    error_code=str(payload.get("error_code") or "comparison_failed"),
-                    error_message=str(payload.get("error_message") or "comparison failed"),
-                )
+            task_source = (payload.get("task") or {}).get("source") == "tasks"
+            if task_source:
+                if status == "failed":
+                    self._store().mark_task_failed(comparison_id, payload)
+                else:
+                    self._store().publish_comparison_task_result(comparison_id, payload, status=status)
             else:
-                report = dict(payload.get("report") or {})
-                store.mark_comparison_completed(
-                    comparison_id,
-                    report_json=dict(report.get("report_json") or {}),
-                    artifact_paths=list(report.get("artifact_paths") or []),
-                    degraded=bool(payload.get("degraded")),
-                )
+                store = DatabaseJobStore(self.database_url)
+                if status == "failed":
+                    store.mark_comparison_failed(
+                        comparison_id,
+                        error_code=str(payload.get("error_code") or "comparison_failed"),
+                        error_message=str(payload.get("error_message") or "comparison failed"),
+                    )
+                else:
+                    report = dict(payload.get("report") or {})
+                    store.mark_comparison_completed(
+                        comparison_id,
+                        report_json=dict(report.get("report_json") or {}),
+                        artifact_paths=list(report.get("artifact_paths") or []),
+                        degraded=bool(payload.get("degraded")),
+                    )
         return {"comparison_id": comparison_id, "status": status}
 
     @activity.defn
@@ -742,12 +936,19 @@ class TaskActivities:
         report_json["upgraded"] = True
         report_json["upgraded_vehicle_ids"] = list(payload.get("upgraded_vehicle_ids") or [])
         if self.database_url:
-            DatabaseJobStore(self.database_url).mark_comparison_completed(
-                comparison_id,
-                report_json=report_json,
-                artifact_paths=list(report.get("artifact_paths") or []),
-                degraded=bool(report.get("degraded")),
-            )
+            if (payload.get("task") or {}).get("source") == "tasks":
+                self._store().publish_comparison_task_result(
+                    comparison_id,
+                    {**payload, "report": {**report, "report_json": report_json}},
+                    status="completed_upgraded",
+                )
+            else:
+                DatabaseJobStore(self.database_url).mark_comparison_completed(
+                    comparison_id,
+                    report_json=report_json,
+                    artifact_paths=list(report.get("artifact_paths") or []),
+                    degraded=bool(report.get("degraded")),
+                )
         return {
             "comparison_id": comparison_id,
             "status": "completed_upgraded",
@@ -774,6 +975,24 @@ class TaskActivities:
                     }
                 ],
             }
+
+        vehicle = dict(vehicle)
+        if self.database_url:
+            missing_series = any(not str(vehicle.get(series_field) or "").strip() for series_field in PLATFORM_SERIES_FIELDS.values())
+            if missing_series:
+                store = self._store()
+                query = str(vehicle.get("query") or vehicle.get("model_name") or "").strip()
+                confirmed_series = _confirmed_series_for_query(store, query) if query else {}
+                resolved_series = {}
+                for platform, series_field in PLATFORM_SERIES_FIELDS.items():
+                    if not str(vehicle.get(series_field) or "").strip() and confirmed_series.get(platform):
+                        vehicle[series_field] = confirmed_series[platform]
+                        resolved_series[platform] = confirmed_series[platform]
+                _persist_vehicle_series(
+                    store,
+                    vehicle_id=int(vehicle["id"]) if vehicle.get("id") else None,
+                    series_ids=resolved_series,
+                )
 
         platforms: dict[str, dict[str, Any]] = {}
         failed_platforms: list[dict[str, Any]] = []
@@ -818,6 +1037,116 @@ class TaskActivities:
             task_id=str(payload["task_id"]),
         )
         return _run_to_dict(run)
+
+    @activity.defn
+    async def mark_task_stage(self, payload: dict[str, Any]) -> dict:
+        task_id = str(payload["task_id"])
+        stage = str(payload.get("stage") or "running")
+        status = str(payload.get("status") or "running")
+        if self.database_url:
+            self._store().mark_task_stage(task_id, stage, status)
+        return {"task_id": task_id, "stage": stage, "status": status}
+
+    @activity.defn
+    async def dispatch_collection_run(self, payload: dict[str, Any]) -> dict:
+        if not self.database_url:
+            return {
+                "run_id": str(payload["run_id"]),
+                "platform": str(payload.get("platform") or ""),
+                "status": "completed",
+                "dispatched": True,
+            }
+        return await asyncio.to_thread(self._dispatch_collection_run_sync, payload)
+
+    def _dispatch_collection_run_sync(self, payload: dict[str, Any]) -> dict:
+        run_id = str(payload["run_id"])
+        store = self._store()
+        run = store.load_collection_run(run_id)
+        job_paths = ensure_job_dirs(os.getenv("ARTIFACT_ROOT", "/srv/koubei/jobs"), run_id)
+        effective_mode, collection_plan, mode_summary = _effective_collection_plan(
+            database_url=self.database_url or "",
+            run=run,
+            job_inputs_dir=job_paths.inputs,
+        )
+        run, claimed = store.claim_collection_run_for_dispatch(run_id, mode=effective_mode)
+        if not claimed:
+            store.record_collector_event(
+                run_id,
+                "dispatch_skipped",
+                {"status": run.status, "reason": "run_already_claimed_or_terminal"},
+            )
+            return {**_run_to_dict(run), "dispatched": False}
+
+        stage_name = _collector_stage_name(run.platform)
+        stage_commands = build_stage_commands(
+            job_paths=job_paths,
+            model_name=run.model_name,
+            autohome_series_id=run.series_id if run.platform == "autohome" else "0",
+            dongchedi_series_id=run.series_id if run.platform == "dongchedi" else "0",
+            collection_plan=collection_plan,
+        )
+        stage = next(command for command in stage_commands if command.name == stage_name)
+        output_path = _command_arg(stage, "--output")
+        progress_sink = ProgressSink(
+            job_id=run_id,
+            progress_path=job_paths.progress / "task-progress.json",
+            stages=[stage.name],
+        )
+        store.record_collector_event(
+            run_id,
+            "dispatch_started",
+            {
+                "platform": run.platform,
+                "series_id": run.series_id,
+                "mode": effective_mode,
+                **mode_summary,
+            },
+        )
+        runner = build_stage_runner(settings=OpenClawSettings.from_env())
+        try:
+            result = runner(stage, job_paths, progress_sink)
+        except StageExecutionError as exc:
+            failure_category = _collector_failure_category(exc)
+            finished = store.finish_collection_run(
+                run_id,
+                status="failed",
+                failure_category=failure_category,
+                resume_cursor={"error_code": exc.error_code, "message": exc.message},
+            )
+            store.record_collector_event(
+                run_id,
+                "dispatch_failed",
+                {
+                    "error_code": exc.error_code,
+                    "message": exc.message,
+                    "failure_category": failure_category,
+                },
+            )
+            return {**_run_to_dict(finished), "dispatched": True}
+
+        metadata = dict(result.output_metadata or {})
+        finished = store.finish_collection_run(
+            run_id,
+            status="completed" if result.status == "success" else "completed_degraded",
+            output_path=output_path,
+            agent_id=metadata.get("openclaw_agent_id"),
+            resume_cursor={
+                "artifact_paths": result.artifact_paths,
+                "output_metadata": metadata,
+                "mode": effective_mode,
+            },
+        )
+        store.record_collector_event(
+            run_id,
+            "dispatch_completed",
+            {
+                "status": finished.status,
+                "output_path": output_path,
+                "artifact_paths": result.artifact_paths,
+                "openclaw_agent_id": metadata.get("openclaw_agent_id"),
+            },
+        )
+        return {**_run_to_dict(finished), "dispatched": True}
 
     @activity.defn
     async def wait_for_collection_run(self, payload: dict[str, Any]) -> dict:
@@ -908,6 +1237,13 @@ class TaskActivities:
     async def export_vehicle_workbooks(self, payload: dict[str, Any]) -> dict:
         task = payload.get("task") or {}
         vehicle = _first_vehicle(task)
+        if self.database_url and payload.get("task_id"):
+            try:
+                fresh_task = self._store().load_task(str(payload["task_id"]))
+            except RuntimeError:
+                fresh_task = None
+            if fresh_task is not None and fresh_task.vehicles:
+                vehicle = _vehicle_to_dict(fresh_task.vehicles[0])
         if not self.database_url or vehicle is None:
             return {"artifact_paths": [], "skipped": True}
         from worker_app.corpus import sync_vehicle_corpus_files
@@ -927,34 +1263,11 @@ class TaskActivities:
 
     @activity.defn
     async def run_postprocess(self, payload: dict[str, Any]) -> dict:
-        task_id = str(payload["task_id"])
-        task = payload.get("task") or {}
-        vehicle = _first_vehicle(task) or {}
-        output_dir = _task_output_dir(task_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        facts_path = output_dir / "analysis_facts.jsonl"
-        fact = {
-            "comment_id": f"{task_id}:fallback",
-            "task_id": task_id,
-            "model_name": str(vehicle.get("model_name") or vehicle.get("query") or task_id),
-            "source": "temporal_fallback_postprocess",
-            "fallback": True,
-            "date": datetime.now(UTC).date().isoformat(),
-            "section_facts": {
-                "positive": "",
-                "negative": "",
-            },
-            "results_summary": {
-                "successful_platforms": list((payload.get("results") or {}).get("successful_platforms") or []),
-                "failed_platforms": list((payload.get("results") or {}).get("failed_platforms") or []),
-            },
-        }
-        facts_path.write_text(json.dumps(fact, ensure_ascii=False) + "\n", encoding="utf-8")
         return {
-            "artifact_paths": [str(facts_path)],
+            "artifact_paths": [],
             "skipped": False,
-            "fallback": True,
-            "source": "temporal_fallback_postprocess",
+            "deferred_to_report": True,
+            "source": "task_report_generator",
         }
 
     @activity.defn
@@ -962,31 +1275,37 @@ class TaskActivities:
         task_id = str(payload["task_id"])
         task = payload.get("task") or {}
         vehicle = _first_vehicle(task) or {}
-        results = payload.get("results") or {}
-        output_dir = _task_output_dir(task_id)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        report_path = output_dir / "final_report.json"
         model_name = str(vehicle.get("model_name") or vehicle.get("query") or task_id)
-        report = {
-            "headline": f"{model_name} 口碑摘要",
-            "task_id": task_id,
-            "model_name": model_name,
-            "source": "temporal_fallback_report",
-            "fallback": True,
-            "generated_at": datetime.now(UTC).isoformat(),
-            "summary": "基础口碑结果已生成，完整 LLM 摘要待后续增强。",
-            "platform_counts": {
-                "successful": len(list(results.get("successful_platforms") or [])),
-                "failed": len(list(results.get("failed_platforms") or [])),
-            },
-        }
-        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        export_result = payload.get("export_result") if isinstance(payload.get("export_result"), dict) else {}
+        corpus = export_result.get("corpus") if isinstance(export_result, dict) else {}
+        platforms = corpus.get("platforms") if isinstance(corpus, dict) else {}
+        autohome = platforms.get("autohome") if isinstance(platforms, dict) else {}
+        dongchedi = platforms.get("dongchedi") if isinstance(platforms, dict) else {}
+        autohome_path = Path(str((autohome or {}).get("raw_path") or ""))
+        dcd_raw_value = (dongchedi or {}).get("raw_path")
+        dcd_path = Path(str(dcd_raw_value)) if dcd_raw_value else None
+        if not autohome_path.exists() and (dcd_path is None or not dcd_path.exists()):
+            return {
+                "artifact_paths": [],
+                "skipped": True,
+                "failure_category": "raw_workbook_missing",
+                "message": "no exported raw workbook is available for report generation",
+            }
+        from worker_app.task_reports import generate_task_report_outputs
+
+        result = generate_task_report_outputs(
+            task_id=task_id,
+            model_name=model_name,
+            autohome_raw_path=autohome_path,
+            dcd_raw_path=dcd_path,
+            output_root=_task_output_dir(task_id).parent,
+            allow_degraded=bool(payload.get("allow_degraded")),
+            env=dict(os.environ),
+        )
         return {
-            "artifact_paths": [str(report_path)],
-            "skipped": False,
-            "fallback": True,
-            "report_json": report,
-            "source": "temporal_fallback_report",
+            **result,
+            "report_json": result.get("report_json"),
+            "source": result.get("source", "task_report_generator"),
         }
 
     @activity.defn
@@ -1006,6 +1325,12 @@ class TaskActivities:
         if self.database_url:
             self._store().schedule_retry(str(payload["task_id"]), payload)
         return {"task_id": str(payload["task_id"]), "scheduled": True}
+
+    @activity.defn
+    async def pause_report_retry(self, payload: dict[str, Any]) -> dict:
+        if self.database_url:
+            self._store().pause_report_retry(str(payload["task_id"]), payload)
+        return {"task_id": str(payload["task_id"]), "status": "retry_paused"}
 
     @activity.defn
     async def retry_failed_platforms(self, payload: dict[str, Any]) -> dict:

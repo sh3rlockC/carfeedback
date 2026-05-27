@@ -913,6 +913,26 @@ details.card summary {
   color: var(--surface);
 }
 
+.artifact-details {
+  display: grid;
+  gap: 10px;
+}
+
+.artifact-details summary {
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  background: var(--bg-soft);
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.artifact-details[open] summary {
+  margin-bottom: 10px;
+}
+
 .result-dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.8fr) minmax(280px, 0.9fr);

@@ -259,6 +259,42 @@ def test_create_or_join_collection_run_shares_active_run(tmp_path: Path) -> None
     assert link_count == 2
 
 
+def test_claim_and_finish_collection_run_dispatch_lifecycle(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="QQ3",
+        model_name="QQ3",
+        series_id="8499",
+        mode="incremental",
+        task_id="task_1",
+    )
+
+    claimed, did_claim = store.claim_collection_run_for_dispatch(run.run_id, mode="full_refresh")
+    duplicate_claim, duplicate_did_claim = store.claim_collection_run_for_dispatch(run.run_id)
+    finished = store.finish_collection_run(
+        run.run_id,
+        status="completed",
+        output_path="/tmp/raw.xlsx",
+        agent_id="autohome-1",
+        resume_cursor={"page": 3},
+    )
+
+    assert did_claim is True
+    assert claimed.status == "running"
+    assert claimed.mode == "full_refresh"
+    assert duplicate_did_claim is False
+    assert duplicate_claim.status == "running"
+    assert finished.status == "completed"
+    assert finished.output_path == "/tmp/raw.xlsx"
+    assert finished.agent_id == "autohome-1"
+    assert finished.resume_cursor == {"page": 3}
+
+
 def test_create_or_join_collection_run_ignores_completed_historical_run(tmp_path: Path) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)
