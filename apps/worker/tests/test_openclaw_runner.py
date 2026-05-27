@@ -125,6 +125,21 @@ def test_openclaw_settings_reads_stage_specific_agent_ids_from_env(monkeypatch: 
     assert settings.agent_id_for_stage("summarizing") == "main"
 
 
+def test_openclaw_settings_reads_stage_agent_pools_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_IDS", "autohome-1, autohome-2")
+    monkeypatch.setenv("OPENCLAW_DCD_AGENT_IDS", "dongchedi-1,dongchedi-2")
+    monkeypatch.setenv("OPENCLAW_AGENT_LEASE_SECONDS", "99")
+    monkeypatch.setenv("OPENCLAW_AGENT_POOL_WAIT_SECONDS", "11")
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.agent_pool_for_stage("collecting_autohome") == ("autohome-1", "autohome-2")
+    assert settings.agent_pool_for_stage("collecting_dcd") == ("dongchedi-1", "dongchedi-2")
+    assert settings.agent_ids_for_stage("collecting_autohome") == ("autohome-1", "autohome-2")
+    assert settings.agent_lease_seconds == 99
+    assert settings.agent_pool_wait_seconds == 11
+
+
 def test_openclaw_settings_routes_both_collectors_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCLAW_ADAPTER_STAGES", raising=False)
 
@@ -192,6 +207,25 @@ def test_openclaw_gateway_connect_sends_device_identity_when_available(
     ]
 
 
+class FakeRedis:
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = values or {}
+        self.set_calls: list[tuple[str, str, int | None]] = []
+
+    def set(self, key: str, value: str, *, nx: bool = False, ex: int | None = None) -> bool:
+        self.set_calls.append((key, value, ex))
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        return True
+
+    def eval(self, _script: str, _numkeys: int, key: str, value: str) -> int:
+        if self.values.get(key) == value:
+            del self.values[key]
+            return 1
+        return 0
+
+
 def test_run_collectors_route_to_stage_specific_openclaw_agents(tmp_path: Path) -> None:
     container_root = tmp_path / "jobs"
     job_paths = ensure_job_dirs(container_root, "job_openclaw")
@@ -255,6 +289,101 @@ def test_run_collectors_route_to_stage_specific_openclaw_agents(tmp_path: Path) 
     }
     assert autohome_result.output_metadata["openclaw_agent_id"] == "autohome"
     assert dcd_result.output_metadata["openclaw_agent_id"] == "dongchedi"
+
+
+def test_run_collector_via_openclaw_uses_redis_agent_pool_and_releases_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container_root = tmp_path / "jobs"
+    job_paths = ensure_job_dirs(container_root, "job_openclaw")
+    autohome_stage = make_autohome_stage(tmp_path)
+    progress_sink = ProgressSink(
+        job_id="job_openclaw",
+        progress_path=job_paths.progress / "progress.json",
+        stages=[autohome_stage.name],
+    )
+    redis_client = FakeRedis({"openclaw:agent-lease:autohome-1": "other-job"})
+    monkeypatch.setattr(openclaw_runner, "_redis_client", lambda: redis_client, raising=False)
+    captured_agent_ids: list[str | None] = []
+
+    class CapturingGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            captured_agent_ids.append(agent_id)
+            for artifact in autohome_stage.expected_artifacts:
+                Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                Path(artifact).write_text("artifact", encoding="utf-8")
+            return {"status": "completed"}
+
+    settings = OpenClawSettings(
+        enabled=True,
+        autohome_agent_ids=("autohome-1", "autohome-2"),
+        timeout_seconds=30,
+        agent_lease_seconds=10,
+        artifact_root_container=str(container_root),
+    )
+
+    result = run_collector_via_openclaw(
+        autohome_stage,
+        job_paths,
+        progress_sink,
+        settings=settings,
+        gateway_client=CapturingGatewayClient(),
+    )
+
+    assert captured_agent_ids == ["autohome-2"]
+    assert result.output_metadata["openclaw_agent_id"] == "autohome-2"
+    assert result.output_metadata["openclaw_agent_lease_key"] == "openclaw:agent-lease:autohome-2"
+    assert redis_client.values == {"openclaw:agent-lease:autohome-1": "other-job"}
+    assert redis_client.set_calls[1][2] == 90
+
+
+def test_run_collector_via_openclaw_times_out_when_agent_pool_is_full(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container_root = tmp_path / "jobs"
+    job_paths = ensure_job_dirs(container_root, "job_openclaw")
+    autohome_stage = make_autohome_stage(tmp_path)
+    progress_sink = ProgressSink(
+        job_id="job_openclaw",
+        progress_path=job_paths.progress / "progress.json",
+        stages=[autohome_stage.name],
+    )
+    redis_client = FakeRedis(
+        {
+            "openclaw:agent-lease:autohome-1": "job-1",
+            "openclaw:agent-lease:autohome-2": "job-2",
+        }
+    )
+    monkeypatch.setattr(openclaw_runner, "_redis_client", lambda: redis_client, raising=False)
+    settings = OpenClawSettings(
+        enabled=True,
+        autohome_agent_ids=("autohome-1", "autohome-2"),
+        agent_pool_wait_seconds=0,
+        agent_pool_poll_seconds=0.1,
+        artifact_root_container=str(container_root),
+    )
+
+    with pytest.raises(StageExecutionError) as exc_info:
+        run_collector_via_openclaw(
+            autohome_stage,
+            job_paths,
+            progress_sink,
+            settings=settings,
+            gateway_client=None,
+        )
+
+    assert exc_info.value.error_code == "AGENT_POOL_TIMEOUT"
+    assert "autohome-1, autohome-2" in exc_info.value.message
 
 
 def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tmp_path: Path) -> None:

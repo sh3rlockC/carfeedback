@@ -43,8 +43,15 @@ services:
       ARTIFACT_ROOT: /srv/koubei/jobs
       CORPUS_ROOT: /srv/koubei/corpus
       WORKSPACE_ROOT: /workspace
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-test
       ACCESS_CONTROL_ENABLED: "false"
       JOB_ARTIFACT_CLEANUP_ENABLED: "false"
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
+      OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -65,6 +72,210 @@ services:
       interval: 30s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/worker.Dockerfile
+    environment:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://koubei_test:${TEST_POSTGRES_PASSWORD:-koubei_test}@postgres:5432/koubei_test
+      REDIS_URL: redis://redis:6379/0
+      ARTIFACT_ROOT: /srv/koubei/jobs
+      WORKSPACE_ROOT: /workspace
+      WORKER_QUEUE_NAME: vehicle-koubei-test
+      JOB_ARTIFACT_CLEANUP_ENABLED: "false"
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL_BATCH: ${LLM_MODEL_BATCH:-}
+      LLM_MODEL_REPORT: ${LLM_MODEL_REPORT:-}
+      LLM_MODEL_QA: ${LLM_MODEL_QA:-}
+      HERMES_COMMAND: ${HERMES_COMMAND:-hermes}
+      HERMES_LLM_MODE: ${HERMES_LLM_MODE:-api}
+      HERMES_BATCH_CONCURRENCY: ${HERMES_BATCH_CONCURRENCY:-3}
+      HERMES_BATCH_TARGET_BYTES: ${HERMES_BATCH_TARGET_BYTES:-45000}
+      HERMES_TIMEOUT_SECONDS: ${HERMES_TIMEOUT_SECONDS:-180}
+      HERMES_AGGREGATE_TIMEOUT_SECONDS: ${HERMES_AGGREGATE_TIMEOUT_SECONDS:-180}
+      HERMES_JSON_RETRIES: ${HERMES_JSON_RETRIES:-1}
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-test
+      AUTOHOME_COLLECTOR_SERVICE_URL: http://autohome-collector:8100
+      DCD_COLLECTOR_SERVICE_URL: http://dongchedi-collector:8100
+      SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
+      CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-false}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/openclaw_gateway_token
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_AUTOHOME_AGENT_ID: ${OPENCLAW_AUTOHOME_AGENT_ID:-autohome}
+      OPENCLAW_DCD_AGENT_ID: ${OPENCLAW_DCD_AGENT_ID:-dongchedi}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
+      OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
+      OPENCLAW_TIMEOUT_SECONDS: ${OPENCLAW_TIMEOUT_SECONDS:-1800}
+      OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS: ${OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS:-5}
+      OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_AUTOHOME_COLLECTOR_SKILL: ${OPENCLAW_AUTOHOME_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_DCD_COLLECTOR_SKILL: ${OPENCLAW_DCD_COLLECTOR_SKILL:-sh3rlockC/dcd-koubei-collector}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/vehicle-koubei-worker-device.json}
+      WORDCLOUD_FONT_PATH: ${WORDCLOUD_FONT_PATH:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}
+    volumes:
+      - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
+      - /opt/codexwork-test:/workspace:ro
+      - ${TEST_OPENCLAW_STATE_HOST_PATH:-./storage/openclaw-state}:/openclaw-state:ro
+    secrets:
+      - openclaw_gateway_token
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os; from redis import Redis; Redis.from_url(os.environ['REDIS_URL']).ping()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  temporal-worker:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/worker.Dockerfile
+    command: ["python", "temporal_worker.py"]
+    environment:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg://koubei_test:${TEST_POSTGRES_PASSWORD:-koubei_test}@postgres:5432/koubei_test
+      REDIS_URL: redis://redis:6379/0
+      ARTIFACT_ROOT: /srv/koubei/jobs
+      CORPUS_ROOT: /srv/koubei/corpus
+      KOUBEI_CORPUS_ROOT: /srv/koubei/corpus
+      WORKSPACE_ROOT: /workspace
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: vehicle-koubei-temporal-test
+      AUTOHOME_COLLECTOR_SERVICE_URL: http://autohome-collector:8100
+      DCD_COLLECTOR_SERVICE_URL: http://dongchedi-collector:8100
+      SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
+      CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
+      COMPARISON_MODEL_CONCURRENCY: ${COMPARISON_MODEL_CONCURRENCY:-2}
+      JOB_ARTIFACT_CLEANUP_ENABLED: "false"
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL_BATCH: ${LLM_MODEL_BATCH:-}
+      LLM_MODEL_REPORT: ${LLM_MODEL_REPORT:-}
+      LLM_MODEL_QA: ${LLM_MODEL_QA:-}
+      HERMES_COMMAND: ${HERMES_COMMAND:-hermes}
+      HERMES_LLM_MODE: ${HERMES_LLM_MODE:-api}
+      HERMES_BATCH_CONCURRENCY: ${HERMES_BATCH_CONCURRENCY:-3}
+      HERMES_BATCH_TARGET_BYTES: ${HERMES_BATCH_TARGET_BYTES:-45000}
+      HERMES_TIMEOUT_SECONDS: ${HERMES_TIMEOUT_SECONDS:-180}
+      HERMES_AGGREGATE_TIMEOUT_SECONDS: ${HERMES_AGGREGATE_TIMEOUT_SECONDS:-180}
+      HERMES_JSON_RETRIES: ${HERMES_JSON_RETRIES:-1}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-false}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: /run/secrets/openclaw_gateway_token
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_AUTOHOME_AGENT_ID: ${OPENCLAW_AUTOHOME_AGENT_ID:-autohome}
+      OPENCLAW_DCD_AGENT_ID: ${OPENCLAW_DCD_AGENT_ID:-dongchedi}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
+      OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
+      OPENCLAW_TIMEOUT_SECONDS: ${OPENCLAW_TIMEOUT_SECONDS:-1800}
+      OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS: ${OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS:-5}
+      OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_AUTOHOME_COLLECTOR_SKILL: ${OPENCLAW_AUTOHOME_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_DCD_COLLECTOR_SKILL: ${OPENCLAW_DCD_COLLECTOR_SKILL:-sh3rlockC/dcd-koubei-collector}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/vehicle-koubei-worker-device.json}
+      WORDCLOUD_FONT_PATH: ${WORDCLOUD_FONT_PATH:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}
+    volumes:
+      - ${TEST_JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
+      - ${TEST_CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
+      - /opt/codexwork-test:/workspace:ro
+      - ${TEST_OPENCLAW_STATE_HOST_PATH:-./storage/openclaw-state}:/openclaw-state:ro
+    secrets:
+      - openclaw_gateway_token
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      autohome-collector:
+        condition: service_healthy
+      dongchedi-collector:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import asyncio, os; from temporalio.client import Client; asyncio.run(Client.connect(os.environ['TEMPORAL_ADDRESS'], namespace=os.environ.get('TEMPORAL_NAMESPACE', 'default')))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  autohome-collector:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/collector-service.Dockerfile
+    environment:
+      COLLECTOR_PLATFORM: autohome
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  dongchedi-collector:
+    build:
+      context: ../..
+      dockerfile: ./ops/docker/collector-service.Dockerfile
+    environment:
+      COLLECTOR_PLATFORM: dongchedi
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: koubei_test
+      POSTGRES_PWD: ${TEST_POSTGRES_PASSWORD:-koubei_test}
+      DBNAME: ${TEST_TEMPORAL_DBNAME:-temporal_test}
+      VISIBILITY_DBNAME: ${TEST_TEMPORAL_VISIBILITY_DBNAME:-temporal_visibility_test}
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health --address \"$${TEMPORAL_ADDRESS:-temporal:7233}\" --namespace \"$${TEMPORAL_NAMESPACE:-default}\" --command-timeout 5s >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     restart: unless-stopped
 
   postgres:
@@ -96,3 +307,7 @@ services:
 volumes:
   postgres_test_data:
   redis_test_data:
+
+secrets:
+  openclaw_gateway_token:
+    file: ${TEST_OPENCLAW_GATEWAY_TOKEN_FILE_HOST:-../../ops/secrets/openclaw_gateway_token.placeholder}

@@ -18,16 +18,21 @@ if [[ "${source_abs}" != "${test_abs}" ]]; then
     "${source_abs}/" "${test_abs}/"
 fi
 
-mkdir -p "${TEST_ROOT}/storage/jobs" "${TEST_ROOT}/storage/corpus"
+mkdir -p "${TEST_ROOT}/storage/jobs" "${TEST_ROOT}/storage/corpus" "${TEST_ROOT}/storage/openclaw-state"
 if [[ ! -f "${TEST_ROOT}/ops/test/.env.test" ]]; then
   cp "${TEST_ROOT}/ops/test/.env.test.example" "${TEST_ROOT}/ops/test/.env.test"
 fi
+
+TEST_WORKER_SCALE="${TEST_WORKER_SCALE:-2}"
+TEST_TEMPORAL_WORKER_SCALE="${TEST_TEMPORAL_WORKER_SCALE:-2}"
 
 docker compose \
   --project-name koubei-test \
   --env-file "${TEST_ROOT}/ops/test/.env.test" \
   -f "${TEST_ROOT}/ops/test/docker-compose.test.yml" \
-  up -d --build
+  up -d --build \
+  --scale "worker=${TEST_WORKER_SCALE}" \
+  --scale "temporal-worker=${TEST_TEMPORAL_WORKER_SCALE}"
 
 docker compose \
   --project-name koubei-test \
