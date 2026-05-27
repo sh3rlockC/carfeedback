@@ -62,7 +62,7 @@ def sync_confirmed_series(*, source_url: str, target_url: str, operator: str) ->
                 )
                 .one_or_none()
             )
-            if existing is not None and existing.series_id == normalized_series_id:
+            if existing is not None and existing.series_id.strip() == normalized_series_id:
                 summary["duplicate"] += 1
                 continue
 

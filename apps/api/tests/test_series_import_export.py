@@ -844,15 +844,14 @@ def test_sync_confirmed_series_script_counts_duplicate_and_stale_key_conflict(tm
         )
         db.commit()
     with TargetSession() as db:
-        create_series_record(
-            db,
-            SeriesMutation(
+        db.add(
+            ConfirmedVehicleSeries(
+                query_key=query_key("风云T11"),
                 query="风云T11",
                 platform="autohome",
-                series_id="7411",
-                operator="seed",
-                reason="seed",
-            ),
+                series_id=" 7411 ",
+                status="active",
+            )
         )
         db.commit()
 
