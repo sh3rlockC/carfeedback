@@ -19,10 +19,24 @@ function hasCandidate(candidate: PlatformCandidate | null | undefined): candidat
   return Boolean(candidate?.series_id && candidate.title && candidate.source);
 }
 
+function candidateIdentity(candidate: PlatformCandidate | null | undefined) {
+  if (!candidate) {
+    return "";
+  }
+  return [
+    candidate.canonical_query_key ?? "",
+    candidate.canonical_query ?? "",
+    candidate.series_id ?? "",
+    candidate.url ?? "",
+    candidate.title ?? "",
+    candidate.source ?? "",
+  ].join("|");
+}
+
 function uniqueCandidates(candidates: PlatformCandidate[]) {
   const seen = new Set<string>();
   return candidates.filter((candidate) => {
-    const key = `${candidate.series_id ?? ""}|${candidate.url ?? ""}|${candidate.title ?? ""}`;
+    const key = candidateIdentity(candidate);
     if (seen.has(key)) {
       return false;
     }
@@ -176,7 +190,7 @@ export default function CandidatesPage() {
 
   if (flowState.mode === "comparison") {
     const options = flowState.comparisonOptions?.vehicles ?? [];
-    if (!flowState.accessVersion || options.length < 2) {
+    if (options.length < 2) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 3 步 / 共 5 步</p>
@@ -185,6 +199,9 @@ export default function CandidatesPage() {
           <div className="actions">
             <Link className="button" href="/vehicle">
               返回车型输入
+            </Link>
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
             </Link>
           </div>
         </main>
@@ -195,10 +212,15 @@ export default function CandidatesPage() {
       <main className="stack-lg">
         <SignalPanel tone="accent" className="stack-lg">
           <SectionHeader
-            eyebrow="第 3 步 / 多车型车系锁定"
+            eyebrow="LEGACY FLOW"
             title="确认竞品车型"
-            copy="每个车型都需要确认汽车之家和懂车帝编号；已有完整 JSON 的历史结果可直接复用。"
+            copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
           />
+          <div className="actions">
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
+            </Link>
+          </div>
           {options.map((option, index) => {
             const draft = comparisonDrafts[index] ?? draftFromOption(option);
             const autohomeOptions = platformOptions(option.resolve.autohome.best, option.resolve.autohome.candidates);
@@ -213,7 +235,7 @@ export default function CandidatesPage() {
                     <p className="eyebrow">车型 {index + 1}</p>
                     <h3 className="platform-title">{option.query}</h3>
                   </div>
-                  <StatusPill tone={draft.reuseJobId ? "success" : "accent"}>{draft.reuseJobId ? "复用历史结果" : "需要新采集"}</StatusPill>
+                  <StatusPill tone={draft.reuseJobId ? "success" : "accent"}>{draft.reuseJobId ? "复用历史结果" : "增量采集"}</StatusPill>
                 </div>
 
                 {option.reuse_options.length ? (
@@ -224,7 +246,7 @@ export default function CandidatesPage() {
                       value={draft.reuseJobId ?? ""}
                       onChange={(event) => updateComparisonDraft(index, { reuseJobId: event.target.value || null })}
                     >
-                      <option value="">重新采集</option>
+                      <option value="">执行增量采集</option>
                       {option.reuse_options.map((item) => (
                         <option key={item.job_id} value={item.job_id}>
                           {item.model_name} · {item.job_id}
@@ -238,15 +260,15 @@ export default function CandidatesPage() {
                   <div className="field">
                     <label>汽车之家</label>
                     <select
-                      value={draft.autohome?.series_id ?? ""}
+                      value={candidateIdentity(draft.autohome)}
                       onChange={(event) => {
-                        const candidate = autohomeOptions.find((item) => item.series_id === event.target.value) ?? null;
+                        const candidate = autohomeOptions.find((item) => candidateIdentity(item) === event.target.value) ?? null;
                         updateComparisonDraft(index, { autohome: candidate, manualAutohomeId: "" });
                       }}
                     >
                       <option value="">手动输入</option>
                       {autohomeOptions.map((candidate) => (
-                        <option key={`ah-${candidate.series_id}-${candidate.url}`} value={candidate.series_id ?? ""}>
+                        <option key={`ah-${candidateIdentity(candidate)}`} value={candidateIdentity(candidate)}>
                           {candidate.title} · {candidate.series_id}
                         </option>
                       ))}
@@ -263,15 +285,15 @@ export default function CandidatesPage() {
                   <div className="field">
                     <label>懂车帝</label>
                     <select
-                      value={draft.dongchedi?.series_id ?? ""}
+                      value={candidateIdentity(draft.dongchedi)}
                       onChange={(event) => {
-                        const candidate = dongchediOptions.find((item) => item.series_id === event.target.value) ?? null;
+                        const candidate = dongchediOptions.find((item) => candidateIdentity(item) === event.target.value) ?? null;
                         updateComparisonDraft(index, { dongchedi: candidate, manualDongchediId: "" });
                       }}
                     >
                       <option value="">手动输入</option>
                       {dongchediOptions.map((candidate) => (
-                        <option key={`dcd-${candidate.series_id}-${candidate.url}`} value={candidate.series_id ?? ""}>
+                        <option key={`dcd-${candidateIdentity(candidate)}`} value={candidateIdentity(candidate)}>
                           {candidate.title} · {candidate.series_id}
                         </option>
                       ))}
@@ -304,7 +326,7 @@ export default function CandidatesPage() {
     );
   }
 
-  if (!flowState.accessVersion || !flowState.vehicleQuery || !resolve) {
+  if (!flowState.vehicleQuery || !resolve) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 3 步 / 共 5 步</p>
@@ -313,6 +335,9 @@ export default function CandidatesPage() {
         <div className="actions">
           <Link className="button" href="/vehicle">
             返回车型输入
+          </Link>
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>
@@ -376,10 +401,15 @@ export default function CandidatesPage() {
     <main className="page-grid">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 3 步 / 双平台车系锁定"
+          eyebrow="LEGACY FLOW"
           title="确认平台车系"
-          copy="两个平台的车系都锁定后，worker 会分别投递给 autohome 和 dongchedi 两个采集 agent。"
+          copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
         />
+        <div className="actions">
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
+          </Link>
+        </div>
 
         {!hasAutomaticCandidates ? (
           <div className="card manual-fallback">
@@ -401,10 +431,10 @@ export default function CandidatesPage() {
             </div>
             <div className="candidate-list">
               {autohomeOptions.length ? autohomeOptions.map((candidate) => {
-                const selected = candidate.series_id === selectedAutohome?.series_id;
+                const selected = candidateIdentity(candidate) === candidateIdentity(selectedAutohome);
                 return (
                   <button
-                    key={`autohome-${candidate.series_id}-${candidate.url}`}
+                    key={`autohome-${candidateIdentity(candidate)}`}
                     type="button"
                     className={`card candidate-card ${selected ? "selected" : ""}`}
                     onClick={() => setSelectedAutohome(candidate)}
@@ -435,10 +465,10 @@ export default function CandidatesPage() {
             </div>
             <div className="candidate-list">
               {dongchediOptions.length ? dongchediOptions.map((candidate) => {
-                const selected = candidate.series_id === selectedDongchedi?.series_id;
+                const selected = candidateIdentity(candidate) === candidateIdentity(selectedDongchedi);
                 return (
                   <button
-                    key={`dongchedi-${candidate.series_id}-${candidate.url}`}
+                    key={`dongchedi-${candidateIdentity(candidate)}`}
                     type="button"
                     className={`card candidate-card ${selected ? "selected" : ""}`}
                     onClick={() => setSelectedDongchedi(candidate)}

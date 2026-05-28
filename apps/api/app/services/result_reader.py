@@ -10,9 +10,40 @@ from openpyxl import load_workbook
 KeywordDirection = Literal["positive", "negative"]
 logger = logging.getLogger(__name__)
 
+OUTER_KEYWORD_WRAPPERS = (
+    ("「", "」"),
+    ("『", "』"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("《", "》"),
+    ("〈", "〉"),
+    ("【", "】"),
+    ("（", "）"),
+    ("(", ")"),
+    ("[", "]"),
+    ('"', '"'),
+    ("'", "'"),
+)
+
 
 def _empty_keyword_rankings() -> dict[str, list[dict[str, int | str]]]:
     return {"positive": [], "negative": [], "combined": []}
+
+
+def _normalize_keyword_term(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = re.sub(r"[\u200b-\u200f\ufeff]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    while len(text) >= 2:
+        for left, right in OUTER_KEYWORD_WRAPPERS:
+            if text.startswith(left) and text.endswith(right):
+                inner = text[len(left) : len(text) - len(right)].strip()
+                if inner:
+                    text = inner
+                    break
+        else:
+            break
+    return text
 
 
 def _iter_table_rows(worksheet, *, limit: int | None = None) -> list[dict[str, str]]:
@@ -80,23 +111,28 @@ def _rankings_from_breakdown(worksheet, *, limit: int) -> dict[str, list[dict[st
         return _empty_keyword_rankings()
 
     header = [str(cell).strip() if cell is not None else "" for cell in rows[0]]
-    positive_rows: list[tuple[str, float, int]] = []
-    negative_rows: list[tuple[str, float, int]] = []
+    direction_weights: dict[KeywordDirection, dict[str, tuple[float, int]]] = {"positive": {}, "negative": {}}
     combined_weights: dict[str, tuple[float, int]] = {}
 
     for index, row in enumerate(rows[1:]):
         values = {header[cell_index]: row[cell_index] for cell_index in range(min(len(header), len(row))) if header[cell_index]}
         direction = values.get("direction")
-        term = str(values.get("term") or "").strip()
+        term = _normalize_keyword_term(values.get("term"))
         weight = _numeric_weight(values.get("weight"))
         if direction not in {"positive", "negative"} or not term or weight <= 0:
             continue
 
-        bucket = positive_rows if direction == "positive" else negative_rows
-        bucket.append((term, weight, index))
+        direction_key: KeywordDirection = "positive" if direction == "positive" else "negative"
+        previous_direction_weight, first_direction_index = direction_weights[direction_key].get(term, (0.0, index))
+        direction_weights[direction_key][term] = (
+            previous_direction_weight + weight,
+            min(first_direction_index, index),
+        )
         previous_weight, first_index = combined_weights.get(term, (0.0, index))
         combined_weights[term] = (previous_weight + weight, min(first_index, index))
 
+    positive_rows = [(term, weight, index) for term, (weight, index) in direction_weights["positive"].items()]
+    negative_rows = [(term, weight, index) for term, (weight, index) in direction_weights["negative"].items()]
     combined_rows = [(term, weight, index) for term, (weight, index) in combined_weights.items()]
     return {
         "positive": _sort_keyword_rows(positive_rows, limit=limit),
@@ -124,7 +160,7 @@ def _rankings_from_terms_sheets(workbook, *, limit: int) -> dict[str, list[dict[
         for row in rows[1:]:
             global_index += 1
             values = {header[cell_index]: row[cell_index] for cell_index in range(min(len(header), len(row))) if header[cell_index]}
-            term = str(values.get("term") or "").strip()
+            term = _normalize_keyword_term(values.get("term"))
             weight = _numeric_weight(values.get("weight"))
             if not term or weight <= 0:
                 continue

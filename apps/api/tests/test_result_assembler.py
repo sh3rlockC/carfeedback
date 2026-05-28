@@ -178,6 +178,53 @@ def test_result_endpoint_returns_expired_job_without_artifacts(tmp_path: Path) -
     assert payload["retention_days"] == 3
 
 
+def test_result_endpoint_includes_collection_summary(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    session = get_session_local()()
+    try:
+        session.add(
+            Job(
+                job_id="job_collection_summary",
+                query="风云X3 PLUS",
+                model_name="风云X3 PLUS",
+                status="completed",
+                current_stage="completed",
+                degraded=False,
+                passphrase_version="2026-W17",
+                collection_summary={
+                    "autohome": {
+                        "existing_count": 10,
+                        "new_count": 2,
+                        "total_count": 12,
+                        "pages_scanned": 3,
+                        "mode": "incremental",
+                    },
+                    "dongchedi": {
+                        "existing_count": 5,
+                        "new_count": 0,
+                        "total_count": 5,
+                        "pages_scanned": 2,
+                        "mode": "incremental",
+                    },
+                },
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_collection_summary/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection_summary"]["autohome"]["existing_count"] == 10
+    assert payload["collection_summary"]["autohome"]["new_count"] == 2
+    assert payload["collection_summary"]["dongchedi"]["total_count"] == 5
+
+
 def test_result_endpoint_ignores_unreadable_wordcloud_terms(tmp_path: Path) -> None:
     broken_terms = tmp_path / "broken_词云词项清单.xlsx"
     broken_terms.write_text("not an xlsx", encoding="utf-8")

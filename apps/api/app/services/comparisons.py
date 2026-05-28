@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import ComparisonArtifact, ComparisonJob, ComparisonVehicle, Job, JobArtifact, JobStageRun
+from app.models import ComparisonArtifact, ComparisonJob, ComparisonVehicle, Job, JobArtifact, JobStageRun, Task
 from app.schemas import (
     ArtifactItem,
     ComparisonArtifactItem,
@@ -72,14 +72,11 @@ def is_reusable_job(db: Session, settings: Settings, job_id: str) -> bool:
     finished = _finished_or_created(job)
     if finished is None:
         return False
-    if finished < datetime.now(UTC) - timedelta(days=settings.job_artifact_retention_days):
-        return False
     return reusable_job_artifacts(db, job_id) is not None
 
 
 def find_reusable_jobs(db: Session, settings: Settings, query: str, limit: int = 5) -> list[dict[str, Any]]:
     key = query_key(query)
-    cutoff = datetime.now(UTC) - timedelta(days=settings.job_artifact_retention_days)
     candidates = (
         db.query(Job)
         .filter(Job.status.in_(tuple(REUSABLE_JOB_STATUSES)))
@@ -92,7 +89,7 @@ def find_reusable_jobs(db: Session, settings: Settings, query: str, limit: int =
         if key not in {query_key(job.query), query_key(job.model_name)}:
             continue
         finished = _finished_or_created(job)
-        if finished is None or finished < cutoff:
+        if finished is None:
             continue
         if reusable_job_artifacts(db, job.job_id) is None:
             continue
@@ -166,20 +163,38 @@ def _vehicle_eta(db: Session, settings: Settings, vehicle: ComparisonVehicle) ->
                 .all()
             )
             return estimate_job_progress_eta(db, job, _stage_items_with_live_progress(settings, job, stage_runs))
+        task = db.get(Task, vehicle.child_job_id)
+        if task is not None:
+            return _task_eta(db, task)
+    return estimate_full_job_seconds(db)
+
+
+def _task_eta(db: Session, task: Task) -> EtaEstimate:
+    if task.status in COMPARISON_TERMINAL_STATUSES or task.current_stage in COMPARISON_TERMINAL_STATUSES:
+        return EtaEstimate(0, 0, "预计剩余 0 分钟", "done")
+    if task.eta_seconds is not None:
+        seconds = max(0, int(task.eta_seconds))
+        minutes = ceil(seconds / 60)
+        return EtaEstimate(
+            seconds,
+            minutes,
+            f"预计剩余 {minutes} 分钟",
+            "history" if task.eta_reason else "fallback",
+        )
     return estimate_full_job_seconds(db)
 
 
 def comparison_progress_payload(db: Session, settings: Settings, comparison: ComparisonJob) -> ComparisonProgressResponse:
     vehicles = sorted(comparison.vehicles, key=lambda item: item.position)
     vehicle_payloads: list[ComparisonVehicleProgress] = []
-    total_seconds = 0
+    vehicle_path_seconds = 0
     confidence = "fallback"
     completed_count = 0
 
     for vehicle in vehicles:
         eta = _vehicle_eta(db, settings, vehicle)
         if eta.estimated_remaining_seconds is not None:
-            total_seconds += eta.estimated_remaining_seconds
+            vehicle_path_seconds = max(vehicle_path_seconds, eta.estimated_remaining_seconds)
         if eta.eta_confidence == "history":
             confidence = "history"
         if vehicle.status in {"reused", "completed"}:
@@ -200,7 +215,9 @@ def comparison_progress_payload(db: Session, settings: Settings, comparison: Com
         total_seconds = 0
         confidence = "done"
     elif comparison.current_stage != "comparing":
-        total_seconds += COMPARISON_SUMMARY_SECONDS
+        total_seconds = vehicle_path_seconds + COMPARISON_SUMMARY_SECONDS
+    else:
+        total_seconds = COMPARISON_SUMMARY_SECONDS
 
     minutes = ceil(total_seconds / 60)
     status_to_percent = {

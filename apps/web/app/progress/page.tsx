@@ -12,6 +12,7 @@ const terminalStatuses = new Set(["completed", "completed_degraded", "failed", "
 
 const stageLabels: Record<string, string> = {
   queued: "排队中",
+  checking_incremental: "检查历史语料",
   collecting_autohome: "采集汽车之家",
   collecting_dcd: "采集懂车帝",
   postprocessing: "汇总整理",
@@ -112,7 +113,7 @@ export default function ProgressPage() {
 
     const state = getFlowState();
     if (state.mode === "comparison") {
-      if (!state.accessVersion || !state.comparisonId) {
+      if (!state.comparisonId) {
         return;
       }
 
@@ -150,7 +151,7 @@ export default function ProgressPage() {
       };
     }
 
-    if (!state.accessVersion || !state.jobId) {
+    if (!state.jobId) {
       return;
     }
 
@@ -201,7 +202,7 @@ export default function ProgressPage() {
 
   const flowState = getFlowState();
   if (flowState.mode === "comparison") {
-    if (!flowState.accessVersion || !flowState.comparisonId) {
+    if (!flowState.comparisonId) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 4 步 / 共 5 步</p>
@@ -210,6 +211,9 @@ export default function ProgressPage() {
           <div className="actions">
             <Link className="button" href="/candidates">
               返回候选确认
+            </Link>
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
             </Link>
           </div>
         </main>
@@ -221,10 +225,15 @@ export default function ProgressPage() {
       <main className="stack-lg">
         <SignalPanel tone="accent" className="stack-lg">
           <SectionHeader
-            eyebrow="第 4 步 / 竞品对比"
+            eyebrow="LEGACY FLOW"
             title="多车型对比进度"
-            copy="系统会先复用或补齐各车型 JSON 结果，再生成竞品对比汇总。"
+            copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
           />
+          <div className="actions">
+            <Link className="button secondary" href="/tasks/new">
+              前往新建任务
+            </Link>
+          </div>
           {error ? <p className="error">{error}</p> : null}
           <div className="stack">
             <div className="bar" aria-hidden="true">
@@ -261,7 +270,7 @@ export default function ProgressPage() {
     );
   }
 
-  if (!flowState.accessVersion || !flowState.jobId) {
+  if (!flowState.jobId) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 4 步 / 共 5 步</p>
@@ -270,6 +279,9 @@ export default function ProgressPage() {
         <div className="actions">
           <Link className="button" href="/candidates">
             返回候选确认
+          </Link>
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>
@@ -288,10 +300,15 @@ export default function ProgressPage() {
     <main className="stack-lg">
       <SignalPanel tone="accent" className="stack-lg">
         <SectionHeader
-          eyebrow="第 4 步 / 双源采集中"
+          eyebrow="LEGACY FLOW"
           title="任务执行进度"
-          copy="系统会自动刷新两个采集 agent、汇总、摘要、词云、一页纸和问答索引的执行状态。"
+          copy="这是旧流程兼容页面。新查询建议从任务中心创建。"
         />
+        <div className="actions">
+          <Link className="button secondary" href="/tasks/new">
+            前往新建任务
+          </Link>
+        </div>
 
         {error ? <p className="error">{error}</p> : null}
 

@@ -21,6 +21,7 @@ apps/web/tsconfig.tsbuildinfo
 # Runtime artifacts and local secrets
 storage/jobs/job_*/
 storage/jobs/cmp_*/
+storage/corpus/
 storage/local-test/
 .sandbox/
 .superpowers/

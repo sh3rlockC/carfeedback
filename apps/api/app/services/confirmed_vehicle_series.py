@@ -4,6 +4,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any, Mapping
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.models import ConfirmedVehicleSeries
@@ -25,6 +26,54 @@ def _candidate_value(candidate: Any, field: str) -> Any:
     return getattr(candidate, field, None)
 
 
+def _insert_for_bind(db: Session):
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        from sqlalchemy.dialects.postgresql import insert
+
+        return insert
+    if dialect_name == "sqlite":
+        from sqlalchemy.dialects.sqlite import insert
+
+        return insert
+    raise RuntimeError(f"unsupported database dialect for confirmed vehicle series upsert: {dialect_name}")
+
+
+def candidate_canonical_key(candidate: Any) -> str | None:
+    explicit_key = str(_candidate_value(candidate, "canonical_query_key") or "").strip()
+    if explicit_key:
+        return query_key(explicit_key)
+
+    canonical_query = str(_candidate_value(candidate, "canonical_query") or "").strip()
+    if canonical_query:
+        return query_key(canonical_query)
+
+    return None
+
+
+def canonical_query_for_selected_candidates(
+    *,
+    query: str,
+    selected_candidates: Mapping[str, Any],
+) -> str:
+    canonical_keys = []
+    canonical_queries = []
+    for platform in PLATFORMS:
+        candidate = selected_candidates.get(platform)
+        canonical_key = candidate_canonical_key(candidate)
+        if canonical_key:
+            canonical_keys.append(canonical_key)
+
+        canonical_query = str(_candidate_value(candidate, "canonical_query") or "").strip()
+        if canonical_query:
+            canonical_queries.append(canonical_query)
+
+    if len(canonical_keys) == len(PLATFORMS) and len(set(canonical_keys)) == 1 and canonical_queries:
+        return canonical_queries[0]
+
+    return query
+
+
 def upsert_confirmed_vehicle_series(
     db: Session,
     *,
@@ -41,36 +90,33 @@ def upsert_confirmed_vehicle_series(
         if not series_id:
             continue
 
-        record = (
-            db.query(ConfirmedVehicleSeries)
-            .filter(
-                ConfirmedVehicleSeries.query_key == key,
-                ConfirmedVehicleSeries.platform == platform,
-            )
-            .one_or_none()
+        values = {
+            "query_key": key,
+            "query": normalized_query,
+            "platform": platform,
+            "series_id": series_id,
+            "status": "active",
+            "url": _candidate_value(candidate, "url"),
+            "title": _candidate_value(candidate, "title"),
+            "source": _candidate_value(candidate, "source"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        table = ConfirmedVehicleSeries.__table__
+        statement = _insert_for_bind(db)(table).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[table.c.query_key, table.c.platform],
+            index_where=text("status = 'active'"),
+            set_={
+                "query": normalized_query,
+                "series_id": series_id,
+                "url": values["url"],
+                "title": values["title"],
+                "source": values["source"],
+                "updated_at": now,
+            },
         )
-        if record is None:
-            db.add(
-                ConfirmedVehicleSeries(
-                    query_key=key,
-                    query=normalized_query,
-                    platform=platform,
-                    series_id=series_id,
-                    url=_candidate_value(candidate, "url"),
-                    title=_candidate_value(candidate, "title"),
-                    source=_candidate_value(candidate, "source"),
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            continue
-
-        record.query = normalized_query
-        record.series_id = series_id
-        record.url = _candidate_value(candidate, "url")
-        record.title = _candidate_value(candidate, "title")
-        record.source = _candidate_value(candidate, "source")
-        record.updated_at = now
+        db.execute(statement)
 
 
 def confirmed_vehicle_series_payload(db: Session | None, query: str) -> dict[str, Any] | None:
@@ -80,7 +126,10 @@ def confirmed_vehicle_series_payload(db: Session | None, query: str) -> dict[str
     key = query_key(query)
     records = (
         db.query(ConfirmedVehicleSeries)
-        .filter(ConfirmedVehicleSeries.query_key == key)
+        .filter(
+            ConfirmedVehicleSeries.query_key == key,
+            ConfirmedVehicleSeries.status == "active",
+        )
         .all()
     )
     records_by_platform = {record.platform: record for record in records if record.series_id}

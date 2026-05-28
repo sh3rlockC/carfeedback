@@ -27,6 +27,7 @@ from app.schemas import (
     JobOverviewResponse,
     JobProgressResponse,
     JobResultResponse,
+    SelectedCandidates,
     StageStatusItem,
     TimeReportListResponse,
     TimeReportResponse,
@@ -38,7 +39,11 @@ from app.services.comment_time_reports import (
     platform_counts,
     time_report_payload,
 )
-from app.services.confirmed_vehicle_series import upsert_confirmed_vehicle_series
+from app.services.confirmed_vehicle_series import (
+    candidate_canonical_key,
+    canonical_query_for_selected_candidates,
+    upsert_confirmed_vehicle_series,
+)
 from app.services.eta import estimate_job_progress_eta
 from app.services.job_queue import get_job_queue
 from app.services.keyword_rank_images import build_keyword_rank_pngs
@@ -55,6 +60,16 @@ QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 work
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _ensure_same_canonical_vehicle(selected_candidates: SelectedCandidates) -> None:
+    autohome_key = candidate_canonical_key(selected_candidates.autohome)
+    dongchedi_key = candidate_canonical_key(selected_candidates.dongchedi)
+    if autohome_key and dongchedi_key and autohome_key != dongchedi_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="selected candidates must belong to the same canonical vehicle",
+        )
 
 
 def _is_result_bundle_artifact(path: str) -> bool:
@@ -103,12 +118,15 @@ def create_job(
     selected_dongchedi = payload.selected_candidates.dongchedi
     if not selected_autohome.series_id or not selected_dongchedi.series_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmed candidates required for both platforms")
+    _ensure_same_canonical_vehicle(payload.selected_candidates)
 
     job = Job(
         query=payload.query,
         model_name=model_name,
         status="queued",
         current_stage="queued",
+        collection_mode=payload.collection_mode,
+        collection_summary={},
         passphrase_version=settings.pass_phrase_version,
     )
     db.add(job)
@@ -136,13 +154,14 @@ def create_job(
             ),
         ]
     )
+    selected_candidates = {
+        "autohome": selected_autohome,
+        "dongchedi": selected_dongchedi,
+    }
     upsert_confirmed_vehicle_series(
         db,
-        query=payload.query,
-        selected_candidates={
-            "autohome": selected_autohome,
-            "dongchedi": selected_dongchedi,
-        },
+        query=canonical_query_for_selected_candidates(query=payload.query, selected_candidates=selected_candidates),
+        selected_candidates=selected_candidates,
     )
 
     queued_stage = JobStageRun(
@@ -237,6 +256,7 @@ def get_job_progress(
     status_to_percent = {
         "queued": 5,
         "candidate_pending": 10,
+        "checking_incremental": 12,
         "collecting_autohome": 25,
         "collecting_dcd": 40,
         "postprocessing": 55,
@@ -254,6 +274,7 @@ def get_job_progress(
     overall_percent = status_to_percent.get(job.current_stage, status_to_percent.get(job.status, 0))
     message = {
         "queued": "任务已创建，等待执行",
+        "checking_incremental": "正在检查历史语料并准备增量采集",
         "completed": "任务已完成",
         "completed_degraded": "任务已完成，部分结果降级",
         "failed": "任务执行失败",

@@ -23,6 +23,7 @@ from app.schemas import (
     ComparisonProgressResponse,
     ComparisonResultResponse,
     ComparisonVehicleOptionResponse,
+    SelectedCandidates,
 )
 from app.services.comparisons import (
     comparison_progress_payload,
@@ -31,7 +32,12 @@ from app.services.comparisons import (
     find_reusable_jobs,
     is_reusable_job,
 )
-from app.services.confirmed_vehicle_series import query_key, upsert_confirmed_vehicle_series
+from app.services.confirmed_vehicle_series import (
+    candidate_canonical_key,
+    canonical_query_for_selected_candidates,
+    query_key,
+    upsert_confirmed_vehicle_series,
+)
 from app.services.job_queue import get_job_queue
 from app.services.keyword_rank_images import build_keyword_rank_pngs
 from app.services.passphrase import require_passphrase_session
@@ -45,6 +51,16 @@ QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 work
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _ensure_same_canonical_vehicle(selected_candidates: SelectedCandidates) -> None:
+    autohome_key = candidate_canonical_key(selected_candidates.autohome)
+    dongchedi_key = candidate_canonical_key(selected_candidates.dongchedi)
+    if autohome_key and dongchedi_key and autohome_key != dongchedi_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="selected candidates must belong to the same canonical vehicle",
+        )
 
 
 def _resolve_vehicle(db: Session, settings: Settings, query: str) -> dict:
@@ -150,17 +166,19 @@ def create_comparison(
         selected_dongchedi = vehicle.selected_candidates.dongchedi
         if not selected_autohome.series_id or not selected_dongchedi.series_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="confirmed candidates required for both platforms")
+        _ensure_same_canonical_vehicle(vehicle.selected_candidates)
         if vehicle.reuse_job_id and not is_reusable_job(db, settings, vehicle.reuse_job_id):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"reuse job is not available: {vehicle.reuse_job_id}")
 
         model_name = vehicle.model_name or vehicle.query
+        selected_candidates = {
+            "autohome": selected_autohome,
+            "dongchedi": selected_dongchedi,
+        }
         upsert_confirmed_vehicle_series(
             db,
-            query=vehicle.query,
-            selected_candidates={
-                "autohome": selected_autohome,
-                "dongchedi": selected_dongchedi,
-            },
+            query=canonical_query_for_selected_candidates(query=vehicle.query, selected_candidates=selected_candidates),
+            selected_candidates=selected_candidates,
         )
         db.add(
             ComparisonVehicle(

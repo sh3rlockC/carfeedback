@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 APPROVED_JOB_STATUSES = [
     "access_pending",
     "candidate_pending",
     "queued",
+    "checking_incremental",
     "collecting_autohome",
     "collecting_dcd",
     "postprocessing",
@@ -42,6 +44,8 @@ class PlatformCandidate(BaseModel):
     evidence_url: str | None = None
     kind: str | None = None
     note: str | None = None
+    canonical_query: str | None = None
+    canonical_query_key: str | None = None
 
 
 class PlatformCandidateGroup(BaseModel):
@@ -67,6 +71,7 @@ class SelectedCandidates(BaseModel):
 class CreateJobRequest(BaseModel):
     query: str = Field(min_length=1, max_length=255)
     model_name: str | None = Field(default=None, max_length=255)
+    collection_mode: Literal["incremental", "full_refresh"] = "incremental"
     selected_candidates: SelectedCandidates
 
 
@@ -77,12 +82,56 @@ class CreateJobResponse(BaseModel):
     result_url: str
 
 
+class TaskCreateVehicle(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+
+
+class TaskCreateRequest(BaseModel):
+    task_type: Literal["single", "comparison"]
+    vehicles: list[TaskCreateVehicle] = Field(min_length=1, max_length=5)
+
+
+class TaskCreateResponse(BaseModel):
+    task_id: str
+    status: str
+    view_url: str
+    manage_url: str
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    task_type: str
+    display_name: str
+    status: str
+    current_stage: str
+    degraded: bool
+    upgraded_to_full: bool
+    eta_seconds: int | None
+    eta_reason: str | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class TaskDetailResponse(TaskListItem):
+    vehicles: list[dict]
+    events: list[dict]
+    artifacts: list[dict]
+    collection_runs: list[dict] = Field(default_factory=list)
+
+
+class TaskLoadResponse(BaseModel):
+    running_task_count: int
+    queued_task_count: int
+    platforms: dict[str, dict[str, int]]
+
+
 class JobOverviewResponse(BaseModel):
     job_id: str
     query: str
     model_name: str
     status: str
     current_stage: str
+    collection_mode: str = "incremental"
     degraded: bool
     passphrase_version: str
     queue_job_id: str | None
@@ -251,6 +300,20 @@ class SampleSummaryResponse(BaseModel):
     dcd_count: int
 
 
+class CollectionPlatformSummaryResponse(BaseModel):
+    existing_count: int = 0
+    new_count: int = 0
+    total_count: int = 0
+    pages_scanned: int = 0
+    mode: str = "incremental"
+    stop_reason: str | None = None
+
+
+class CollectionSummaryResponse(BaseModel):
+    autohome: CollectionPlatformSummaryResponse = Field(default_factory=CollectionPlatformSummaryResponse)
+    dongchedi: CollectionPlatformSummaryResponse = Field(default_factory=CollectionPlatformSummaryResponse)
+
+
 class JobResultResponse(BaseModel):
     job_id: str
     status: str
@@ -258,6 +321,7 @@ class JobResultResponse(BaseModel):
     model_name: str
     retention_days: int
     sample_summary: SampleSummaryResponse
+    collection_summary: CollectionSummaryResponse = Field(default_factory=CollectionSummaryResponse)
     template_report: TemplateReportResponse
     structured_sections: StructuredSectionsResponse
     wordcloud: WordcloudResponse
@@ -337,6 +401,165 @@ class TimeReportResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
+
+
+class AdminRedisFailedJobItem(BaseModel):
+    job_id: str
+    status: str | None = None
+    origin: str | None = None
+    description: str | None = None
+
+
+class AdminDbFailedJobItem(BaseModel):
+    job_id: str
+    query: str
+    model_name: str
+    current_stage: str
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class AdminFailedJobsResponse(BaseModel):
+    redis_failed_jobs: list[AdminRedisFailedJobItem] = Field(default_factory=list)
+    db_failed_jobs: list[AdminDbFailedJobItem] = Field(default_factory=list)
+    redis_error: str | None = None
+
+
+class AdminFailedJobsDeleteResponse(BaseModel):
+    redis_removed_job_ids: list[str] = Field(default_factory=list)
+    db_expired_job_ids: list[str] = Field(default_factory=list)
+    deleted_artifact_dirs: list[str] = Field(default_factory=list)
+    redis_error: str | None = None
+
+
+class SeriesMutationRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+    platform: Literal["autohome", "dongchedi"]
+    series_id: str = Field(min_length=1, max_length=64)
+    operator: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1)
+    url: str | None = None
+    title: str | None = Field(default=None, max_length=255)
+    source: str | None = None
+
+    @field_validator("query", "series_id", "operator", "reason", mode="before")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("url", "title", "source", mode="before")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = str(value).strip()
+        return stripped or None
+
+
+class SeriesActionRequest(BaseModel):
+    operator: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1)
+
+    @field_validator("operator", "reason", mode="before")
+    @classmethod
+    def _strip_required_text(cls, value: str) -> str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+
+
+class SeriesRecordResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    query_key: str
+    query: str
+    platform: str
+    series_id: str
+    status: str
+    url: str | None = None
+    title: str | None = None
+    source: str | None = None
+    import_batch_id: int | None = None
+    deleted_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SeriesListResponse(BaseModel):
+    items: list[SeriesRecordResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class SeriesImportRowResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    row_number: int
+    query: str | None = None
+    platform: str | None = None
+    series_id: str | None = None
+    url: str | None = None
+    title: str | None = None
+    source: str | None = None
+    status: str
+    query_key: str | None = None
+    error: str | None = None
+    existing_value_json: dict | None = None
+    incoming_value_json: dict | None = None
+
+
+class SeriesImportPreviewResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    summary: dict[str, int]
+    rows: list[SeriesImportRowResponse] = Field(default_factory=list)
+
+
+class SeriesAuditItemResponse(BaseModel):
+    id: int
+    record_id: int | None = None
+    action: str
+    operator: str
+    reason: str
+    old_value: dict
+    new_value: dict
+    created_at: datetime
+
+
+class SeriesAuditResponse(BaseModel):
+    items: list[SeriesAuditItemResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
+
+
+class SeriesAliasRequest(BaseModel):
+    alias: str = Field(min_length=1, max_length=255)
+    canonical_query: str = Field(min_length=1, max_length=255)
+
+
+class SeriesAliasResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    alias_key: str
+    alias: str
+    canonical_query: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SeriesAliasListResponse(BaseModel):
+    items: list[SeriesAliasResponse] = Field(default_factory=list)
+    total: int
+    limit: int
+    offset: int
 
 
 class TimeReportListResponse(BaseModel):

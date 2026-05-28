@@ -1,38 +1,5 @@
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
 
-export type StepKey = "passphrase" | "vehicle" | "candidates" | "progress" | "result";
-
-export type StepItem = {
-  key: StepKey;
-  label: string;
-  eyebrow: string;
-  href: string;
-};
-
-export const flowSteps: StepItem[] = [
-  { key: "passphrase", label: "口令", eyebrow: "01", href: "/passphrase" },
-  { key: "vehicle", label: "车型", eyebrow: "02", href: "/vehicle" },
-  { key: "candidates", label: "车系", eyebrow: "03", href: "/candidates" },
-  { key: "progress", label: "采集", eyebrow: "04", href: "/progress" },
-  { key: "result", label: "洞察", eyebrow: "05", href: "/result" },
-];
-
-export function stepForPath(pathname: string | null): StepKey {
-  if (pathname?.startsWith("/vehicle")) {
-    return "vehicle";
-  }
-  if (pathname?.startsWith("/candidates")) {
-    return "candidates";
-  }
-  if (pathname?.startsWith("/progress")) {
-    return "progress";
-  }
-  if (pathname?.startsWith("/result")) {
-    return "result";
-  }
-  return "passphrase";
-}
-
 type SignalPanelProps = ComponentPropsWithoutRef<"section"> & {
   tone?: "default" | "success" | "warning" | "danger" | "accent";
 };
@@ -76,22 +43,4 @@ export function StatusPill({
   tone?: "default" | "success" | "warning" | "danger" | "accent";
 }) {
   return <span className={`pill pill-${tone}`}>{children}</span>;
-}
-
-export function StepRail({ activeStep }: { activeStep: StepKey }) {
-  const activeIndex = flowSteps.findIndex((step) => step.key === activeStep);
-
-  return (
-    <nav className="step-rail" aria-label="任务流程">
-      {flowSteps.map((step, index) => {
-        const state = index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
-        return (
-          <a key={step.key} className={`step-node step-${state}`} href={step.href}>
-            <span>{step.eyebrow}</span>
-            <strong>{step.label}</strong>
-          </a>
-        );
-      })}
-    </nav>
-  );
 }

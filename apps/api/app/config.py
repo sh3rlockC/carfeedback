@@ -31,11 +31,17 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     worker_queue_name: str = "vehicle-koubei"
     worker_job_timeout_seconds: int = 7200
+    temporal_address: str = "temporal:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "vehicle-koubei-temporal"
+    task_center_create_enabled: bool = False
     artifact_root: str = "/srv/koubei/jobs"
+    corpus_root: str = "/srv/koubei/corpus"
     workspace_root: str = str(discover_workspace_root())
 
     pass_phrase_hash: str = ""
     pass_phrase_version: str = "2026-W17"
+    access_control_enabled: bool = False
     session_secret: str = "change-me"
     session_cookie_name: str = "koubei_access"
     session_ttl_seconds: int = 4 * 60 * 60
@@ -60,6 +66,10 @@ class Settings(BaseSettings):
     @property
     def artifact_root_path(self) -> Path:
         return Path(self.artifact_root).expanduser().resolve()
+
+    @property
+    def corpus_root_path(self) -> Path:
+        return Path(self.corpus_root).expanduser().resolve()
 
     @property
     def workspace_root_path(self) -> Path:

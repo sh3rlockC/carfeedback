@@ -1,0 +1,2 @@
+"""Fake collector service package."""
+

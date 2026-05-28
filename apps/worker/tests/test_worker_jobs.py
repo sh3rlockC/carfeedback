@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
 import worker_jobs
 import worker_app.stages as stages_module
 from worker_app.artifacts import ensure_job_dirs
+from worker_app.corpus import upsert_platform_rows
 from worker_app.jobs import PipelineResult
 from worker_app.stages import build_stage_commands, StageCommand
 
@@ -25,13 +26,19 @@ def test_run_job_uses_configured_stage_runner(monkeypatch, tmp_path: Path) -> No
 
         def fetch_job_inputs(self, _job_id: str):
             return SimpleNamespace(
+                job_id="job_worker",
+                query="测试车",
                 model_name="测试车",
                 autohome_series_id="8089",
                 dongchedi_series_id="25398",
+                collection_mode="incremental",
             )
 
         def handle_pipeline_event(self, _job_id: str, _event: dict):
             pass
+
+        def update_collection_summary(self, _job_id: str, _summary: dict) -> None:
+            captured["collection_summary"] = _summary
 
     def fake_build_stage_runner():
         captured["builder_called"] = True
@@ -46,6 +53,7 @@ def test_run_job_uses_configured_stage_runner(monkeypatch, tmp_path: Path) -> No
 
     monkeypatch.setattr(worker_jobs, "DatabaseJobStore", FakeStore)
     monkeypatch.setattr(worker_jobs, "ensure_job_dirs", lambda _root, _job_id: tmp_path)
+    monkeypatch.setattr(worker_jobs, "prepare_collection_plan", lambda **_kwargs: {"autohome": {}, "dongchedi": {}})
     monkeypatch.setattr(worker_jobs, "build_stage_commands", lambda **_kwargs: [stage])
     monkeypatch.setattr(worker_jobs, "build_stage_runner", fake_build_stage_runner)
     monkeypatch.setattr(worker_jobs, "run_pipeline", fake_run_pipeline)
@@ -67,9 +75,12 @@ def test_run_job_marks_failed_when_pipeline_raises(monkeypatch, tmp_path: Path) 
 
         def fetch_job_inputs(self, _job_id: str):
             return SimpleNamespace(
+                job_id="job_timeout",
+                query="测试车",
                 model_name="测试车",
                 autohome_series_id="8089",
                 dongchedi_series_id="25398",
+                collection_mode="incremental",
             )
 
         def handle_pipeline_event(self, _job_id: str, _event: dict):
@@ -83,6 +94,7 @@ def test_run_job_marks_failed_when_pipeline_raises(monkeypatch, tmp_path: Path) 
 
     monkeypatch.setattr(worker_jobs, "DatabaseJobStore", FakeStore)
     monkeypatch.setattr(worker_jobs, "ensure_job_dirs", lambda _root, _job_id: tmp_path)
+    monkeypatch.setattr(worker_jobs, "prepare_collection_plan", lambda **_kwargs: {"autohome": {}, "dongchedi": {}})
     monkeypatch.setattr(worker_jobs, "build_stage_commands", lambda **_kwargs: [])
     monkeypatch.setattr(worker_jobs, "build_stage_runner", lambda: "runner-sentinel")
     monkeypatch.setattr(worker_jobs, "run_pipeline", fake_run_pipeline)
@@ -237,6 +249,63 @@ def test_copy_vehicle_downloadable_artifacts_keeps_only_excel_and_png(tmp_path: 
     assert not (tmp_path / "comparison" / "测试车" / "final_report.json").exists()
 
 
+def test_prepare_collection_plan_uses_full_refresh_when_history_is_empty(tmp_path: Path) -> None:
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_no_history")
+    plan = worker_jobs.prepare_collection_plan(
+        database_url=f"sqlite+pysqlite:///{tmp_path / 'worker.db'}",
+        job_paths=job_paths,
+        query="测试车",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+        collection_mode="incremental",
+    )
+
+    assert plan["autohome"]["mode"] == "full_refresh"
+    assert plan["autohome"]["existing_count"] == 0
+    assert "known_links_file" not in plan["autohome"]
+    assert plan["dongchedi"]["mode"] == "full_refresh"
+    assert (job_paths.progress / "checking_incremental.progress.json").exists()
+
+
+def test_prepare_collection_plan_uses_known_links_when_history_exists(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'worker.db'}"
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="autohome",
+        series_id="8089",
+        job_id="job_history",
+        rows=[
+            {
+                "用户名": "历史车主",
+                "发表日期": "2026-05-01",
+                "评价详情": "历史评论",
+                "来源链接": "https://k.autohome.com.cn/detail/view_01history.html",
+            }
+        ],
+    )
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_with_history")
+
+    plan = worker_jobs.prepare_collection_plan(
+        database_url=database_url,
+        job_paths=job_paths,
+        query="测试车",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+        collection_mode="incremental",
+    )
+
+    assert plan["autohome"]["mode"] == "incremental"
+    assert plan["autohome"]["existing_count"] == 1
+    assert plan["autohome"]["max_scan_pages"] == 10
+    known_links_file = Path(plan["autohome"]["known_links_file"])
+    assert known_links_file.read_text(encoding="utf-8").splitlines() == [
+        "https://k.autohome.com.cn/detail/view_01history.html"
+    ]
+    assert plan["dongchedi"]["mode"] == "full_refresh"
+
+
 def make_dependency_map(tmp_path: Path) -> dict[str, dict[str, str]]:
     return {
         "auto-koubei-collector": {"path": str(tmp_path), "entrypoint": "auto.py"},
@@ -283,6 +352,40 @@ def test_wordcloud_stage_uses_configured_font_path(monkeypatch, tmp_path: Path) 
     assert font_path == str(tmp_path / "font.ttc")
 
 
+def test_build_stage_commands_adds_incremental_check_and_known_link_options(monkeypatch, tmp_path: Path) -> None:
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_incremental")
+    monkeypatch.setattr(stages_module, "WORDCLOUD_FONT_PATH", str(tmp_path / "missing.ttc"))
+    known_links = tmp_path / "known_autohome.txt"
+    known_links.write_text("https://k.autohome.com.cn/detail/view_01abc.html\n", encoding="utf-8")
+
+    stages = build_stage_commands(
+        job_paths=job_paths,
+        model_name="测试车",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+        dependency_map=make_dependency_map(tmp_path),
+        collection_plan={
+            "autohome": {
+                "mode": "incremental",
+                "known_links_file": str(known_links),
+                "max_scan_pages": 10,
+                "stop_after_known_pages": 2,
+            },
+            "dongchedi": {"mode": "full_refresh"},
+        },
+    )
+
+    assert stages[0].name == "checking_incremental"
+    autohome_stage = next(stage for stage in stages if stage.name == "collecting_autohome")
+    assert "--known-links-file" in autohome_stage.command
+    assert autohome_stage.command[autohome_stage.command.index("--known-links-file") + 1] == str(known_links)
+    assert autohome_stage.command[autohome_stage.command.index("--max-scan-pages") + 1] == "10"
+    assert autohome_stage.command[autohome_stage.command.index("--stop-after-known-pages") + 1] == "2"
+
+    dcd_stage = next(stage for stage in stages if stage.name == "collecting_dcd")
+    assert "--known-links-file" not in dcd_stage.command
+
+
 def test_build_stage_commands_uses_hermes_outputs_after_postprocess(monkeypatch, tmp_path: Path) -> None:
     job_paths = ensure_job_dirs(tmp_path / "jobs", "job_hermes")
     monkeypatch.setattr(stages_module, "WORDCLOUD_FONT_PATH", str(tmp_path / "missing.ttc"))
@@ -297,6 +400,7 @@ def test_build_stage_commands_uses_hermes_outputs_after_postprocess(monkeypatch,
 
     stage_names = [stage.name for stage in stages]
     assert stage_names == [
+        "checking_incremental",
         "collecting_autohome",
         "collecting_dcd",
         "postprocessing",

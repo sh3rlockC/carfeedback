@@ -73,6 +73,23 @@ def build_wordcloud_font_args() -> list[str]:
     return []
 
 
+def _collection_args(collection_plan: dict[str, Any] | None, platform: str) -> list[str]:
+    if not collection_plan:
+        return []
+    platform_plan = collection_plan.get(platform) or {}
+    known_links_file = platform_plan.get("known_links_file")
+    if not known_links_file:
+        return []
+    args = ["--known-links-file", str(known_links_file)]
+    max_scan_pages = platform_plan.get("max_scan_pages")
+    stop_after_known_pages = platform_plan.get("stop_after_known_pages")
+    if max_scan_pages:
+        args.extend(["--max-scan-pages", str(max_scan_pages)])
+    if stop_after_known_pages:
+        args.extend(["--stop-after-known-pages", str(stop_after_known_pages)])
+    return args
+
+
 def build_stage_commands(
     *,
     job_paths: JobPaths,
@@ -80,6 +97,7 @@ def build_stage_commands(
     autohome_series_id: str,
     dongchedi_series_id: str,
     dependency_map: dict[str, dict[str, Any]] | None = None,
+    collection_plan: dict[str, Any] | None = None,
 ) -> list[StageCommand]:
     dependency_map = dependency_map or load_dependencies()
     workspace_root = get_workspace_root()
@@ -96,6 +114,7 @@ def build_stage_commands(
     llm_metrics_output = job_paths.outputs.ai / "llm_metrics.json"
     autohome_progress = job_paths.progress / "collecting_autohome.progress.json"
     dcd_progress = job_paths.progress / "collecting_dcd.progress.json"
+    checking_progress = job_paths.progress / "checking_incremental.progress.json"
     hermes_progress = job_paths.progress / "generating_hermes_outputs.progress.json"
 
     auto_dep = dependency_map["auto-koubei-collector"]
@@ -190,6 +209,19 @@ def build_stage_commands(
 
     return [
         StageCommand(
+            name="checking_incremental",
+            dependency_name="incremental-corpus",
+            cwd=Path.cwd(),
+            command=[
+                sys.executable,
+                "-c",
+                "pass",
+            ],
+            core=True,
+            expected_artifacts=(str(checking_progress),),
+            progress_file=str(checking_progress),
+        ),
+        StageCommand(
             name="collecting_autohome",
             dependency_name="auto-koubei-collector",
             cwd=Path(auto_dep["path"]),
@@ -207,6 +239,7 @@ def build_stage_commands(
                 str(workspace_root),
                 "--progress-file",
                 str(autohome_progress),
+                *_collection_args(collection_plan, "autohome"),
             ],
             core=True,
             expected_artifacts=(
@@ -232,6 +265,7 @@ def build_stage_commands(
                 "--progress-file",
                 str(dcd_progress),
                 "--quiet",
+                *_collection_args(collection_plan, "dongchedi"),
             ],
             core=True,
             expected_artifacts=(

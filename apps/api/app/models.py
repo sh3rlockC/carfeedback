@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -23,8 +23,166 @@ def new_comparison_id() -> str:
     return f"cmp_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
 
+def new_task_id() -> str:
+    return f"task_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+def new_collection_run_id() -> str:
+    return f"run_{utc_now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
 class Base(DeclarativeBase):
     pass
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    task_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_task_id)
+    task_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    current_stage: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    upgraded_to_full: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    view_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    manage_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    manage_token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    view_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    manage_token_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    eta_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    eta_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    collection_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="incremental")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    vehicles: Mapped[list["TaskVehicle"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    events: Mapped[list["TaskEvent"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    artifacts: Mapped[list["TaskArtifact"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+    collection_run_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="task", cascade="all, delete-orphan")
+
+
+class TaskVehicle(Base):
+    __tablename__ = "task_vehicles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    autohome_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dcd_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
+    result_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="vehicles")
+    collection_run_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="task_vehicle")
+
+
+class CollectionRun(Base):
+    __tablename__ = "collection_runs"
+    __table_args__ = (
+        Index(
+            "uq_collection_run_active_identity",
+            "platform",
+            "query_key",
+            "series_id",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
+            sqlite_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_collection_run_id)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    shared_by_task_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resume_cursor: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    output_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    collector_events: Mapped[list["CollectorEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    task_links: Mapped[list["CollectionRunTask"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+
+
+class CollectionRunTask(Base):
+    __tablename__ = "collection_run_tasks"
+    __table_args__ = (UniqueConstraint("run_id", "task_id", name="uq_collection_run_task"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("collection_runs.run_id", ondelete="CASCADE"), nullable=False)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    task_vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("task_vehicles.id", ondelete="CASCADE"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[CollectionRun] = relationship(back_populates="task_links")
+    task: Mapped[Task] = relationship(back_populates="collection_run_links")
+    task_vehicle: Mapped[TaskVehicle | None] = relationship(back_populates="collection_run_links")
+
+
+class TaskEvent(Base):
+    __tablename__ = "task_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="events")
+
+
+class CollectorEvent(Base):
+    __tablename__ = "collector_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("collection_runs.run_id", ondelete="CASCADE"), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[CollectionRun] = relationship(back_populates="collector_events")
+
+
+class TaskArtifact(Base):
+    __tablename__ = "task_artifacts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.task_id", ondelete="CASCADE"), nullable=False)
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    downloadable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    task: Mapped[Task] = relationship(back_populates="artifacts")
+
+
+class EtaMetric(Base):
+    __tablename__ = "eta_metrics"
+    __table_args__ = (UniqueConstraint("stage", "platform", "task_type", name="uq_eta_metric_identity"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    stage: Mapped[str] = mapped_column(String(64), nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    task_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    p50_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    p90_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
 class Job(Base):
@@ -38,6 +196,8 @@ class Job(Base):
     degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     passphrase_version: Mapped[str] = mapped_column(String(64), nullable=False)
     queue_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    collection_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="incremental")
+    collection_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     enqueued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -49,6 +209,29 @@ class Job(Base):
     ai_reports: Mapped[list["JobAIReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     qa_chunks: Mapped[list["JobQAChunk"]] = relationship(back_populates="job", cascade="all, delete-orphan")
     time_reports: Mapped[list["JobTimeReport"]] = relationship(back_populates="job", cascade="all, delete-orphan")
+
+
+class KoubeiRawComment(Base):
+    __tablename__ = "koubei_raw_comments"
+    __table_args__ = (
+        UniqueConstraint("query_key", "platform", "series_id", "dedupe_key", name="uq_koubei_raw_comment_dedupe"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_link: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dedupe_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    row_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    first_seen_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_seen_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    published_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class JobCandidate(Base):
@@ -68,18 +251,84 @@ class JobCandidate(Base):
 
 class ConfirmedVehicleSeries(Base):
     __tablename__ = "confirmed_vehicle_series"
-    __table_args__ = (UniqueConstraint("query_key", "platform", name="uq_confirmed_vehicle_series_query_platform"),)
+    __table_args__ = (
+        Index(
+            "uq_confirmed_vehicle_series_active_query_platform",
+            "query_key",
+            "platform",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     query_key: Mapped[str] = mapped_column(String(255), nullable=False)
     query: Mapped[str] = mapped_column(String(255), nullable=False)
     platform: Mapped[str] = mapped_column(String(32), nullable=False)
     series_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     url: Mapped[str | None] = mapped_column(Text, nullable=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    import_batch_id: Mapped[int | None] = mapped_column(ForeignKey("series_import_batches.id"), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesImportBatch(Base):
+    __tablename__ = "series_import_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    operator: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    summary_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesAuditLog(Base):
+    __tablename__ = "series_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    record_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    new_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+
+class SeriesConflict(Base):
+    __tablename__ = "series_conflicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    conflict_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    query_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    query: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    existing_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    incoming_value_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    import_batch_id: Mapped[int | None] = mapped_column(ForeignKey("series_import_batches.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class SeriesAlias(Base):
+    __tablename__ = "series_aliases"
+    __table_args__ = (Index("ix_series_aliases_alias_key", "alias_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alias_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    alias: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_query: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
 
 
 class JobStageRun(Base):

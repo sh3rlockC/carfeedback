@@ -29,6 +29,11 @@ class OpenClawSettings:
     agent_id: str = "main"
     autohome_agent_id: str | None = None
     dcd_agent_id: str | None = None
+    autohome_agent_ids: tuple[str, ...] = ()
+    dcd_agent_ids: tuple[str, ...] = ()
+    agent_lease_seconds: int = 2400
+    agent_pool_wait_seconds: int = 1800
+    agent_pool_poll_seconds: float = 5.0
     collector_skill: str = "sh3rlockC/auto-koubei-collector"
     dcd_collector_skill: str = "sh3rlockC/dcd-koubei-collector"
     timeout_seconds: int = 1800
@@ -48,6 +53,11 @@ class OpenClawSettings:
             agent_id=os.getenv("OPENCLAW_AGENT_ID", cls.agent_id),
             autohome_agent_id=os.getenv("OPENCLAW_AUTOHOME_AGENT_ID") or None,
             dcd_agent_id=os.getenv("OPENCLAW_DCD_AGENT_ID") or None,
+            autohome_agent_ids=_env_list("OPENCLAW_AUTOHOME_AGENT_IDS", ()),
+            dcd_agent_ids=_env_list("OPENCLAW_DCD_AGENT_IDS", ()),
+            agent_lease_seconds=int(os.getenv("OPENCLAW_AGENT_LEASE_SECONDS", str(cls.agent_lease_seconds))),
+            agent_pool_wait_seconds=int(os.getenv("OPENCLAW_AGENT_POOL_WAIT_SECONDS", str(cls.agent_pool_wait_seconds))),
+            agent_pool_poll_seconds=float(os.getenv("OPENCLAW_AGENT_POOL_POLL_SECONDS", str(cls.agent_pool_poll_seconds))),
             collector_skill=os.getenv("OPENCLAW_AUTOHOME_COLLECTOR_SKILL", os.getenv("OPENCLAW_COLLECTOR_SKILL", cls.collector_skill)),
             dcd_collector_skill=os.getenv("OPENCLAW_DCD_COLLECTOR_SKILL", cls.dcd_collector_skill),
             timeout_seconds=int(os.getenv("OPENCLAW_TIMEOUT_SECONDS", os.getenv("OPENCLAW_AGENT_TIMEOUT_SECONDS", str(cls.timeout_seconds)))),
@@ -65,6 +75,19 @@ class OpenClawSettings:
         if stage_name == "collecting_dcd":
             return self.dcd_agent_id or self.agent_id
         return self.agent_id
+
+    def agent_pool_for_stage(self, stage_name: str) -> tuple[str, ...]:
+        if stage_name == "collecting_autohome" and self.autohome_agent_ids:
+            return self.autohome_agent_ids
+        if stage_name == "collecting_dcd" and self.dcd_agent_ids:
+            return self.dcd_agent_ids
+        return ()
+
+    def agent_ids_for_stage(self, stage_name: str) -> tuple[str, ...]:
+        pool = self.agent_pool_for_stage(stage_name)
+        if pool:
+            return pool
+        return (self.agent_id_for_stage(stage_name),)
 
     def read_token(self) -> str | None:
         token_path = Path(self.token_file)
@@ -86,6 +109,14 @@ class OpenClawGatewayClientProtocol(Protocol):
     ) -> dict[str, Any]: ...
 
 
+@dataclass(frozen=True)
+class AgentLease:
+    agent_id: str
+    key: str | None = None
+    value: str | None = None
+    client: Any | None = None
+
+
 StageRunnerCallable = Callable[[StageCommand, JobPaths, ProgressSink], StageResult]
 
 
@@ -99,6 +130,106 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         return default
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or default
+
+
+def _redis_client() -> Any:
+    try:
+        from redis import Redis
+    except ImportError as exc:
+        raise StageExecutionError(
+            stage="openclaw",
+            error_code="CONFIG_ERROR",
+            message="Python package 'redis' is required for OpenClaw agent leasing",
+        ) from exc
+
+    return Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"), decode_responses=True)
+
+
+def _lease_key(agent_id: str) -> str:
+    return f"openclaw:agent-lease:{agent_id}"
+
+
+def _acquire_agent_lease(
+    *,
+    command: StageCommand,
+    job_paths: JobPaths,
+    progress_sink: ProgressSink,
+    settings: OpenClawSettings,
+) -> AgentLease:
+    agent_pool = settings.agent_pool_for_stage(command.name)
+    if not agent_pool:
+        return AgentLease(agent_id=settings.agent_id_for_stage(command.name))
+
+    try:
+        client = _redis_client()
+    except StageExecutionError:
+        raise
+    except Exception as exc:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="AGENT_POOL_ERROR",
+            message=f"failed to connect to Redis for OpenClaw agent leasing: {exc}",
+        ) from exc
+
+    owner = f"{job_paths.root.name}:{command.name}:{uuid.uuid4()}"
+    lease_ttl_seconds = max(settings.agent_lease_seconds, settings.timeout_seconds + 60, 1)
+    wait_seconds = max(settings.agent_pool_wait_seconds, 0)
+    poll_seconds = max(settings.agent_pool_poll_seconds, 0.1)
+    deadline = time.monotonic() + wait_seconds
+    next_progress_update = 0.0
+
+    while True:
+        for agent_id in agent_pool:
+            key = _lease_key(agent_id)
+            try:
+                acquired = client.set(key, owner, nx=True, ex=lease_ttl_seconds)
+            except Exception as exc:
+                raise StageExecutionError(
+                    stage=command.name,
+                    error_code="AGENT_POOL_ERROR",
+                    message=f"failed to acquire OpenClaw agent lease from Redis: {exc}",
+                ) from exc
+            if acquired:
+                return AgentLease(agent_id=agent_id, key=key, value=owner, client=client)
+
+        now = time.monotonic()
+        if now >= deadline:
+            raise StageExecutionError(
+                stage=command.name,
+                error_code="AGENT_POOL_TIMEOUT",
+                message=(
+                    f"no OpenClaw agent available for {command.name} within {wait_seconds} seconds; "
+                    f"configured agents: {', '.join(agent_pool)}"
+                ),
+            )
+
+        if now >= next_progress_update:
+            progress_sink.update(
+                stage=command.name,
+                status="waiting_agent",
+                message=f"等待 OpenClaw agent 空闲：{', '.join(agent_pool)}",
+                overall_percent=1,
+            )
+            next_progress_update = now + 10.0
+
+        time.sleep(min(poll_seconds, deadline - now))
+
+
+def _release_agent_lease(lease: AgentLease) -> None:
+    if not lease.key or not lease.value or lease.client is None:
+        return
+    script = """
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+        return redis.call("DEL", KEYS[1])
+    end
+    return 0
+    """
+    try:
+        lease.client.eval(script, 1, lease.key, lease.value)
+    except Exception:
+        # TTL is the safety net. A release failure must not turn a successful
+        # collection into a failed job after artifacts have been produced.
+        return
 
 
 def _base64url(data: bytes) -> str:
@@ -229,16 +360,29 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
     series_id = _command_arg(command, "--series-id")
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的汽车之家口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.collector_skill}",
             f"series_id={series_id}",
             f"output_path={_host_path(output_path, settings)}",
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if known_links_file:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集汽车之家用户口碑，输出 Excel 到 output_path。",
@@ -250,6 +394,7 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "8. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -257,11 +402,13 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
     start_page = _optional_command_arg(command, "--start-page") or "1"
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     failed_pages_path = str(Path(output_path).with_suffix(".failed-pages.json"))
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的懂车帝口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.dcd_collector_skill}",
             f"series_id={series_id}",
@@ -270,6 +417,17 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if known_links_file:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集懂车帝用户口碑，输出 Excel 到 output_path。",
@@ -282,6 +440,7 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_collector_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -596,44 +755,54 @@ def run_collector_via_openclaw(
     stderr_log = job_paths.logs / f"{command.name}.openclaw.stderr.log"
     client = gateway_client or OpenClawGatewayClient()
     session_id = f"vehicle-koubei-{job_paths.root.name}-{command.name}"
-    agent_id = settings.agent_id_for_stage(command.name)
-    try:
-        response = client.call_agent(
-            _build_collector_message(command, settings),
-            settings=settings,
-            session_id=session_id,
-            stage_name=command.name,
-            agent_id=agent_id,
-        )
-    except StageExecutionError:
-        raise
-    except Exception as exc:
-        raise StageExecutionError(
-            stage=command.name,
-            error_code=_classify_error(command, str(exc), ""),
-            message=str(exc) or "OpenClaw collection failed",
-        ) from exc
-
-    _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
-    _write_stage_log(stderr_log, "")
-
-    if response.get("status") == "accepted":
-        _wait_for_expected_artifacts(command, settings, response=response)
-
-    artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
-    output_metadata.update(
-        {
-            "stdout_log": str(stdout_log),
-            "stderr_log": str(stderr_log),
-            "openclaw_gateway_url": settings.gateway_url,
-            "openclaw_agent_id": agent_id,
-            "openclaw_skill": _collector_skill_for_stage(command, settings),
-        }
+    lease = _acquire_agent_lease(
+        command=command,
+        job_paths=job_paths,
+        progress_sink=progress_sink,
+        settings=settings,
     )
-    if command.progress_file and Path(command.progress_file).exists():
-        output_metadata["progress_file"] = command.progress_file
+    agent_id = lease.agent_id
+    try:
+        try:
+            response = client.call_agent(
+                _build_collector_message(command, settings),
+                settings=settings,
+                session_id=session_id,
+                stage_name=command.name,
+                agent_id=agent_id,
+            )
+        except StageExecutionError:
+            raise
+        except Exception as exc:
+            raise StageExecutionError(
+                stage=command.name,
+                error_code=_classify_error(command, str(exc), ""),
+                message=str(exc) or "OpenClaw collection failed",
+            ) from exc
 
-    return StageResult(status="success", artifact_paths=artifact_paths, output_metadata=output_metadata)
+        _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
+        _write_stage_log(stderr_log, "")
+
+        if response.get("status") == "accepted":
+            _wait_for_expected_artifacts(command, settings, response=response)
+
+        artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
+        output_metadata.update(
+            {
+                "stdout_log": str(stdout_log),
+                "stderr_log": str(stderr_log),
+                "openclaw_gateway_url": settings.gateway_url,
+                "openclaw_agent_id": agent_id,
+                "openclaw_agent_lease_key": lease.key,
+                "openclaw_skill": _collector_skill_for_stage(command, settings),
+            }
+        )
+        if command.progress_file and Path(command.progress_file).exists():
+            output_metadata["progress_file"] = command.progress_file
+
+        return StageResult(status="success", artifact_paths=artifact_paths, output_metadata=output_metadata)
+    finally:
+        _release_agent_lease(lease)
 
 
 def run_autohome_via_openclaw(
@@ -658,13 +827,19 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
     run_id = str(response.get("runId") or response.get("run_id") or response.get("sourceId") or "") if response else ""
     related_markers = _openclaw_task_markers(command, settings)
     deadline = time.monotonic() + max(settings.timeout_seconds, 1)
+
+    def missing_artifacts() -> list[str]:
+        return [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
+
     while True:
-        missing = [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
+        missing = missing_artifacts()
         if not missing:
             return
 
         task_status = _read_openclaw_task_status(settings=settings, task_id=task_id or None, run_id=run_id or None)
         if task_status and task_status["status"] in {"failed", "timed_out", "cancelled", "lost"}:
+            if not missing_artifacts():
+                return
             error_detail = task_status["error"] or f"OpenClaw task ended with status={task_status['status']}"
             raise StageExecutionError(
                 stage=command.name,
@@ -674,6 +849,8 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
 
         related_failure = _read_related_openclaw_failure(settings=settings, markers=related_markers)
         if related_failure:
+            if not missing_artifacts():
+                return
             error_detail = related_failure["error"] or f"Related OpenClaw task ended with status={related_failure['status']}"
             raise StageExecutionError(
                 stage=command.name,

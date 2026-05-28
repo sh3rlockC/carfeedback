@@ -4,8 +4,8 @@ import { AppChrome } from "./components/app-chrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "车型口碑分析演示",
-  description: "车型口碑采集、摘要、词云、一页纸和问答演示工具。",
+  title: "车型口碑工作台",
+  description: "车型口碑增量采集、任务管理、结果仪表盘和交付物下载工作台。",
 };
 
 export default function RootLayout({

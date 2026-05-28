@@ -95,6 +95,23 @@ def create_cleanup_schema(db_path: Path) -> None:
                 updated_at TEXT,
                 completed_at TEXT
             );
+            CREATE TABLE koubei_raw_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_key TEXT NOT NULL,
+                query TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                source_link TEXT,
+                dedupe_key TEXT NOT NULL,
+                row_json TEXT NOT NULL,
+                first_seen_job_id TEXT,
+                last_seen_job_id TEXT,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                published_at TEXT,
+                page INTEGER
+            );
             """
         )
         connection.commit()
@@ -195,6 +212,29 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
             created_at=now - timedelta(days=5),
             finished_at=now - timedelta(days=4),
         )
+        connection.execute(
+            """
+            INSERT INTO koubei_raw_comments (
+                query_key, query, model_name, platform, series_id, source_link, dedupe_key,
+                row_json, first_seen_job_id, last_seen_job_id, first_seen_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "风云x3 plus",
+                "风云X3 PLUS",
+                "风云X3 PLUS",
+                "autohome",
+                "8089",
+                "https://k.autohome.com.cn/detail/view_01old.html",
+                "link:https://k.autohome.com.cn/detail/view_01old.html",
+                '{"用户名":"tester"}',
+                "job_old",
+                "job_old",
+                as_db_datetime(now - timedelta(days=5)),
+                as_db_datetime(now - timedelta(days=5)),
+            ),
+        )
         insert_job(
             connection,
             job_id="job_recent",
@@ -246,6 +286,7 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
         assert connection.execute("SELECT COUNT(*) FROM job_ai_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_qa_chunks WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_time_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM koubei_raw_comments WHERE query_key = ?", ("风云x3 plus",)).fetchone()[0] == 1
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_recent",)).fetchone()[0] == "completed"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_running",)).fetchone()[0] == "collecting_autohome"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_failed_recent",)).fetchone()[0] == "failed"
@@ -348,7 +389,37 @@ def test_start_cleanup_process_uses_daemon_process(monkeypatch, tmp_path: Path) 
     }
 
 
-def test_worker_main_starts_cleanup_process_with_environment_settings(monkeypatch, tmp_path: Path) -> None:
+def test_worker_main_skips_cleanup_process_by_default(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeWorker:
+        def __init__(self, queues, connection):
+            captured["queues"] = queues
+            captured["connection"] = connection
+
+        def work(self, *, with_scheduler: bool):
+            captured["with_scheduler"] = with_scheduler
+
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:6379/9")
+    monkeypatch.setenv("WORKER_QUEUE_NAME", "cleanup-test")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'worker.db'}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.delenv("JOB_ARTIFACT_CLEANUP_ENABLED", raising=False)
+    monkeypatch.setattr(worker_module, "make_redis_connection", lambda redis_url: f"connection:{redis_url}")
+    monkeypatch.setattr(
+        worker_module,
+        "start_cleanup_process",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("cleanup should not start")),
+    )
+    monkeypatch.setattr(worker_module, "Worker", FakeWorker)
+
+    assert worker_module.main() == 0
+    assert captured["queues"] == ["cleanup-test"]
+    assert captured["connection"] == "connection:redis://127.0.0.1:6379/9"
+    assert captured["with_scheduler"] is False
+
+
+def test_worker_main_starts_cleanup_process_when_enabled(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, object] = {}
 
     class FakeWorker:
@@ -369,6 +440,7 @@ def test_worker_main_starts_cleanup_process_with_environment_settings(monkeypatc
     monkeypatch.setenv("WORKER_QUEUE_NAME", "cleanup-test")
     monkeypatch.setenv("DATABASE_URL", f"sqlite+pysqlite:///{tmp_path / 'worker.db'}")
     monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "jobs"))
+    monkeypatch.setenv("JOB_ARTIFACT_CLEANUP_ENABLED", "true")
     monkeypatch.setenv("JOB_ARTIFACT_RETENTION_DAYS", "5")
     monkeypatch.setenv("JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS", "60")
     monkeypatch.setattr(worker_module, "make_redis_connection", lambda redis_url: f"connection:{redis_url}")

@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { FormEvent } from "react";
 import { Fragment, useEffect, useState } from "react";
 import { SignalPanel, StatusPill } from "@/app/components/ui";
@@ -18,13 +19,14 @@ import type {
   TimeReportResponse,
 } from "@/lib/api-types";
 import { clearFlowState, getFlowState, setFlowState } from "@/lib/flow-state";
+import { withBasePath } from "@/lib/paths";
 
 const statusLabels: Record<string, string> = {
   completed: "已完成",
   completed_degraded: "降级完成",
   failed: "失败",
   cancelled: "已取消",
-  expired: "已过期",
+  expired: "产物不可用",
 };
 
 const confidenceLabels: Record<string, string> = {
@@ -265,6 +267,7 @@ function KeywordRankList({
 }
 
 export default function ResultPage() {
+  const router = useRouter();
   const flowState = getFlowState();
   const [ready, setReady] = useState(false);
   const [result, setResult] = useState<JobResultResponse | null>(null);
@@ -295,7 +298,7 @@ export default function ResultPage() {
     }
 
     if (flowState.mode === "comparison") {
-      if (!flowState.accessVersion || !flowState.comparisonId) {
+      if (!flowState.comparisonId) {
         return;
       }
 
@@ -336,7 +339,7 @@ export default function ResultPage() {
       };
     }
 
-    if (!flowState.accessVersion || !flowState.jobId) {
+    if (!flowState.jobId) {
       return;
     }
 
@@ -384,10 +387,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [flowState.accessVersion, flowState.comparisonId, flowState.jobId, flowState.mode, ready]);
+  }, [flowState.comparisonId, flowState.jobId, flowState.mode, ready]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+    if (!ready || !flowState.jobId || !result || result.status === "expired") {
       return;
     }
 
@@ -427,10 +430,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, result]);
+  }, [ready, flowState.jobId, result]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || !result || result.status === "expired") {
+    if (!ready || !flowState.jobId || !result || result.status === "expired") {
       return;
     }
 
@@ -467,10 +470,10 @@ export default function ResultPage() {
     return () => {
       cancelled = true;
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, result, timeStart, timeEnd]);
+  }, [ready, flowState.jobId, result, timeStart, timeEnd]);
 
   useEffect(() => {
-    if (!ready || !flowState.accessVersion || !flowState.jobId || activeTimeReportCount === 0) {
+    if (!ready || !flowState.jobId || activeTimeReportCount === 0) {
       return;
     }
 
@@ -482,7 +485,7 @@ export default function ResultPage() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [ready, flowState.accessVersion, flowState.jobId, activeTimeReportCount]);
+  }, [ready, flowState.jobId, activeTimeReportCount]);
 
   async function loadTimeReports(jobId: string) {
     const payload = await apiRequest<TimeReportListResponse>(`/api/jobs/${jobId}/time-reports`);
@@ -558,15 +561,15 @@ export default function ResultPage() {
   }
 
   if (flowState.mode === "comparison") {
-    if (!flowState.accessVersion || !flowState.comparisonId) {
+    if (!flowState.comparisonId) {
       return (
         <main className="panel guard">
           <p className="eyebrow">第 5 步 / 共 5 步</p>
           <h2>需要先创建竞品对比任务</h2>
           <p className="helper">请先创建并完成竞品对比任务，再查看结果页。</p>
           <div className="actions">
-            <Link className="button" href="/vehicle">
-              重新开始
+            <Link className="button" href="/tasks/new">
+              前往新建任务
             </Link>
           </div>
         </main>
@@ -678,12 +681,12 @@ export default function ResultPage() {
           </p>
           <div className="actions" style={{ marginTop: 18 }}>
             {comparison ? (
-              <a className="button" href={comparison.zip_url}>
+              <a className="button" href={withBasePath(comparison.zip_url)}>
                 下载对比 ZIP
               </a>
             ) : null}
             {dimensionExcel ? (
-              <a className="button secondary" href={dimensionExcel.url}>
+              <a className="button secondary" href={withBasePath(dimensionExcel.url)}>
                 下载多维度 Excel
               </a>
             ) : null}
@@ -692,29 +695,26 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                window.location.href = "/passphrase";
+                router.push("/tasks/new");
               }}
             >
               重新开始
             </button>
           </div>
-          <p className="field-hint" style={{ marginTop: 12 }}>
-            页面渲染和复用判断所需的内部数据保留 {comparison?.retention_days ?? 3} 天。
-          </p>
         </div>
       </main>
     );
   }
 
-  if (!flowState.accessVersion || !flowState.jobId) {
+  if (!flowState.jobId) {
     return (
       <main className="panel guard">
         <p className="eyebrow">第 5 步 / 共 5 步</p>
         <h2>需要先创建任务</h2>
         <p className="helper">请先创建并完成任务，再查看结果页。</p>
         <div className="actions">
-          <Link className="button" href="/passphrase">
-            重新开始
+          <Link className="button" href="/tasks/new">
+            前往新建任务
           </Link>
         </div>
       </main>
@@ -740,11 +740,11 @@ export default function ResultPage() {
     return <main className="panel guard">正在加载结果...</main>;
   }
 
-  const resultBundleUrl = `/api/jobs/${result.job_id}/artifacts.zip`;
+  const resultBundleUrl = withBasePath(`/api/jobs/${result.job_id}/artifacts.zip`);
   const downloadableCount = result.artifacts.filter((artifact) =>
     artifact.path.toLowerCase().endsWith(".xlsx") || artifact.path.toLowerCase().endsWith(".png")
   ).length;
-  const vehicleName = flowState.vehicleQuery || result.template_report.title || "当前车型";
+  const vehicleName = flowState.vehicleQuery || result.model_name || result.template_report.title || "当前车型";
   const totalSamples = result.sample_summary.autohome_count + result.sample_summary.dcd_count;
   const aiHeadline = reportText(result.ai_report, ["headline", "title"], "智能一页纸");
   const executiveSummary = reportText(
@@ -761,16 +761,29 @@ export default function ResultPage() {
   const keywordRankings = result.wordcloud.keyword_rankings ?? { positive: [], negative: [], combined: [] };
   const maxDailyCommentCount = Math.max(...(commentSummary?.daily_counts.map((item) => item.count) ?? []), 0);
   const previewTotal = commentPreview?.total ?? 0;
+  const primaryConclusion =
+    result.template_report.highlights[0] || "本次分析结果已生成，可查看指标摘要和下载交付物。";
+  const sectionSummary = [
+    ...result.structured_sections.overview,
+    ...result.structured_sections.compare,
+    ...result.structured_sections.business,
+    ...result.structured_sections.opportunities,
+  ];
+  const dimensionSummaryItems = sectionSummary.slice(0, 3);
+  const topKeywords = [
+    ...keywordRankings.positive.slice(0, 2),
+    ...keywordRankings.negative.slice(0, 2),
+    ...keywordRankings.combined.slice(0, 2),
+  ].slice(0, 5);
+  const previewSamples = commentPreview?.items.slice(0, 2) ?? [];
 
   return (
-    <main className="result-page">
-      <section className={`result-cover ${result.degraded ? "result-cover-warning" : ""}`}>
-        <div className="result-cover-copy">
-          <p className="eyebrow">第 5 步 / 洞察交付台</p>
-          <h2>{vehicleName} 口碑洞察包</h2>
-          <p>
-            双平台采集已汇总为一份可下载的结果包，并生成可追问的 AI 业务解读。这里优先呈现结论、样本量和交付物。
-          </p>
+    <main className="result-dashboard-page">
+      <section className="result-dashboard-hero">
+        <div className="result-conclusion-card">
+          <p className="eyebrow">RESULT DASHBOARD</p>
+          <h1>{vehicleName || result.model_name}</h1>
+          <p>{primaryConclusion}</p>
           <div className="meta-row">
             <StatusPill tone={result.degraded ? "warning" : "success"}>
               {labelFor(result.status, statusLabels)}
@@ -784,36 +797,17 @@ export default function ResultPage() {
           </div>
         </div>
 
-        <div className="result-cover-board">
-          <div className="result-summary-grid" aria-label="任务结果摘要">
-            <div className="result-summary-card featured">
-              <span>样本总量</span>
-              <strong>{totalSamples}</strong>
-              <small>条车主口碑</small>
-            </div>
-            <div className="result-summary-card">
-              <span>汽车之家</span>
-              <strong>{result.sample_summary.autohome_count}</strong>
-              <small>对齐口碑</small>
-            </div>
-            <div className="result-summary-card">
-              <span>懂车帝</span>
-              <strong>{result.sample_summary.dcd_count}</strong>
-              <small>口碑样本</small>
-            </div>
-            <div className="result-summary-card">
-              <span>可下载文件</span>
-              <strong>{downloadableCount}</strong>
-              <small>Excel / 词云</small>
-            </div>
-          </div>
-          <div className="download-card compact-download-card">
+        <aside className="result-delivery-panel">
+          <div className="panel-head">
             <div>
-              <strong>交付物已打包</strong>
-              <p>结果文件和评论数据仅保留 {result.retention_days} 天，请及时下载 ZIP。</p>
+              <p className="eyebrow">DELIVERY</p>
+              <h2>交付物</h2>
             </div>
+            <StatusPill tone={downloadableCount ? "success" : "warning"}>{downloadableCount} 个文件</StatusPill>
+          </div>
+          <div className="download-list">
             {result.status === "expired" ? (
-              <p className="status-copy">服务器已自动清理该任务结果，请重新创建任务。</p>
+              <p className="status-copy">该任务的结果产物不可用，请重新创建任务。</p>
             ) : downloadableCount ? (
               <a className="download-link primary-download" href={resultBundleUrl}>
                 下载全部结果 ZIP
@@ -821,8 +815,106 @@ export default function ResultPage() {
             ) : (
               <p className="status-copy">暂无可打包下载的结果文件。</p>
             )}
+            {result.artifacts.filter(isBusinessDownloadArtifact).slice(0, 4).map((artifact) => (
+              <a className="download-link" href={withBasePath(artifact.url)} key={artifact.id}>
+                {artifactFileName(artifact)}
+              </a>
+            ))}
           </div>
+        </aside>
+      </section>
+
+      <section className="metric-grid" aria-label="结果指标摘要">
+        <div className="metric-tile">
+          <span className="metric-icon">总</span>
+          <span>累计评论</span>
+          <strong>{totalSamples}</strong>
+          <p>双平台可分析样本</p>
         </div>
+        <div className="metric-tile">
+          <span className="metric-icon">家</span>
+          <span>汽车之家</span>
+          <strong>{result.sample_summary.autohome_count}</strong>
+          <p>{result.collection_summary.autohome.pages_scanned} 页扫描</p>
+        </div>
+        <div className="metric-tile">
+          <span className="metric-icon">懂</span>
+          <span>懂车帝</span>
+          <strong>{result.sample_summary.dcd_count}</strong>
+          <p>{result.collection_summary.dongchedi.pages_scanned} 页扫描</p>
+        </div>
+        <div className="metric-tile">
+          <span className="metric-icon">态</span>
+          <span>报告状态</span>
+          <strong>{labelFor(result.status, statusLabels)}</strong>
+          <p>{result.degraded ? "降级链路" : "完整链路"}</p>
+        </div>
+      </section>
+
+      <section className="result-dashboard-grid" aria-label="摘要入口">
+        <article className="flat-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">MATRIX</p>
+              <h2>维度矩阵摘要</h2>
+            </div>
+            <StatusPill>{sectionSummary.length} 项</StatusPill>
+          </div>
+          <div className="dashboard-summary-list">
+            {dimensionSummaryItems.length ? (
+              dimensionSummaryItems.map((item, index) => {
+                const values = Object.values(item).filter(Boolean);
+                return <p key={`${values.join("-")}-${index}`}>{values.join(" / ")}</p>;
+              })
+            ) : (
+              <p className="status-copy">结构化摘要将在报告生成后展示。</p>
+            )}
+          </div>
+        </article>
+
+        <article className="flat-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">KEYWORDS</p>
+              <h2>关键词榜单</h2>
+            </div>
+            <StatusPill tone="accent">Top {topKeywords.length}</StatusPill>
+          </div>
+          <div className="keyword-chip-list">
+            {topKeywords.length ? (
+              topKeywords.map((item, index) => (
+                <span key={`${item.term}-${index}`}>
+                  {item.term}
+                  <strong>{item.count}</strong>
+                </span>
+              ))
+            ) : (
+              <p className="status-copy">暂无关键词词项。</p>
+            )}
+          </div>
+        </article>
+
+        <article className="flat-panel">
+          <div className="panel-head">
+            <div>
+              <p className="eyebrow">SAMPLES</p>
+              <h2>评论样本</h2>
+            </div>
+            <StatusPill>{previewTotal} 条</StatusPill>
+          </div>
+          <div className="dashboard-summary-list">
+            {previewSamples.length ? (
+              previewSamples.map((comment) => (
+                <p key={comment.comment_id}>
+                  <strong>{comment.platform}</strong>
+                  {comment.positive_text || comment.negative_text || comment.full_text || "暂无评论正文"}
+                </p>
+              ))
+            ) : (
+              <p className="status-copy">选择时间范围后可查看脱敏评论样本。</p>
+            )}
+          </div>
+        </article>
       </section>
 
       <section className="insight-layout">
@@ -893,10 +985,10 @@ export default function ResultPage() {
             {result.wordcloud.positive_image_url || result.wordcloud.negative_image_url ? (
               <div className="wordcloud-preview">
                 {result.wordcloud.positive_image_url ? (
-                  <img src={result.wordcloud.positive_image_url} alt="优点词云" />
+                  <img src={withBasePath(result.wordcloud.positive_image_url)} alt="优点词云" />
                 ) : null}
                 {result.wordcloud.negative_image_url ? (
-                  <img src={result.wordcloud.negative_image_url} alt="槽点词云" />
+                  <img src={withBasePath(result.wordcloud.negative_image_url)} alt="槽点词云" />
                 ) : null}
               </div>
             ) : (
@@ -1088,7 +1180,7 @@ export default function ResultPage() {
                       {report.error_message ? <p className="error">{report.error_message}</p> : null}
                       <div className="actions">
                         {report.status === "completed" ? (
-                          <a className="button secondary" href={report.zip_url}>
+                          <a className="button secondary" href={withBasePath(report.zip_url)}>
                             下载 ZIP
                           </a>
                         ) : null}
@@ -1097,7 +1189,7 @@ export default function ResultPage() {
                   );
                 })
               ) : (
-                <p className="status-copy">选择日期范围并生成后，这里会保留该车型的时间版一页纸。</p>
+                <p className="status-copy">选择日期范围并生成后，这里会展示该车型的时间版一页纸。</p>
               )}
             </div>
           </div>
@@ -1108,11 +1200,11 @@ export default function ResultPage() {
         <div>
           <p className="eyebrow">NEXT</p>
           <h3>继续追问，或重新发起下一辆车</h3>
-          <p>结果文件和评论数据仅保留 {result.retention_days} 天，下载后再做存档或继续加工。</p>
+          <p>可以下载结果包、继续追问，或清空当前流程后发起下一辆车。</p>
         </div>
         <div className="actions">
           {result.status === "expired" ? (
-            <Link className="button secondary" href="/vehicle">
+            <Link className="button secondary" href="/tasks/new">
               重新创建任务
             </Link>
           ) : downloadableCount ? (
@@ -1125,7 +1217,7 @@ export default function ResultPage() {
               type="button"
               onClick={() => {
                 clearFlowState();
-                window.location.href = "/passphrase";
+                router.push("/tasks/new");
               }}
             >
               重新开始

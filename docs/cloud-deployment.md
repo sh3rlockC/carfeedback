@@ -21,7 +21,7 @@
 - 公网 IPv4
 - 按量或包年带宽不低于 5 Mbps
 
-如果需要长期保留采集结果、日志、词云图片和 AI 报告，建议额外挂载数据盘，并定期备份 Docker volumes。
+如果需要长期保留采集结果、原始评论语料、日志、词云图片和 AI 报告，建议额外挂载数据盘，并定期备份 Docker volumes 与 `storage/corpus`。
 
 ## 域名与端口要求
 
@@ -195,9 +195,28 @@ BASE_URL=http://你的域名
 BACKEND_ORIGIN=http://api:8000
 HTTP_PORT=80
 ARTIFACT_ROOT=/srv/koubei/jobs
+CORPUS_ROOT=/srv/koubei/corpus
+CORPUS_HOST_PATH=./storage/corpus
 WORKSPACE_ROOT=/workspace
 WORKER_QUEUE_NAME=vehicle-koubei
+TEMPORAL_ADDRESS=temporal:7233
+TEMPORAL_NAMESPACE=default
+TEMPORAL_TASK_QUEUE=vehicle-koubei-temporal
+AUTOHOME_COLLECTOR_SERVICE_URL=http://autohome-collector:8100
+DCD_COLLECTOR_SERVICE_URL=http://dongchedi-collector:8100
+JOB_ARTIFACT_CLEANUP_ENABLED=false
+COMPARISON_MODEL_CONCURRENCY=2
+OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2
+OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2
+OPENCLAW_AGENT_LEASE_SECONDS=2400
+OPENCLAW_AGENT_POOL_WAIT_SECONDS=1800
 ```
+
+上线前需要在 OpenClaw 中从现有 `autohome`、`dongchedi` agent 复制出 `autohome-1`、`autohome-2`、`dongchedi-1`、`dongchedi-2`，并同步 auth、模型和 skill 配置。
+
+Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内置 `temporal` 服务；生产环境如果接入外部 Temporal 集群，只需要把 `TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE` 和 `TEMPORAL_TASK_QUEUE` 指向目标集群，不需要改业务代码。
+
+新任务中心依赖 `autohome-collector` 和 `dongchedi-collector` 两个 collector service。它们是采集执行入口；生产启用新任务前，必须确认 API 已真正启动 Temporal workflow，且 Temporal activities 已通过 `AUTOHOME_COLLECTOR_SERVICE_URL`、`DCD_COLLECTOR_SERVICE_URL` 调用 collector HTTP API，不应直接在 API 容器里跑采集。
 
 ## 首次启动步骤
 
@@ -220,13 +239,19 @@ nano .env
 6. 构建并启动：
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build --scale temporal-worker=2
 ```
 
 7. 查看容器状态：
 
 ```bash
 docker compose ps
+```
+
+`temporal-worker` 应显示 2 个副本；如果只看到 1 个 `temporal-worker`，使用：
+
+```bash
+docker compose up -d --scale temporal-worker=2
 ```
 
 8. 查看启动日志：
@@ -280,10 +305,60 @@ docker compose exec postgres sh -lc 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRE
 docker compose logs --tail=200 worker
 ```
 
+检查 Temporal 和 collector：
+
+```bash
+docker compose ps temporal temporal-worker autohome-collector dongchedi-collector
+docker compose logs --tail=100 temporal-worker autohome-collector dongchedi-collector
+```
+
 查看全部服务最近日志：
 
 ```bash
 docker compose logs --tail=200
+```
+
+## Sandbox 验证与生产切换
+
+生产切换前必须先用 sandbox 环境跑通过模拟负载。当前仓库内的 fake integration 测试覆盖 workflow 状态机、共享 run、拥挤调度和降级后升级；正式切换前还需要用实际 collector service 路径再跑一次。至少覆盖：
+
+- 1 个单车型增量任务。
+- 1 个 2 车型以上对比任务。
+- 4 用户模拟负载：单车型 A、A/B/C 对比、另一个单车型 A、D/E/F/G/H 对比。
+- 相同车型 A 的平台采集 run 被共享。
+- 拥挤模式下每个任务同时只占用一条采集车道。
+- 注入失败时先发布降级结果，重试成功后升级为完整结果。
+
+Compose sandbox 示例：
+
+```bash
+docker compose -p vehicle-koubei-sandbox --env-file .sandbox/vehicle-koubei/.env up -d --build --scale temporal-worker=2
+curl -fsS http://localhost:18080/healthz
+docker compose -p vehicle-koubei-sandbox --env-file .sandbox/vehicle-koubei/.env ps
+```
+
+生产 cutover 只把新的查询入口切到任务中心；旧 `jobs` 路由和历史结果页面先保留，只是不再作为新任务入口。确认新任务中心稳定后，再单独规划旧接口清理。
+
+## 历史 raw Excel backfill
+
+服务器上如果还保留少量旧的汽车之家或懂车帝 raw Excel，可以一次性导入长期语料库。缺失的平台不要伪造数据，脚本会跳过并在 summary JSON 里标记 `skipped`。
+
+```bash
+docker compose exec worker sh -lc 'python scripts/backfill_raw_excels.py \
+  --database-url "$DATABASE_URL" \
+  --corpus-root "$CORPUS_ROOT" \
+  --model-name "风云T11" \
+  --query "风云T11" \
+  --autohome-series-id 8089 \
+  --autohome-xlsx /path/autohome.xlsx \
+  --dcd-series-id 25398 \
+  --dcd-xlsx /path/dcd.xlsx'
+```
+
+导入后检查对应车型目录：
+
+```bash
+docker compose exec worker sh -lc 'find "$CORPUS_ROOT" -maxdepth 3 -type f | sort | head -100'
 ```
 
 ## 常见问题
@@ -395,8 +470,10 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - `TAVILY_API_KEY` 已配置。
 - LLM provider、API key、base URL 和模型名已配置并验证可用。
 - 已确认是否需要真实汽车之家采集；如需要，已提供 `agent-browser` CLI 或替代采集运行时。
-- `docker compose up -d --build` 启动成功。
+- OpenClaw 已准备 `autohome-1/2`、`dongchedi-1/2` 四个采集 agent。
+- `docker compose up -d --build --scale temporal-worker=2` 启动成功。
 - `docker compose ps` 中核心服务为 running 或 healthy。
+- 两个 temporal-worker 副本均在运行。
 - `curl http://你的域名/healthz` 返回 `ok`。
 - Web 页面可打开，并能通过周口令门禁。
-- 已制定 Postgres volume、Redis volume 和 job artifacts 的备份策略。
+- 已制定 Postgres volume、Redis volume、job artifacts 和 corpus 目录的备份策略。

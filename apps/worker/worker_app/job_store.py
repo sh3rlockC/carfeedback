@@ -44,9 +44,11 @@ def _db_bool(value: Any) -> bool:
 @dataclass(frozen=True)
 class WorkerJobInputs:
     job_id: str
+    query: str
     model_name: str
     autohome_series_id: str
     dongchedi_series_id: str
+    collection_mode: str = "incremental"
 
 
 @dataclass(frozen=True)
@@ -86,7 +88,7 @@ class DatabaseJobStore:
     def fetch_job_inputs(self, job_id: str) -> WorkerJobInputs:
         query = text(
             """
-            SELECT j.job_id, j.model_name, c.platform, c.series_id
+            SELECT j.job_id, j.query, j.model_name, j.collection_mode, c.platform, c.series_id
             FROM jobs j
             JOIN job_candidates c ON c.job_id = j.job_id
             WHERE j.job_id = :job_id AND c.selected = :selected
@@ -103,10 +105,23 @@ class DatabaseJobStore:
 
         return WorkerJobInputs(
             job_id=job_id,
+            query=str(rows[0]["query"]),
             model_name=rows[0]["model_name"],
             autohome_series_id=str(series_by_platform["autohome"]),
             dongchedi_series_id=str(series_by_platform["dongchedi"]),
+            collection_mode=str(rows[0]["collection_mode"] or "incremental"),
         )
+
+    def update_collection_summary(self, job_id: str, summary: dict[str, Any]) -> None:
+        statement = text(
+            """
+            UPDATE jobs
+            SET collection_summary = :collection_summary
+            WHERE job_id = :job_id
+            """
+        ).bindparams(bindparam("collection_summary", type_=SAJSON))
+        with self.engine.begin() as conn:
+            conn.execute(statement, {"job_id": job_id, "collection_summary": summary})
 
     def fetch_time_report_inputs(self, report_id: str) -> TimeReportInputs:
         query = text(
