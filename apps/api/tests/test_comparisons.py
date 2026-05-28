@@ -212,7 +212,7 @@ def seed_completed_job(
     return {"final_report": final_report, "analysis_facts": analysis_facts, "llm_metrics": llm_metrics}
 
 
-def test_comparison_options_include_only_reusable_jobs_with_complete_json(tmp_path: Path) -> None:
+def test_comparison_options_include_reusable_jobs_with_complete_json_regardless_of_age(tmp_path: Path) -> None:
     client, _queue = make_client(tmp_path)
     authorize(client)
     seed_confirmed_vehicle("测试车A", "1001", "2001")
@@ -235,7 +235,7 @@ def test_comparison_options_include_only_reusable_jobs_with_complete_json(tmp_pa
     vehicle_a = payload["vehicles"][0]
     assert vehicle_a["query"] == "测试车A"
     assert vehicle_a["resolve"]["autohome"]["best"]["series_id"] == "1001"
-    assert [item["job_id"] for item in vehicle_a["reuse_options"]] == ["job_reusable"]
+    assert [item["job_id"] for item in vehicle_a["reuse_options"]] == ["job_reusable", "job_expired"]
     assert payload["vehicles"][1]["reuse_options"] == []
 
 

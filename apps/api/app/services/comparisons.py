@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from math import ceil
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,14 +72,11 @@ def is_reusable_job(db: Session, settings: Settings, job_id: str) -> bool:
     finished = _finished_or_created(job)
     if finished is None:
         return False
-    if finished < datetime.now(UTC) - timedelta(days=settings.job_artifact_retention_days):
-        return False
     return reusable_job_artifacts(db, job_id) is not None
 
 
 def find_reusable_jobs(db: Session, settings: Settings, query: str, limit: int = 5) -> list[dict[str, Any]]:
     key = query_key(query)
-    cutoff = datetime.now(UTC) - timedelta(days=settings.job_artifact_retention_days)
     candidates = (
         db.query(Job)
         .filter(Job.status.in_(tuple(REUSABLE_JOB_STATUSES)))
@@ -92,7 +89,7 @@ def find_reusable_jobs(db: Session, settings: Settings, query: str, limit: int =
         if key not in {query_key(job.query), query_key(job.model_name)}:
             continue
         finished = _finished_or_created(job)
-        if finished is None or finished < cutoff:
+        if finished is None:
             continue
         if reusable_job_artifacts(db, job.job_id) is None:
             continue

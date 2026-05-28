@@ -26,7 +26,7 @@ const statusLabels: Record<string, string> = {
   completed_degraded: "降级完成",
   failed: "失败",
   cancelled: "已取消",
-  expired: "已过期",
+  expired: "产物不可用",
 };
 
 const confidenceLabels: Record<string, string> = {
@@ -807,7 +807,7 @@ export default function ResultPage() {
           </div>
           <div className="download-list">
             {result.status === "expired" ? (
-              <p className="status-copy">该任务结果已过期，请重新创建任务。</p>
+              <p className="status-copy">该任务的结果产物不可用，请重新创建任务。</p>
             ) : downloadableCount ? (
               <a className="download-link primary-download" href={resultBundleUrl}>
                 下载全部结果 ZIP
