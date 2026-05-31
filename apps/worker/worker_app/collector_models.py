@@ -20,6 +20,7 @@ CollectorRunState = Literal[
 class CollectorRunRequest(BaseModel):
     run_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
+    agent_id: str | None = Field(default=None, min_length=1)
     platform: CollectorPlatform
     query_key: str = Field(min_length=1)
     model_name: str = Field(min_length=1)

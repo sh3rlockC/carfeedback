@@ -81,6 +81,30 @@ def test_get_run_returns_status(monkeypatch, tmp_path: Path):
     assert body["resume_cursor"] == {"page": 3}
 
 
+def test_post_runs_preserves_assigned_agent_id(monkeypatch, tmp_path: Path):
+    output_path = tmp_path / "run-agent.xlsx"
+    observed_agent_ids = []
+
+    def fake_collector(request):
+        observed_agent_ids.append(request.agent_id)
+        output_path.write_text("raw", encoding="utf-8")
+        return {"output_path": str(output_path)}
+
+    monkeypatch.setattr("collector_service.main.run_collector", fake_collector)
+    monkeypatch.setenv("COLLECTOR_SERVICE_INLINE", "true")
+    client = make_client(monkeypatch)
+    request = run_request("run-agent")
+    request["agent_id"] = "openclaw-agent-7"
+
+    response = client.post("/runs", json=request)
+
+    assert response.status_code == 200
+    status = client.get("/runs/run-agent")
+    assert status.status_code == 200
+    assert observed_agent_ids == ["openclaw-agent-7"]
+    assert _run_requests["run-agent"].agent_id == "openclaw-agent-7"
+
+
 def test_get_run_refreshes_progress_from_progress_file(monkeypatch, tmp_path: Path):
     monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path))
     client = make_client(monkeypatch)
