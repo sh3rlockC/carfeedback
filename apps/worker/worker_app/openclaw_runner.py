@@ -616,6 +616,7 @@ def run_collector_via_openclaw(
     *,
     settings: OpenClawSettings,
     gateway_client: OpenClawGatewayClientProtocol | None = None,
+    assigned_agent_id: str | None = None,
 ) -> StageResult:
     if command.name not in {"collecting_autohome", "collecting_dcd"}:
         return run_stage_command(command, job_paths, progress_sink)
@@ -624,7 +625,7 @@ def run_collector_via_openclaw(
     stderr_log = job_paths.logs / f"{command.name}.openclaw.stderr.log"
     client = gateway_client or OpenClawGatewayClient()
     session_id = f"vehicle-koubei-{job_paths.root.name}-{command.name}"
-    agent_id = settings.agent_id_for_stage(command.name)
+    agent_id = assigned_agent_id or settings.agent_id_for_stage(command.name)
     try:
         response = client.call_agent(
             _build_collector_message(command, settings),
@@ -670,6 +671,7 @@ def run_autohome_via_openclaw(
     *,
     settings: OpenClawSettings,
     gateway_client: OpenClawGatewayClientProtocol | None = None,
+    assigned_agent_id: str | None = None,
 ) -> StageResult:
     return run_collector_via_openclaw(
         command,
@@ -677,6 +679,7 @@ def run_autohome_via_openclaw(
         progress_sink,
         settings=settings,
         gateway_client=gateway_client,
+        assigned_agent_id=assigned_agent_id,
     )
 
 
@@ -735,6 +738,7 @@ def build_stage_runner(
     *,
     settings: OpenClawSettings | None = None,
     direct_runner: StageRunnerCallable = run_stage_command,
+    assigned_agent_id: str | None = None,
 ) -> StageRunnerCallable:
     settings = settings or OpenClawSettings.from_env()
     enabled_stages = set(settings.stages)
@@ -744,7 +748,13 @@ def build_stage_runner(
         # and keeps local execution for every stage not explicitly routed here.
         if settings.enabled and command.name in enabled_stages:
             if command.name in {"collecting_autohome", "collecting_dcd"}:
-                return run_collector_via_openclaw(command, job_paths, progress_sink, settings=settings)
+                return run_collector_via_openclaw(
+                    command,
+                    job_paths,
+                    progress_sink,
+                    settings=settings,
+                    assigned_agent_id=assigned_agent_id,
+                )
         return direct_runner(command, job_paths, progress_sink)
 
     return runner

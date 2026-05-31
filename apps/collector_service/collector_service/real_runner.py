@@ -70,7 +70,7 @@ def run_real_collector(request: CollectorRunRequest) -> dict[str, Any]:
         progress_path=Path(stage_command.progress_file) if stage_command.progress_file else job_paths.progress / "progress.json",
         stages=[stage_name],
     )
-    stage_result = build_stage_runner()(stage_command, job_paths, progress_sink)
+    stage_result = build_stage_runner(assigned_agent_id=request.agent_id)(stage_command, job_paths, progress_sink)
     _platform, output_path, _headers = _collector_output_for_stage(job_paths, request.model_name, stage_name)
     return {
         "output_path": str(output_path),
