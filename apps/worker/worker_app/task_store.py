@@ -1225,6 +1225,40 @@ class TaskStore:
 
     def start_collection_run(self, run_id: str, *, agent_id: str | None = None) -> CollectionRunRecord:
         now = utc_now_iso()
+        try:
+            with self.engine.begin() as conn:
+                row = self._get_collection_run_row_for_update(conn, run_id)
+                if row is None:
+                    raise RuntimeError(f"collection run not found: {run_id}")
+                if str(row["status"]) in {"queued", "waiting_agent", "retry_wait"}:
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE collection_runs
+                            SET status = 'running',
+                                agent_id = COALESCE(:agent_id, agent_id),
+                                failure_category = NULL,
+                                started_at = COALESCE(started_at, :started_at),
+                                finished_at = NULL,
+                                updated_at = :updated_at
+                            WHERE run_id = :run_id
+                            """
+                        ),
+                        {
+                            "run_id": run_id,
+                            "agent_id": agent_id,
+                            "started_at": now,
+                            "updated_at": now,
+                        },
+                    )
+                return self._load_collection_run(conn, run_id)
+        except IntegrityError as exc:
+            if self._is_running_agent_integrity_error(exc):
+                return self._mark_collection_run_waiting_after_agent_conflict(run_id)
+            raise
+
+    def _mark_collection_run_waiting_after_agent_conflict(self, run_id: str) -> CollectionRunRecord:
+        now = utc_now_iso()
         with self.engine.begin() as conn:
             row = self._get_collection_run_row_for_update(conn, run_id)
             if row is None:
@@ -1234,21 +1268,13 @@ class TaskStore:
                     text(
                         """
                         UPDATE collection_runs
-                        SET status = 'running',
-                            agent_id = COALESCE(:agent_id, agent_id),
-                            failure_category = NULL,
-                            started_at = COALESCE(started_at, :started_at),
-                            finished_at = NULL,
+                        SET status = 'waiting_agent',
+                            agent_id = NULL,
                             updated_at = :updated_at
                         WHERE run_id = :run_id
                         """
                     ),
-                    {
-                        "run_id": run_id,
-                        "agent_id": agent_id,
-                        "started_at": now,
-                        "updated_at": now,
-                    },
+                    {"run_id": run_id, "updated_at": now},
                 )
             return self._load_collection_run(conn, run_id)
 

@@ -76,6 +76,9 @@ def create_schema(db_path: Path) -> None:
             CREATE UNIQUE INDEX uq_collection_run_active_identity
                 ON collection_runs (platform, query_key, series_id)
                 WHERE status IN ('queued', 'waiting_agent', 'running', 'retry_wait');
+            CREATE UNIQUE INDEX uq_collection_run_running_agent
+                ON collection_runs (agent_id)
+                WHERE status = 'running' AND agent_id IS NOT NULL;
             CREATE TABLE collection_run_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT NOT NULL,
@@ -450,6 +453,38 @@ def test_create_task_raises_for_non_sqlite_store_without_connecting() -> None:
         assert str(exc) == "TaskStore.create_task is only available for SQLite test stores"
     else:
         raise AssertionError("expected non-SQLite create_task to raise")
+
+
+def test_start_collection_run_returns_waiting_agent_when_fallback_agent_busy(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_task(db_path, "task_2")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    first = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车 A",
+        model_name="测试车 A",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    second = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车 B",
+        model_name="测试车 B",
+        series_id="8090",
+        mode="incremental",
+        task_id="task_2",
+    )
+
+    first_started = store.start_collection_run(first.run_id, agent_id="collector-service:autohome")
+    second_started = store.start_collection_run(second.run_id, agent_id="collector-service:autohome")
+
+    assert first_started.status == "running"
+    assert first_started.agent_id == "collector-service:autohome"
+    assert second_started.status == "waiting_agent"
+    assert second_started.agent_id is None
 
 
 def test_mark_collection_run_waiting_agent_keeps_run_dispatchable(tmp_path: Path) -> None:
