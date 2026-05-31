@@ -39,9 +39,10 @@ def resolve_workspace_path(workspace_root: Path, value: str) -> Path:
 
 def discover_manifest_path(source_path: Path | None = None, workspace_root: Path | None = None) -> Path:
     resolved_workspace_root = workspace_root or get_workspace_root()
-    workspace_candidate = (resolved_workspace_root / "carFeedbackv101" / "config" / "dependencies.yaml").resolve()
-    if workspace_candidate.exists():
-        return workspace_candidate
+    for project_dir in ("", "carFeedback", "carFeedbackv101"):
+        workspace_candidate = (resolved_workspace_root / project_dir / "config" / "dependencies.yaml").resolve()
+        if workspace_candidate.exists():
+            return workspace_candidate
 
     file_path = (source_path or Path(__file__)).resolve()
     for parent in file_path.parents:
@@ -49,7 +50,7 @@ def discover_manifest_path(source_path: Path | None = None, workspace_root: Path
         if manifest_candidate.exists():
             return manifest_candidate
 
-    return workspace_candidate
+    return (resolved_workspace_root / "carFeedback" / "config" / "dependencies.yaml").resolve()
 
 
 def load_dependency_map(manifest_path: Path) -> dict[str, dict[str, Any]]:

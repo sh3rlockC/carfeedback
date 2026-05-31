@@ -34,3 +34,16 @@ def test_discover_manifest_path_uses_workspace_root(tmp_path: Path) -> None:
     )
 
     assert discovered == manifest_path.resolve()
+
+
+def test_discover_manifest_path_uses_current_workspace_project(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "carFeedback" / "config" / "dependencies.yaml"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text("dependencies: []\n", encoding="utf-8")
+
+    discovered = discover_manifest_path(
+        Path("/app/worker_app/dependencies.py"),
+        workspace_root=tmp_path,
+    )
+
+    assert discovered == manifest_path.resolve()
