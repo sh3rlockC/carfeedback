@@ -95,6 +95,13 @@ class CollectionRun(Base):
             postgresql_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
             sqlite_where=text("status IN ('queued', 'waiting_agent', 'running', 'retry_wait')"),
         ),
+        Index(
+            "uq_collection_run_running_agent",
+            "agent_id",
+            unique=True,
+            postgresql_where=text("status = 'running' AND agent_id IS NOT NULL"),
+            sqlite_where=text("status = 'running' AND agent_id IS NOT NULL"),
+        ),
     )
 
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True, default=new_collection_run_id)

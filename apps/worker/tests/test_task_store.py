@@ -346,6 +346,53 @@ def test_create_or_join_collection_run_retries_insert_conflict_and_joins_winner(
     assert run.shared_by_task_ids == ["task_1", "task_2"]
 
 
+def test_running_agent_ids_by_platform_tracks_real_openclaw_agents(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'task-store.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    run = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+    )
+
+    claimed = store.claim_collection_run_with_agent(run.run_id, "autohome-2")
+
+    assert claimed.status == "running"
+    assert claimed.agent_id == "autohome-2"
+    assert store.running_agent_ids_by_platform() == {"autohome": {"autohome-2"}}
+
+
+def test_mark_collection_run_waiting_agent_keeps_run_dispatchable(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'task-store.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    run = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="dongchedi",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="25398",
+        mode="incremental",
+    )
+
+    waiting = store.mark_collection_run_waiting_agent(run.run_id)
+
+    assert waiting.status == "waiting_agent"
+    assert waiting.agent_id is None
+
+
 def test_attach_task_to_run_is_idempotent_preserves_shared_tasks_and_records_collector_events(tmp_path: Path) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)

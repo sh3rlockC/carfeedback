@@ -139,6 +139,7 @@ class CollectionRunRecord:
     status: str
     mode: str
     shared_by_task_ids: list[str]
+    agent_id: str | None = None
     failure_category: str | None = None
     output_path: str | None = None
 
@@ -381,8 +382,233 @@ class TaskStore:
                 :task_id, :position, :query, :model_name, :autohome_series_id, :dcd_series_id,
                 'queued', :result_snapshot_json, :created_at, :updated_at
             )
-            """
-        )
+                """
+            )
+
+    def create_task(
+        self,
+        *,
+        task_type: str,
+        display_name: str,
+        vehicles: list[dict[str, Any]],
+        collection_mode: str = "incremental",
+    ) -> TaskRecord:
+        self._ensure_sqlite_schema()
+        now = utc_now_iso()
+        task_id = new_task_id()
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO tasks (
+                        task_id, task_type, display_name, status, current_stage,
+                        degraded, upgraded_to_full, view_token_hash, manage_token_hash,
+                        manage_token_expires_at, collection_mode, created_at, updated_at
+                    )
+                    VALUES (
+                        :task_id, :task_type, :display_name, 'queued', 'queued',
+                        :degraded, :upgraded_to_full, :view_token_hash, :manage_token_hash,
+                        :manage_token_expires_at, :collection_mode, :created_at, :updated_at
+                    )
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "display_name": display_name,
+                    "degraded": False,
+                    "upgraded_to_full": False,
+                    "view_token_hash": f"task-view:{task_id}",
+                    "manage_token_hash": f"task-manage:{task_id}",
+                    "manage_token_expires_at": "2030-01-01T00:00:00+00:00",
+                    "collection_mode": collection_mode,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+            insert_vehicle_statement = self._insert_task_vehicle_statement().bindparams(
+                bindparam("result_snapshot_json", type_=SAJSON)
+            )
+            if "enabled_platforms" in self._table_columns("task_vehicles"):
+                insert_vehicle_statement = insert_vehicle_statement.bindparams(bindparam("enabled_platforms", type_=SAJSON))
+            for index, vehicle in enumerate(vehicles, start=1):
+                enabled_platforms = [
+                    str(platform)
+                    for platform in vehicle.get("enabled_platforms", ["autohome", "dongchedi"])
+                    if str(platform) in {"autohome", "dongchedi"}
+                ] or ["autohome", "dongchedi"]
+                conn.execute(
+                    insert_vehicle_statement,
+                    {
+                        "task_id": task_id,
+                        "position": index,
+                        "query": str(vehicle.get("query") or vehicle.get("model_name") or ""),
+                        "model_name": str(vehicle.get("model_name") or vehicle.get("query") or ""),
+                        "autohome_series_id": _candidate_series_id(vehicle, "autohome") or None,
+                        "dcd_series_id": _candidate_series_id(vehicle, "dongchedi") or None,
+                        "enabled_platforms": enabled_platforms,
+                        "result_snapshot_json": {},
+                        "created_at": now,
+                        "updated_at": now,
+                    },
+                )
+        return self.load_task(task_id)
+
+    def _ensure_sqlite_schema(self) -> None:
+        if self.engine.dialect.name != "sqlite" or _table_exists(self.engine, "tasks"):
+            return
+        with self.engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS tasks (
+                        task_id TEXT PRIMARY KEY,
+                        task_type TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        current_stage TEXT NOT NULL,
+                        degraded INTEGER NOT NULL DEFAULT 0,
+                        upgraded_to_full INTEGER NOT NULL DEFAULT 0,
+                        view_token_hash TEXT NOT NULL,
+                        manage_token_hash TEXT NOT NULL,
+                        manage_token_expires_at TEXT NOT NULL,
+                        view_token_revoked_at TEXT,
+                        manage_token_revoked_at TEXT,
+                        eta_seconds INTEGER,
+                        eta_reason TEXT,
+                        collection_mode TEXT NOT NULL DEFAULT 'incremental',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_vehicles (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id TEXT NOT NULL,
+                        position INTEGER NOT NULL,
+                        query TEXT NOT NULL,
+                        model_name TEXT NOT NULL,
+                        autohome_series_id TEXT,
+                        dcd_series_id TEXT,
+                        enabled_platforms JSON NOT NULL DEFAULT '["autohome", "dongchedi"]',
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        result_snapshot_json JSON NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS collection_runs (
+                        run_id TEXT PRIMARY KEY,
+                        platform TEXT NOT NULL,
+                        query_key TEXT NOT NULL,
+                        model_name TEXT NOT NULL,
+                        series_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        mode TEXT NOT NULL,
+                        shared_by_task_ids JSON NOT NULL DEFAULT '[]',
+                        agent_id TEXT,
+                        failure_category TEXT,
+                        retry_count INTEGER NOT NULL DEFAULT 0,
+                        resume_cursor JSON NOT NULL DEFAULT '{}',
+                        output_path TEXT,
+                        started_at TEXT,
+                        finished_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_collection_run_active_identity
+                    ON collection_runs (platform, query_key, series_id)
+                    WHERE status IN ('queued', 'waiting_agent', 'running', 'retry_wait')
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_collection_run_running_agent
+                    ON collection_runs (agent_id)
+                    WHERE status = 'running' AND agent_id IS NOT NULL
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS collection_run_tasks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        task_id TEXT NOT NULL,
+                        task_vehicle_id INTEGER,
+                        created_at TEXT NOT NULL,
+                        UNIQUE (run_id, task_id),
+                        FOREIGN KEY (run_id) REFERENCES collection_runs(run_id) ON DELETE CASCADE,
+                        FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE,
+                        FOREIGN KEY (task_vehicle_id) REFERENCES task_vehicles(id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload_json JSON NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_artifacts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        task_id TEXT NOT NULL,
+                        artifact_type TEXT NOT NULL,
+                        path TEXT NOT NULL,
+                        downloadable INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS collector_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        run_id TEXT NOT NULL,
+                        platform TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        payload_json JSON NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (run_id) REFERENCES collection_runs(run_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+            )
 
     def mark_task_stage(self, task_id: str, stage: str, status: str) -> None:
         now = utc_now_iso()
@@ -921,6 +1147,73 @@ class TaskStore:
     def load_collection_runs(self, run_ids: list[str]) -> list[CollectionRunRecord]:
         return [self.load_collection_run(run_id) for run_id in run_ids]
 
+    def running_agent_ids_by_platform(self) -> dict[str, set[str]]:
+        with self.engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT platform, agent_id
+                    FROM collection_runs
+                    WHERE status = 'running'
+                      AND agent_id IS NOT NULL
+                    """
+                )
+            ).mappings().all()
+        busy: dict[str, set[str]] = {}
+        for row in rows:
+            busy.setdefault(str(row["platform"]), set()).add(str(row["agent_id"]))
+        return busy
+
+    def mark_collection_run_waiting_agent(self, run_id: str) -> CollectionRunRecord:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            row = self._get_collection_run_row_for_update(conn, run_id)
+            if row is None:
+                raise RuntimeError(f"collection run not found: {run_id}")
+            if str(row["status"]) in {"queued", "retry_wait"}:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE collection_runs
+                        SET status = 'waiting_agent',
+                            agent_id = NULL,
+                            updated_at = :updated_at
+                        WHERE run_id = :run_id
+                        """
+                    ),
+                    {"run_id": run_id, "updated_at": now},
+                )
+            return self._load_collection_run(conn, run_id)
+
+    def claim_collection_run_with_agent(self, run_id: str, agent_id: str) -> CollectionRunRecord:
+        now = utc_now_iso()
+        with self.engine.begin() as conn:
+            row = self._get_collection_run_row_for_update(conn, run_id)
+            if row is None:
+                raise RuntimeError(f"collection run not found: {run_id}")
+            if str(row["status"]) in {"queued", "waiting_agent", "retry_wait"}:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE collection_runs
+                        SET status = 'running',
+                            agent_id = :agent_id,
+                            failure_category = NULL,
+                            started_at = COALESCE(started_at, :started_at),
+                            finished_at = NULL,
+                            updated_at = :updated_at
+                        WHERE run_id = :run_id
+                        """
+                    ),
+                    {
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                        "started_at": now,
+                        "updated_at": now,
+                    },
+                )
+            return self._load_collection_run(conn, run_id)
+
     def start_collection_run(self, run_id: str, *, agent_id: str | None = None) -> CollectionRunRecord:
         now = utc_now_iso()
         with self.engine.begin() as conn:
@@ -1111,7 +1404,7 @@ class TaskStore:
             text(
                 """
                 SELECT run_id, platform, query_key, model_name, series_id, status, mode,
-                       shared_by_task_ids, failure_category, output_path
+                       shared_by_task_ids, agent_id, failure_category, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id
                 """
@@ -1125,7 +1418,7 @@ class TaskStore:
             text(
                 f"""
                 SELECT run_id, platform, query_key, model_name, series_id, status, mode,
-                       shared_by_task_ids, failure_category, output_path
+                       shared_by_task_ids, agent_id, failure_category, output_path
                 FROM collection_runs
                 WHERE run_id = :run_id{lock_clause}
                 """
@@ -1146,6 +1439,7 @@ class TaskStore:
             status=str(row["status"]),
             mode=str(row["mode"]),
             shared_by_task_ids=self._shared_task_ids(row),
+            agent_id=str(row["agent_id"]) if row["agent_id"] else None,
             failure_category=str(row["failure_category"]) if row["failure_category"] else None,
             output_path=str(row["output_path"]) if row["output_path"] else None,
         )
