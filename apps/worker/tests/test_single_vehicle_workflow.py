@@ -835,20 +835,20 @@ def test_wait_for_collection_runs_dispatches_queued_runs_before_returning(tmp_pa
     )
     dispatched: list[str] = []
 
-    def fake_dispatch(self, queued_run, *, task_id: str | None = None) -> None:
+    def fake_submit(self, started_run, *, owner_task_id: str | None = None) -> None:
         asyncio.run(asyncio.sleep(0))
-        dispatched.append(queued_run.run_id)
+        dispatched.append(started_run.run_id)
         connection = sqlite3.connect(db_path)
         try:
             connection.execute(
                 "UPDATE collection_runs SET status = 'succeeded', output_path = ? WHERE run_id = ?",
-                (str(tmp_path / "run-output.xlsx"), queued_run.run_id),
+                (str(tmp_path / "run-output.xlsx"), started_run.run_id),
             )
             connection.commit()
         finally:
             connection.close()
 
-    monkeypatch.setattr(TaskActivities, "_dispatch_collection_run", fake_dispatch, raising=False)
+    monkeypatch.setattr(TaskActivities, "_submit_collection_run", fake_submit, raising=False)
     monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "0")
     activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
 
@@ -867,6 +867,50 @@ def test_wait_for_collection_runs_dispatches_queued_runs_before_returning(tmp_pa
     assert result["successful_platforms"] == ["autohome"]
     assert result["pending_platforms"] == []
     assert task_row == ("running", "running")
+
+
+def test_wait_for_collection_runs_timeout_fails_pending_runs_and_releases_agent(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    claimed = store.claim_collection_run_with_agent(run.run_id, "autohome-1")
+    assert claimed is not None
+
+    async def no_dispatch(self, task_id, run_ids) -> None:
+        return None
+
+    async def no_poll(self, task_id, run_ids) -> None:
+        return None
+
+    monkeypatch.setattr(TaskActivities, "_dispatch_pending_collection_runs", no_dispatch)
+    monkeypatch.setattr(TaskActivities, "_poll_running_collection_runs", no_poll)
+    monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "0")
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(activity.wait_for_collection_runs({"task_id": "task_1", "run_ids": [run.run_id]}))
+
+    reloaded = store.load_collection_run(run.run_id)
+    assert result["pending_platforms"] == []
+    assert result["failed_platforms"] == [
+        {
+            "platform": "autohome",
+            "run_id": run.run_id,
+            "failure_category": "collector_pending_timeout",
+            "retryable": True,
+        }
+    ]
+    assert reloaded.status == "failed"
+    assert reloaded.failure_category == "collector_pending_timeout"
+    assert store.running_agent_ids_by_platform() == {}
 
 
 def test_wait_for_collection_runs_submits_and_polls_collector_service(tmp_path: Path, monkeypatch) -> None:

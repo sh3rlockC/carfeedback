@@ -14,6 +14,7 @@ AUTO_RETRY_FAILURES = {
     "page_load_error",
     "empty_data",
     "collector_missing_result",
+    "collector_pending_timeout",
     "rate_limited",
 }
 STOP_RETRY_FAILURES = {

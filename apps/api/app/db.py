@@ -77,6 +77,9 @@ def _sync_existing_schema(engine) -> None:
                     )
 
         if "collection_runs" in table_names:
+            collection_run_columns = {column["name"] for column in inspector.get_columns("collection_runs")}
+            if "agent_id" not in collection_run_columns:
+                conn.execute(text("ALTER TABLE collection_runs ADD COLUMN agent_id VARCHAR(128)"))
             collection_run_indexes = {index["name"] for index in inspector.get_indexes("collection_runs")}
             if "uq_collection_run_running_agent" not in collection_run_indexes:
                 duplicate_running_agent = conn.execute(

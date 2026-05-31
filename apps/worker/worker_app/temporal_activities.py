@@ -480,6 +480,24 @@ class TaskActivities:
             return "network_error"
         return category
 
+    def _fail_pending_collection_runs(self, run_ids: list[str], *, task_id: str | None = None) -> None:
+        store = self._store()
+        for run in store.load_collection_runs(run_ids):
+            if run.status not in ACTIVE_STATUSES:
+                continue
+            failed = store.fail_collection_run(run.run_id, failure_category="collector_pending_timeout")
+            store.record_collector_event(
+                failed.run_id,
+                "collector_pending_timeout",
+                {
+                    "task_id": task_id,
+                    "platform": failed.platform,
+                    "agent_id": run.agent_id,
+                    "failure_category": "collector_pending_timeout",
+                    "message": "Collector run did not reach a terminal status before wait timeout.",
+                },
+            )
+
     def _task_job_paths(self, task_id: str):
         from worker_app.artifacts import ensure_job_dirs
 
@@ -634,32 +652,40 @@ class TaskActivities:
             store.mark_collection_run_waiting_agent(run.run_id)
         return claimed
 
-    def _dispatch_collection_run(self, queued_run: CollectionRunRecord, *, task_id: str | None = None) -> None:
-        if not self.database_url:
-            return
-        store = self._store()
+    def _claim_collection_run_for_dispatch(
+        self,
+        store: TaskStore,
+        queued_run: CollectionRunRecord,
+        *,
+        task_id: str | None = None,
+    ) -> tuple[CollectionRunRecord, str | None] | None:
         owner_task_id = task_id or (queued_run.shared_by_task_ids[0] if queued_run.shared_by_task_ids else None)
         started = self._claim_run_agent(store, queued_run)
         if started is None:
-            store.record_collector_event(
-                queued_run.run_id,
-                "collector_waiting_agent",
-                {
-                    "task_id": owner_task_id,
-                    "platform": queued_run.platform,
-                    "message": "No platform OpenClaw agent is currently available.",
-                },
-            )
-            return
+            if queued_run.status != "waiting_agent":
+                store.record_collector_event(
+                    queued_run.run_id,
+                    "collector_waiting_agent",
+                    {
+                        "task_id": owner_task_id,
+                        "platform": queued_run.platform,
+                        "message": "No platform OpenClaw agent is currently available.",
+                    },
+                )
+            return None
         if started.status != "running":
-            return
-        stage_name = COLLECTOR_STAGE_NAMES.get(queued_run.platform, f"collecting_{queued_run.platform}")
+            return None
+        return started, owner_task_id
+
+    def _submit_collection_run(self, started: CollectionRunRecord, *, owner_task_id: str | None = None) -> None:
+        store = self._store()
+        stage_name = COLLECTOR_STAGE_NAMES.get(started.platform, f"collecting_{started.platform}")
         if owner_task_id:
             store.mark_task_stage(owner_task_id, stage_name, "running")
 
         try:
             if owner_task_id is None:
-                raise RuntimeError(f"collection run has no owner task: {queued_run.run_id}")
+                raise RuntimeError(f"collection run has no owner task: {started.run_id}")
             request = self._collector_request(started, owner_task_id)
             status = self._collector_client(started.platform).submit_run(request)
             store.record_collector_event(
@@ -691,16 +717,37 @@ class TaskActivities:
                 },
             )
 
+    def _dispatch_collection_run(self, queued_run: CollectionRunRecord, *, task_id: str | None = None) -> None:
+        if not self.database_url:
+            return
+        store = self._store()
+        claimed = self._claim_collection_run_for_dispatch(store, queued_run, task_id=task_id)
+        if claimed is None:
+            return
+        started, owner_task_id = claimed
+        self._submit_collection_run(started, owner_task_id=owner_task_id)
+
     async def _dispatch_pending_collection_runs(self, task_id: str | None, run_ids: list[str]) -> None:
         if not self.database_url:
             return
+        store = self._store()
         pending = [
             run
-            for run in self._store().load_collection_runs(run_ids)
+            for run in store.load_collection_runs(run_ids)
             if run.status in {"queued", "waiting_agent", "retry_wait"}
         ]
+        claimed_runs: list[tuple[CollectionRunRecord, str | None]] = []
         for run in pending:
-            await asyncio.to_thread(self._dispatch_collection_run, run, task_id=task_id)
+            claimed = await asyncio.to_thread(self._claim_collection_run_for_dispatch, store, run, task_id=task_id)
+            if claimed is not None:
+                claimed_runs.append(claimed)
+        if claimed_runs:
+            await asyncio.gather(
+                *(
+                    asyncio.to_thread(self._submit_collection_run, started, owner_task_id=owner_task_id)
+                    for started, owner_task_id in claimed_runs
+                )
+            )
 
     def _poll_collection_run(self, run: CollectionRunRecord, *, task_id: str | None = None) -> None:
         owner_task_id = task_id or (run.shared_by_task_ids[0] if run.shared_by_task_ids else None)
@@ -1584,7 +1631,8 @@ class TaskActivities:
                 return result
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:
-                return result
+                self._fail_pending_collection_runs(run_ids, task_id=task_id)
+                return self._collection_run_results(run_ids)
             await asyncio.sleep(min(poll_seconds, remaining_seconds))
 
     def _collection_run_results(self, run_ids: list[str]) -> dict[str, Any]:

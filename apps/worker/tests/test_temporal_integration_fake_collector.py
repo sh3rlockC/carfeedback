@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -442,6 +443,63 @@ def test_dispatch_collection_runs_assigns_distinct_v3_pool_agents(tmp_path: Path
 
     asyncio.run(activities._dispatch_pending_collection_runs(task_id, [run_1.run_id, run_2.run_id]))
 
-    assert [request.agent_id for request in captured_requests] == ["autohome-1", "autohome-2"]
+    assert {request.run_id: request.agent_id for request in captured_requests} == {
+        run_1.run_id: "autohome-1",
+        run_2.run_id: "autohome-2",
+    }
     stored_runs = store.load_collection_runs([run_1.run_id, run_2.run_id])
     assert [run.agent_id for run in stored_runs] == ["autohome-1", "autohome-2"]
+
+
+def test_dispatch_collection_runs_submits_claimed_runs_concurrently(tmp_path: Path, monkeypatch) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'dispatch.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    autohome = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车-A",
+        model_name="测试车A",
+        series_id="8089",
+        mode="incremental",
+    )
+    dongchedi = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="dongchedi",
+        query_key="测试车-B",
+        model_name="测试车B",
+        series_id="25398",
+        mode="incremental",
+    )
+    dongchedi_submitted = threading.Event()
+    autohome_observed_concurrent_submit: list[bool] = []
+
+    class CapturingCollectorClient:
+        def __init__(self, platform: str) -> None:
+            self.platform = platform
+
+        def submit_run(self, request):
+            if self.platform == "autohome":
+                autohome_observed_concurrent_submit.append(dongchedi_submitted.wait(timeout=0.2))
+            else:
+                dongchedi_submitted.set()
+            return CollectorRunStatus(
+                run_id=request.run_id,
+                platform=request.platform,
+                status="running",
+                progress_current=0,
+                progress_total=1,
+            )
+
+    activities = TaskActivities(database_url)
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_IDS", "autohome-1")
+    monkeypatch.setenv("OPENCLAW_DCD_AGENT_IDS", "dongchedi-1")
+    monkeypatch.setattr(activities, "_collector_client", lambda platform: CapturingCollectorClient(platform))
+
+    asyncio.run(activities._dispatch_pending_collection_runs(task_id, [autohome.run_id, dongchedi.run_id]))
+
+    assert autohome_observed_concurrent_submit == [True]
