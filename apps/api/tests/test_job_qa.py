@@ -44,8 +44,9 @@ def make_client(tmp_path: Path) -> TestClient:
     return TestClient(app)
 
 
-def seed_result_job(job_id: str, *, qa_chunks_path: Path | None = None) -> None:
+def seed_result_job(job_id: str, *, qa_chunks_path: Path | None = None, build_qa_chunks: bool = False) -> None:
     fixture_root = Path("/Users/xyc/Documents/codexwork/data/26.4.7/风云X3 PLUS")
+    summary_path = fixture_root / "风云X3 PLUS_双平台口碑摘要.xlsx"
     session = get_session_local()()
     try:
         job = Job(
@@ -63,7 +64,7 @@ def seed_result_job(job_id: str, *, qa_chunks_path: Path | None = None) -> None:
             JobArtifact(
                 job_id=job_id,
                 artifact_type="excel",
-                artifact_path=str(fixture_root / "风云X3 PLUS_双平台口碑摘要.xlsx"),
+                artifact_path=str(summary_path),
                 source_stage="summarizing",
             )
         ]
@@ -78,6 +79,14 @@ def seed_result_job(job_id: str, *, qa_chunks_path: Path | None = None) -> None:
             )
         session.add_all(artifacts)
         session.commit()
+        if build_qa_chunks:
+            qa_service.ensure_qa_chunks(
+                session,
+                job_id=job_id,
+                summary_path=summary_path,
+                model_name="风云X3 PLUS",
+                hermes_chunks_path=qa_chunks_path,
+            )
     finally:
         session.close()
 
@@ -116,7 +125,7 @@ def test_job_qa_uses_hermes_generated_chunks_when_available(tmp_path: Path) -> N
 
 def test_result_endpoint_marks_qa_available_after_chunk_build(tmp_path: Path) -> None:
     client = make_client(tmp_path)
-    seed_result_job("job_qa_ready")
+    seed_result_job("job_qa_ready", build_qa_chunks=True)
     verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
     assert verify.status_code == 200
 

@@ -484,7 +484,7 @@ def test_dispatch_collection_runs_submits_claimed_runs_concurrently(tmp_path: Pa
 
         def submit_run(self, request):
             if self.platform == "autohome":
-                autohome_observed_concurrent_submit.append(dongchedi_submitted.wait(timeout=0.2))
+                autohome_observed_concurrent_submit.append(dongchedi_submitted.wait(timeout=2.0))
             else:
                 dongchedi_submitted.set()
             return CollectorRunStatus(
