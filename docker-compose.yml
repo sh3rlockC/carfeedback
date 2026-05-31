@@ -62,6 +62,8 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com}
       LLM_MODEL_REPORT: ${LLM_MODEL_REPORT:-deepseek-v4-pro}
       LLM_MODEL_QA: ${LLM_MODEL_QA:-deepseek-v4-pro}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
     volumes:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ..:/workspace:ro
@@ -109,6 +111,10 @@ services:
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-vehicle-koubei-temporal}
       AUTOHOME_COLLECTOR_SERVICE_URL: ${AUTOHOME_COLLECTOR_SERVICE_URL:-http://autohome-collector:8100}
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
+      OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
       CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
       TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: ${TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED:-false}
@@ -148,6 +154,10 @@ services:
       TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-vehicle-koubei-temporal}
       AUTOHOME_COLLECTOR_SERVICE_URL: ${AUTOHOME_COLLECTOR_SERVICE_URL:-http://autohome-collector:8100}
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
+      OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
       CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
       TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: ${TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED:-false}
@@ -200,12 +210,30 @@ services:
       CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_TIMEOUT_SECONDS: ${OPENCLAW_TIMEOUT_SECONDS:-1800}
+      OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS: ${OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS:-5}
+      OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_AUTOHOME_COLLECTOR_SKILL: ${OPENCLAW_AUTOHOME_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_DCD_COLLECTOR_SKILL: ${OPENCLAW_DCD_COLLECTOR_SKILL:-sh3rlockC/dcd-koubei-collector}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${OPENCLAW_ARTIFACT_ROOT_HOST:-}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/device.json}
     volumes:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ${CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
       - ..:/workspace:ro
+      - ${OPENCLAW_STATE_HOST_PATH:-./ops/openclaw-state-placeholder}:/openclaw-state:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    secrets:
+      - openclaw_gateway_token
     depends_on:
       postgres:
         condition: service_healthy
@@ -227,12 +255,30 @@ services:
       CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
+      OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_TIMEOUT_SECONDS: ${OPENCLAW_TIMEOUT_SECONDS:-1800}
+      OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS: ${OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS:-5}
+      OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_AUTOHOME_COLLECTOR_SKILL: ${OPENCLAW_AUTOHOME_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
+      OPENCLAW_DCD_COLLECTOR_SKILL: ${OPENCLAW_DCD_COLLECTOR_SKILL:-sh3rlockC/dcd-koubei-collector}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${OPENCLAW_ARTIFACT_ROOT_HOST:-}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/device.json}
     volumes:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ${CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
       - ..:/workspace:ro
+      - ${OPENCLAW_STATE_HOST_PATH:-./ops/openclaw-state-placeholder}:/openclaw-state:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    secrets:
+      - openclaw_gateway_token
     depends_on:
       postgres:
         condition: service_healthy
@@ -295,3 +341,7 @@ services:
 volumes:
   postgres_data:
   redis_data:
+
+secrets:
+  openclaw_gateway_token:
+    file: ${OPENCLAW_GATEWAY_TOKEN_FILE_HOST:-./ops/secrets/openclaw_gateway_token.placeholder}
