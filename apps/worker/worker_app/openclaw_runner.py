@@ -391,6 +391,7 @@ def _read_related_openclaw_failure(
     *,
     settings: OpenClawSettings,
     markers: list[str],
+    not_before_created_at: int | None = None,
 ) -> dict[str, str] | None:
     if not settings.task_db_path or not markers:
         return None
@@ -401,6 +402,10 @@ def _read_related_openclaw_failure(
 
     where_clause = " OR ".join("task LIKE ?" for _ in markers)
     params = [f"%{marker}%" for marker in markers]
+    created_after_clause = ""
+    if not_before_created_at is not None:
+        created_after_clause = "AND created_at >= ?"
+        params.append(not_before_created_at)
     try:
         with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
             db.row_factory = sqlite3.Row
@@ -410,6 +415,7 @@ def _read_related_openclaw_failure(
                 FROM task_runs
                 WHERE status IN ('failed', 'timed_out', 'cancelled', 'lost')
                   AND ({where_clause})
+                  {created_after_clause}
                 ORDER BY ended_at DESC NULLS LAST, last_event_at DESC NULLS LAST
                 LIMIT 1
                 """,
@@ -432,6 +438,7 @@ def _read_related_openclaw_status_counts(
     *,
     settings: OpenClawSettings,
     markers: list[str],
+    not_before_created_at: int | None = None,
 ) -> dict[str, int] | None:
     if not settings.task_db_path or not markers:
         return None
@@ -442,6 +449,10 @@ def _read_related_openclaw_status_counts(
 
     where_clause = " OR ".join("task LIKE ?" for _ in markers)
     params = [f"%{marker}%" for marker in markers]
+    created_after_clause = ""
+    if not_before_created_at is not None:
+        created_after_clause = "AND created_at >= ?"
+        params.append(not_before_created_at)
     try:
         with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
             db.row_factory = sqlite3.Row
@@ -449,7 +460,8 @@ def _read_related_openclaw_status_counts(
                 f"""
                 SELECT status, COUNT(*) AS count
                 FROM task_runs
-                WHERE {where_clause}
+                WHERE ({where_clause})
+                  {created_after_clause}
                 GROUP BY status
                 """,
                 params,
@@ -460,6 +472,18 @@ def _read_related_openclaw_status_counts(
     if not rows:
         return None
     return {str(row["status"] or ""): int(row["count"] or 0) for row in rows}
+
+
+def _response_accepted_at(response: dict[str, Any] | None) -> int | None:
+    if not response:
+        return None
+    for key in ("acceptedAt", "accepted_at", "createdAt", "created_at"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
 
 
 class OpenClawGatewayClient:
@@ -687,6 +711,7 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
     task_id = str(response.get("taskId") or response.get("task_id") or "") if response else ""
     run_id = str(response.get("runId") or response.get("run_id") or response.get("sourceId") or "") if response else ""
     related_markers = _openclaw_task_markers(command, settings)
+    related_not_before_created_at = _response_accepted_at(response)
     deadline = time.monotonic() + max(settings.timeout_seconds, 1)
     while True:
         missing = [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
@@ -702,7 +727,11 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
                 message=error_detail,
             )
 
-        related_failure = _read_related_openclaw_failure(settings=settings, markers=related_markers)
+        related_failure = _read_related_openclaw_failure(
+            settings=settings,
+            markers=related_markers,
+            not_before_created_at=related_not_before_created_at,
+        )
         if related_failure:
             error_detail = related_failure["error"] or f"Related OpenClaw task ended with status={related_failure['status']}"
             raise StageExecutionError(
@@ -711,7 +740,11 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
                 message=error_detail,
             )
 
-        related_status_counts = _read_related_openclaw_status_counts(settings=settings, markers=related_markers)
+        related_status_counts = _read_related_openclaw_status_counts(
+            settings=settings,
+            markers=related_markers,
+            not_before_created_at=related_not_before_created_at,
+        )
         active_statuses = {"accepted", "created", "pending", "queued", "running", "scheduled"}
         if related_status_counts and not (set(related_status_counts) & active_statuses):
             raise StageExecutionError(

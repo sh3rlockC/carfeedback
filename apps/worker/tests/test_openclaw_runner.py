@@ -680,6 +680,75 @@ def test_run_autohome_via_openclaw_fails_when_related_child_task_fails(tmp_path:
     assert "child command failed" in exc_info.value.message
 
 
+def test_run_autohome_via_openclaw_ignores_stale_related_child_failure(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    task_db = tmp_path / "runs.sqlite"
+    with sqlite3.connect(task_db) as db:
+        db.execute(
+            """
+            CREATE TABLE task_runs (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                task TEXT,
+                created_at INTEGER,
+                ended_at INTEGER,
+                last_event_at INTEGER
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "old-child-task",
+                "old-child-run",
+                "failed",
+                "old rate limit",
+                f"执行命令：python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py --output {stage.expected_artifacts[0]}",
+                500,
+                600,
+                600,
+            ),
+        )
+
+    class AcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            def write_artifacts() -> None:
+                time.sleep(0.05)
+                for artifact in stage.expected_artifacts:
+                    Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                    Path(artifact).write_text("ok", encoding="utf-8")
+
+            threading.Thread(target=write_artifacts, daemon=True).start()
+            return {"status": "accepted", "taskId": "new-parent-task", "runId": "new-parent-run", "acceptedAt": 1000}
+
+    result = run_autohome_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(
+            enabled=True,
+            timeout_seconds=2,
+            artifact_poll_interval_seconds=0.01,
+            task_db_path=str(task_db),
+        ),
+        gateway_client=AcceptedGatewayClient(),
+    )
+
+    assert result.status == "success"
+
+
 def test_run_autohome_via_openclaw_fails_when_related_child_succeeds_without_artifacts(tmp_path: Path) -> None:
     stage = make_autohome_stage(tmp_path)
     job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
