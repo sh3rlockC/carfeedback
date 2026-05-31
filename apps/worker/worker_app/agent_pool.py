@@ -17,7 +17,7 @@ def split_agent_ids(value: str | None) -> list[str]:
 
 
 def platform_agent_ids_from_env(environ: Mapping[str, str] | None = None) -> dict[str, list[str]]:
-    env = environ or os.environ
+    env = os.environ if environ is None else environ
     configured: dict[str, list[str]] = {}
     for platform, env_name in PLATFORM_AGENT_ENV.items():
         agent_ids = split_agent_ids(env.get(env_name))

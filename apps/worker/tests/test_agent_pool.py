@@ -33,6 +33,12 @@ def test_platform_agent_ids_from_env_reads_v3_pools() -> None:
     }
 
 
+def test_platform_agent_ids_from_env_honors_empty_mapping(monkeypatch) -> None:
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_IDS", "autohome-1")
+
+    assert platform_agent_ids_from_env({}) == {}
+
+
 def test_choose_available_agent_skips_busy_agents() -> None:
     configured = {"autohome": ["autohome-1", "autohome-2", "autohome-3"]}
     busy = {"autohome": {"autohome-1", "autohome-3"}}
