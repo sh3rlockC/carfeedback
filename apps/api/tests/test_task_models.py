@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import sys
 
-from sqlalchemy import inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +49,33 @@ def test_postgres_engine_uses_pre_ping() -> None:
     kwargs = app_db._engine_kwargs("postgresql+psycopg://user:pass@localhost:5432/test")
 
     assert kwargs["pool_pre_ping"] is True
+
+
+def test_existing_collection_runs_table_gets_running_agent_index(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    legacy_engine = create_engine(settings.database_url, future=True, **app_db._engine_kwargs(settings.database_url))
+    try:
+        with legacy_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE collection_runs (
+                        run_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        agent_id TEXT
+                    )
+                    """
+                )
+            )
+    finally:
+        legacy_engine.dispose()
+
+    init_db(settings)
+
+    inspector = inspect(get_engine(settings))
+    index_names = {index["name"] for index in inspector.get_indexes("collection_runs")}
+    assert "uq_collection_run_running_agent" in index_names
 
 
 def test_task_model_relationships_persist(tmp_path: Path) -> None:

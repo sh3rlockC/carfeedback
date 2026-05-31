@@ -76,6 +76,17 @@ def _sync_existing_schema(engine) -> None:
                         )
                     )
 
+        if "collection_runs" in table_names:
+            collection_run_indexes = {index["name"] for index in inspector.get_indexes("collection_runs")}
+            if "uq_collection_run_running_agent" not in collection_run_indexes:
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_collection_run_running_agent "
+                        "ON collection_runs (agent_id) "
+                        "WHERE status = 'running' AND agent_id IS NOT NULL"
+                    )
+                )
+
 
 def get_session_local():
     global _SESSION_LOCAL

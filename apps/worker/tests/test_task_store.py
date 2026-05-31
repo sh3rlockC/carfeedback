@@ -370,6 +370,88 @@ def test_running_agent_ids_by_platform_tracks_real_openclaw_agents(tmp_path: Pat
     assert store.running_agent_ids_by_platform() == {"autohome": {"autohome-2"}}
 
 
+def test_claim_collection_run_with_agent_returns_none_when_already_running(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'task-store.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    run = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+    )
+    claimed = store.claim_collection_run_with_agent(run.run_id, "autohome-1")
+
+    repeated = store.claim_collection_run_with_agent(run.run_id, "autohome-2")
+
+    assert claimed is not None
+    assert repeated is None
+    loaded = store.load_collection_run(run.run_id)
+    assert loaded.status == "running"
+    assert loaded.agent_id == "autohome-1"
+
+
+def test_claim_collection_run_with_agent_returns_none_for_busy_agent(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'task-store.db'}"
+    store = TaskStore(database_url)
+    first_task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    second_task_id = store.create_task(
+        task_type="single",
+        display_name="测试车2",
+        vehicles=[{"query": "测试车2", "model_name": "测试车2"}],
+    ).task_id
+    first_run = store.create_or_join_collection_run(
+        task_id=first_task_id,
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+    )
+    second_run = store.create_or_join_collection_run(
+        task_id=second_task_id,
+        platform="dongchedi",
+        query_key="测试车2",
+        model_name="测试车2",
+        series_id="25398",
+        mode="incremental",
+    )
+    first_claim = store.claim_collection_run_with_agent(first_run.run_id, "openclaw-1")
+
+    second_claim = store.claim_collection_run_with_agent(second_run.run_id, "openclaw-1")
+
+    assert first_claim is not None
+    assert second_claim is None
+    loaded = store.load_collection_run(second_run.run_id)
+    assert loaded.status == "queued"
+    assert loaded.agent_id is None
+
+
+def test_create_task_raises_for_non_sqlite_store_without_connecting() -> None:
+    store = TaskStore("postgresql+psycopg://user:pass@localhost:5432/test")
+
+    try:
+        store.create_task(
+            task_type="single",
+            display_name="测试车",
+            vehicles=[{"query": "测试车", "model_name": "测试车"}],
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "TaskStore.create_task is only available for SQLite test stores"
+    else:
+        raise AssertionError("expected non-SQLite create_task to raise")
+
+
 def test_mark_collection_run_waiting_agent_keeps_run_dispatchable(tmp_path: Path) -> None:
     database_url = f"sqlite+pysqlite:///{tmp_path / 'task-store.db'}"
     store = TaskStore(database_url)

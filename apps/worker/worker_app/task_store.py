@@ -393,6 +393,8 @@ class TaskStore:
         vehicles: list[dict[str, Any]],
         collection_mode: str = "incremental",
     ) -> TaskRecord:
+        if self.engine.dialect.name != "sqlite":
+            raise RuntimeError("TaskStore.create_task is only available for SQLite test stores")
         self._ensure_sqlite_schema()
         now = utc_now_iso()
         task_id = new_task_id()
@@ -1185,14 +1187,14 @@ class TaskStore:
                 )
             return self._load_collection_run(conn, run_id)
 
-    def claim_collection_run_with_agent(self, run_id: str, agent_id: str) -> CollectionRunRecord:
+    def claim_collection_run_with_agent(self, run_id: str, agent_id: str) -> CollectionRunRecord | None:
         now = utc_now_iso()
-        with self.engine.begin() as conn:
-            row = self._get_collection_run_row_for_update(conn, run_id)
-            if row is None:
-                raise RuntimeError(f"collection run not found: {run_id}")
-            if str(row["status"]) in {"queued", "waiting_agent", "retry_wait"}:
-                conn.execute(
+        try:
+            with self.engine.begin() as conn:
+                row = self._get_collection_run_row_for_update(conn, run_id)
+                if row is None:
+                    raise RuntimeError(f"collection run not found: {run_id}")
+                result = conn.execute(
                     text(
                         """
                         UPDATE collection_runs
@@ -1203,6 +1205,7 @@ class TaskStore:
                             finished_at = NULL,
                             updated_at = :updated_at
                         WHERE run_id = :run_id
+                          AND status IN ('queued', 'waiting_agent', 'retry_wait')
                         """
                     ),
                     {
@@ -1212,7 +1215,13 @@ class TaskStore:
                         "updated_at": now,
                     },
                 )
-            return self._load_collection_run(conn, run_id)
+                if result.rowcount != 1:
+                    return None
+                return self._load_collection_run(conn, run_id)
+        except IntegrityError as exc:
+            if self._is_running_agent_integrity_error(exc):
+                return None
+            raise
 
     def start_collection_run(self, run_id: str, *, agent_id: str | None = None) -> CollectionRunRecord:
         now = utc_now_iso()
@@ -1507,4 +1516,12 @@ class TaskStore:
             or "collection_run_tasks_task_id" in message
             or "unique constraint failed: collection_run_tasks.run_id, collection_run_tasks.task_id" in message
             or "duplicate key value violates unique constraint" in message
+        )
+
+    def _is_running_agent_integrity_error(self, exc: IntegrityError) -> bool:
+        message = f"{exc}".lower()
+        return (
+            "uq_collection_run_running_agent" in message
+            or "collection_runs.agent_id" in message
+            or "unique constraint failed: collection_runs.agent_id" in message
         )
