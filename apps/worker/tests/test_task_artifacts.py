@@ -20,7 +20,7 @@ for root in (WORKER_ROOT, API_ROOT):
         sys.path.insert(0, str(root))
 
 from app.models import Base, Task, TaskArtifact
-from worker_app.corpus import export_vehicle_merged_raw_workbook, upsert_platform_rows
+from worker_app.corpus import export_vehicle_merged_raw_workbook, load_platform_state, upsert_platform_rows
 from worker_app.task_artifacts import (
     TaskArtifactRecord,
     create_comparison_downloads,
@@ -135,6 +135,61 @@ def test_export_vehicle_merged_raw_workbook_writes_two_platform_sheets(tmp_path:
     assert workbook["懂车帝"]["A4"].value == "车主E"
 
 
+def test_corpus_history_is_shared_by_series_id_instead_of_query_text(tmp_path: Path) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'corpus.db'}"
+    upsert_platform_rows(
+        database_url=database_url,
+        query="风云T11",
+        model_name="风云T11",
+        platform="autohome",
+        series_id="8089",
+        job_id="job_1",
+        rows=[
+            {
+                "用户名": "车主A",
+                "发表日期": "2026-05-01",
+                "评价详情": "同一条评论",
+                "来源链接": "https://k.autohome.com.cn/detail/view_01abc.html?pvareaid=1#fragment",
+            }
+        ],
+    )
+    upsert_platform_rows(
+        database_url=database_url,
+        query="风云 T11",
+        model_name="风云 T11",
+        platform="autohome",
+        series_id="8089",
+        job_id="job_2",
+        rows=[
+            {
+                "用户名": "车主A",
+                "发表日期": "2026-05-01",
+                "评价详情": "同一条评论更新",
+                "来源链接": "https://k.autohome.com.cn/detail/view_01abc.html",
+            }
+        ],
+    )
+
+    state = load_platform_state(database_url, query="任意别名", platform="autohome", series_id="8089")
+    assert state.existing_count == 1
+    assert state.known_links == {"https://k.autohome.com.cn/detail/view_01abc.html"}
+
+    output = tmp_path / "merged.xlsx"
+    counts = export_vehicle_merged_raw_workbook(
+        database_url=database_url,
+        query="另一个查询词",
+        autohome_series_id="8089",
+        dongchedi_series_id="25398",
+        output_path=output,
+        platforms=["autohome"],
+    )
+
+    workbook = load_workbook(output)
+    assert counts == {"autohome": 1}
+    assert workbook.sheetnames == ["汽车之家"]
+    assert workbook["汽车之家"]["O2"].value == "同一条评论更新"
+
+
 def test_single_task_downloads_create_zip_and_downloadable_artifact_rows(tmp_path: Path) -> None:
     merged_raw = tmp_path / "测试车_merged_raw.xlsx"
     business_report = tmp_path / "business" / "summary.xlsx"
@@ -168,6 +223,54 @@ def test_single_task_downloads_create_zip_and_downloadable_artifact_rows(tmp_pat
         ]
     finally:
         session.close()
+
+
+def test_single_task_downloads_can_write_structured_bundle_and_one_pager_artifact(tmp_path: Path) -> None:
+    merged_raw = tmp_path / "测试车_merged_raw.xlsx"
+    autohome_raw = tmp_path / "raw" / "ZJ测试车原始口碑.xlsx"
+    autohome_validation = tmp_path / "raw" / "ZJ测试车原始口碑.validation.json"
+    dcd_raw = tmp_path / "raw" / "DCD口碑_测试车.xlsx"
+    dcd_failed_pages = tmp_path / "raw" / "DCD口碑_测试车.failed-pages.json"
+    final_report = tmp_path / "ai" / "final_report.json"
+    one_pager = tmp_path / "downloads" / "测试车_one_pager.xlsx"
+    summary = tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx"
+    for workbook_path in (merged_raw, autohome_raw, dcd_raw, one_pager, summary):
+        _write_workbook(workbook_path)
+    autohome_validation.write_text('{"ok": true}', encoding="utf-8")
+    dcd_failed_pages.write_text("[]", encoding="utf-8")
+    final_report.parent.mkdir(parents=True, exist_ok=True)
+    final_report.write_text('{"headline": "测试车"}', encoding="utf-8")
+
+    records = create_single_task_downloads(
+        task_id="task_1",
+        output_dir=tmp_path / "downloads",
+        merged_raw_path=merged_raw,
+        business_files=[summary, final_report],
+        one_pager_path=one_pager,
+        bundle_entries=[
+            (autohome_raw, "autohome/raw.xlsx"),
+            (autohome_validation, "autohome/validation.json"),
+            (dcd_raw, "dongchedi/raw.xlsx"),
+            (dcd_failed_pages, "dongchedi/failed-pages.json"),
+            (final_report, "report/final_report.json"),
+            (summary, "report/summary.xlsx"),
+            (one_pager, "report/one_pager.xlsx"),
+            (merged_raw, "merged_raw.xlsx"),
+        ],
+    )
+
+    assert [record.artifact_type for record in records] == ["business_zip", "merged_raw_excel", "one_pager_excel"]
+    with zipfile.ZipFile(records[0].path) as archive:
+        assert sorted(archive.namelist()) == [
+            "autohome/raw.xlsx",
+            "autohome/validation.json",
+            "dongchedi/failed-pages.json",
+            "dongchedi/raw.xlsx",
+            "merged_raw.xlsx",
+            "report/final_report.json",
+            "report/one_pager.xlsx",
+            "report/summary.xlsx",
+        ]
 
 
 def test_comparison_downloads_zip_raw_workbooks_and_business_files_as_downloadable_rows(tmp_path: Path) -> None:

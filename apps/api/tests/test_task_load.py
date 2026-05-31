@@ -128,3 +128,18 @@ def test_project_task_load_treats_unconfigured_running_agent_as_busy(tmp_path: P
         )
 
     assert payload["platforms"]["autohome"] == {"available": 1, "total": 2}
+
+
+def test_project_task_load_returns_default_platform_slots_without_agent_config(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    init_db(settings)
+    session_local = get_session_local()
+
+    with session_local() as session:
+        payload = project_task_load(session, platform_agent_ids={})
+
+    assert payload["platforms"] == {
+        "autohome": {"available": 1, "total": 1},
+        "dongchedi": {"available": 1, "total": 1},
+    }

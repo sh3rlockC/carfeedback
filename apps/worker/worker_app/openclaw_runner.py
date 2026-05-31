@@ -645,8 +645,7 @@ def run_collector_via_openclaw(
     _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
     _write_stage_log(stderr_log, "")
 
-    if response.get("status") == "accepted":
-        _wait_for_expected_artifacts(command, settings, response=response)
+    _wait_for_expected_artifacts(command, settings, response=response)
 
     artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
     output_metadata.update(

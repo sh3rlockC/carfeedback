@@ -1,5 +1,5 @@
 {
-  "name": "vehicle-koubei-web-demo-web",
+  "name": "car-feedback-v101-web",
   "private": true,
   "version": "0.0.0",
   "scripts": {
@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "lucide-react": "^1.17.0",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

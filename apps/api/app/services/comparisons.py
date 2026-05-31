@@ -13,6 +13,7 @@ from app.models import ComparisonArtifact, ComparisonJob, ComparisonVehicle, Job
 from app.schemas import (
     ArtifactItem,
     ComparisonArtifactItem,
+    ComparisonExcludedVehicleResponse,
     ComparisonProgressResponse,
     ComparisonResultResponse,
     ComparisonVehicleProgress,
@@ -26,6 +27,12 @@ COMPARISON_TERMINAL_STATUSES = {"completed", "completed_degraded", "failed", "ca
 REQUIRED_REUSE_SUFFIXES = ("final_report.json", "analysis_facts.jsonl")
 OPTION_LOOKBACK_LIMIT = 100
 COMPARISON_SUMMARY_SECONDS = 600
+AVAILABLE_VEHICLE_STATUSES = {"completed", "reused"}
+EXCLUDED_VEHICLE_STATUSES = {"excluded", "failed"}
+PLATFORM_LABELS = {
+    "autohome": "autohome",
+    "dongchedi": "dongchedi",
+}
 
 
 def _as_aware_utc(value: datetime | None) -> datetime | None:
@@ -137,6 +144,78 @@ def artifact_item(artifact: JobArtifact, job_id: str) -> ArtifactItem:
     )
 
 
+def _missing_platforms_from_candidates(candidates: dict[str, Any] | None) -> list[str]:
+    selected = candidates if isinstance(candidates, dict) else {}
+    missing: list[str] = []
+    for platform in PLATFORM_LABELS:
+        candidate = selected.get(platform)
+        series_id = candidate.get("series_id") if isinstance(candidate, dict) else None
+        if not str(series_id or "").strip():
+            missing.append(platform)
+    return missing
+
+
+def _excluded_from_vehicle(vehicle: ComparisonVehicle) -> ComparisonExcludedVehicleResponse:
+    return ComparisonExcludedVehicleResponse(
+        vehicle_id=vehicle.id,
+        position=vehicle.position,
+        query=vehicle.query,
+        model_name=vehicle.model_name,
+        status=vehicle.status or "excluded",
+        source_job_id=vehicle.source_job_id,
+        child_task_id=vehicle.child_job_id,
+        error_code=vehicle.error_code,
+        error_message=vehicle.error_message,
+        missing_platforms=_missing_platforms_from_candidates(vehicle.selected_candidates),
+    )
+
+
+def _excluded_from_report_item(index: int, item: Any) -> ComparisonExcludedVehicleResponse | None:
+    if not isinstance(item, dict):
+        return None
+    model_name = str(item.get("model_name") or item.get("query") or f"车型 {index}")
+    reason = item.get("reason") or item.get("error_message")
+    missing_platforms = item.get("missing_platforms") if isinstance(item.get("missing_platforms"), list) else []
+    return ComparisonExcludedVehicleResponse(
+        position=index,
+        query=str(item.get("query") or model_name),
+        model_name=model_name,
+        status=str(item.get("status") or "excluded"),
+        source_job_id=str(item["source_job_id"]) if item.get("source_job_id") else None,
+        child_task_id=str(item["child_task_id"]) if item.get("child_task_id") else None,
+        error_code=str(item["error_code"]) if item.get("error_code") else None,
+        error_message=str(reason) if reason else None,
+        missing_platforms=[str(platform) for platform in missing_platforms],
+    )
+
+
+def _excluded_vehicle_payloads(comparison: ComparisonJob) -> list[ComparisonExcludedVehicleResponse]:
+    vehicles = sorted(comparison.vehicles, key=lambda item: item.position)
+    excluded = [
+        _excluded_from_vehicle(vehicle)
+        for vehicle in vehicles
+        if vehicle.status in EXCLUDED_VEHICLE_STATUSES or vehicle.error_code or vehicle.error_message
+    ]
+    if excluded:
+        return excluded
+
+    report_excluded = []
+    report_json = comparison.report_json if isinstance(comparison.report_json, dict) else {}
+    for index, item in enumerate(report_json.get("excluded_vehicles") or [], start=1):
+        parsed = _excluded_from_report_item(index, item)
+        if parsed is not None:
+            report_excluded.append(parsed)
+    return report_excluded
+
+
+def _available_vehicle_count(comparison: ComparisonJob) -> int:
+    return sum(1 for vehicle in comparison.vehicles if vehicle.status in AVAILABLE_VEHICLE_STATUSES)
+
+
+def _requested_vehicle_count(comparison: ComparisonJob) -> int:
+    return max(int(comparison.vehicle_count or 0), len(comparison.vehicles))
+
+
 def _stage_items_with_live_progress(settings: Settings, job: Job, stage_runs: list[JobStageRun]) -> list[SimpleNamespace]:
     items: list[SimpleNamespace] = []
     for stage in stage_runs:
@@ -204,12 +283,15 @@ def comparison_progress_payload(db: Session, settings: Settings, comparison: Com
             completed_count += 1
         vehicle_payloads.append(
             ComparisonVehicleProgress(
+                position=vehicle.position,
                 query=vehicle.query,
                 model_name=vehicle.model_name,
                 status=vehicle.status,
                 source_job_id=vehicle.source_job_id,
                 child_job_id=vehicle.child_job_id,
+                error_code=vehicle.error_code,
                 error_message=vehicle.error_message,
+                missing_platforms=_missing_platforms_from_candidates(vehicle.selected_candidates),
                 **eta.as_dict(),
             )
         )
@@ -248,25 +330,37 @@ def comparison_progress_payload(db: Session, settings: Settings, comparison: Com
         status=comparison.status,
         current_stage=comparison.current_stage,
         degraded=comparison.degraded,
+        requested_vehicle_count=_requested_vehicle_count(comparison),
+        available_vehicle_count=_available_vehicle_count(comparison),
+        excluded_vehicle_count=len(_excluded_vehicle_payloads(comparison)),
         overall_percent=overall_percent,
         estimated_remaining_seconds=total_seconds,
         estimated_remaining_minutes=minutes,
         eta_label=f"预计剩余 {minutes} 分钟",
         eta_confidence=confidence,
         vehicles=vehicle_payloads,
+        excluded_vehicles=_excluded_vehicle_payloads(comparison),
         message=message,
     )
 
 
 def comparison_result_payload(settings: Settings, comparison: ComparisonJob) -> ComparisonResultResponse:
     artifacts = sorted(comparison.artifacts, key=lambda item: item.id)
+    excluded = _excluded_vehicle_payloads(comparison)
+    report_json = dict(comparison.report_json or {})
+    if excluded and not report_json.get("excluded_vehicles"):
+        report_json["excluded_vehicles"] = [item.model_dump() for item in excluded]
     return ComparisonResultResponse(
         comparison_id=comparison.comparison_id,
         status=comparison.status,
         degraded=comparison.degraded,
         retention_days=settings.job_artifact_retention_days,
+        requested_vehicle_count=_requested_vehicle_count(comparison),
+        available_vehicle_count=_available_vehicle_count(comparison),
+        excluded_vehicle_count=len(excluded),
         vehicle_count=comparison.vehicle_count,
-        report_json=comparison.report_json or {},
+        excluded_vehicles=excluded,
+        report_json=report_json,
         artifacts=[comparison_artifact_item(artifact, comparison.comparison_id) for artifact in artifacts],
         zip_url=f"/api/comparisons/{comparison.comparison_id}/artifacts.zip",
     )

@@ -1,7 +1,10 @@
 "use client";
 
+import { ArrowUpRight, Filter, ListChecks, Plus, RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { AccessGatePanel } from "@/app/components/access-gate";
+import { useAccessSession } from "@/app/components/access-session";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
 import type { TaskListItem, TaskLoadResponse } from "@/lib/api-types";
@@ -29,6 +32,28 @@ const statusLabels: Record<string, string> = {
   failed: "失败",
   cancelled: "已取消",
   expired: "已过期",
+};
+
+const stageLabels: Record<string, string> = {
+  queued: "排队中",
+  running: "运行中",
+  checking_incremental: "检查历史语料",
+  collecting_autohome: "采集汽车之家",
+  collecting_dcd: "采集懂车帝",
+  postprocessing: "汇总整理",
+  summarizing: "摘要生成",
+  rendering_wordcloud: "词云生成",
+  generating_hermes_outputs: "Hermes 报告生成",
+  generating_ai_report: "AI 一页纸",
+  building_qa_corpus: "问答索引",
+  collecting_models: "补齐车型",
+  comparing: "生成对比",
+  completed: "已完成",
+  completed_degraded: "降级完成",
+  failed: "失败",
+  cancelled: "已取消",
+  expired: "已过期",
+  workflow_start_failed: "启动失败",
 };
 
 function labelFor(value: string, labels: Record<string, string>) {
@@ -102,10 +127,11 @@ function fallbackLoad(tasks: TaskListItem[]): TaskLoadResponse {
 }
 
 export default function TasksPage() {
+  const access = useAccessSession();
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [load, setLoad] = useState<TaskLoadResponse | null>(null);
   const [loadIssue, setLoadIssue] = useState<LoadIssue | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
@@ -115,55 +141,62 @@ export default function TasksPage() {
   const [degradedFilter, setDegradedFilter] = useState<FlagFilter>("all");
   const [upgradedFilter, setUpgradedFilter] = useState<FlagFilter>("all");
   const [platformStatus, setPlatformStatus] = useState<PlatformStatusFilter>("all");
+  const canUseWorkbench = !access.accessControlEnabled || access.accessState === "authorized";
 
-  useEffect(() => {
-    let cancelled = false;
+  const loadTasks = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
+      setTasks(taskPayload);
 
-    const loadTasks = async () => {
-      setLoading(true);
-      setError("");
       try {
-        const taskPayload = await apiRequest<TaskListItem[]>("/api/tasks");
-        if (cancelled) {
-          return;
-        }
-        setTasks(taskPayload);
-
-        try {
-          const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
-          if (!cancelled) {
-            setLoad(loadPayload);
-            setLoadIssue(null);
-          }
-        } catch (err) {
-          if (!cancelled) {
-            setLoad(null);
-            if (err instanceof ApiError && err.status === 404) {
-              setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
-            } else {
-              setLoadIssue({
-                kind: "error",
-                message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
-              });
-            }
-          }
-        }
+        const loadPayload = await apiRequest<TaskLoadResponse>("/api/tasks/load");
+        setLoad(loadPayload);
+        setLoadIssue(null);
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
+        setLoad(null);
+        if (err instanceof ApiError && err.status === 404) {
+          setLoadIssue({ kind: "missing", message: "负载数据暂不可用" });
+        } else if (err instanceof ApiError && err.status === 401) {
+          access.reset();
+          return;
+        } else {
+          setLoadIssue({
+            kind: "error",
+            message: err instanceof ApiError ? `负载接口异常：${err.message}` : "负载接口异常。",
+          });
         }
       }
-    };
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        access.reset();
+        setTasks([]);
+        setLoad(null);
+        setLoadIssue(null);
+        return;
+      }
+      setError(err instanceof ApiError ? err.message : "无法读取任务列表。");
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  useEffect(() => {
+    if (access.accessControlEnabled && access.accessState === "checking") {
+      setLoading(true);
+      return;
+    }
+    if (!canUseWorkbench) {
+      setLoading(false);
+      setTasks([]);
+      setLoad(null);
+      setLoadIssue(null);
+      setError("");
+      return;
+    }
     void loadTasks();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [access.accessControlEnabled, access.accessState, canUseWorkbench]);
 
   const effectiveLoad = load ?? fallbackLoad(tasks);
 
@@ -196,16 +229,29 @@ export default function TasksPage() {
   return (
     <main className="stack-lg task-workbench">
       <SignalPanel className="stack">
-        <div className="task-page-head">
-          <SectionHeader eyebrow="TASK CENTER" title="任务中心" />
-          <Link className="button" href="/tasks/new">
-            创建任务
-          </Link>
+        <div className="page-head">
+          <SectionHeader
+            eyebrow="TASK CENTER"
+            title="任务中心"
+            copy="高密度查看运行队列、平台负载、历史任务和结果交付入口。"
+          />
+          <div className="actions">
+            {canUseWorkbench ? (
+              <button className="button secondary" type="button" onClick={() => void loadTasks()} disabled={loading}>
+                <RefreshCw size={16} />
+                刷新
+              </button>
+            ) : null}
+            <Link className="button" href="/tasks/new">
+              <Plus size={16} />
+              新建任务
+            </Link>
+          </div>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
 
-        <div className="task-load-row">
+        <div className="metric-grid">
           <div>
             <span>运行中</span>
             <strong>{effectiveLoad.running_task_count}</strong>
@@ -228,124 +274,161 @@ export default function TasksPage() {
         {loadIssue?.kind === "error" ? <p className="error">{loadIssue.message}</p> : null}
       </SignalPanel>
 
-      <SignalPanel className="stack" tone="accent">
-        <div className="task-filter-grid">
-          <label className="field">
-            <span>状态</span>
-            <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
-              <option value="all">全部</option>
-              {statusOptions.map((status) => (
-                <option key={status} value={status}>
-                  {labelFor(status, statusLabels)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="field">
-            <span>类型</span>
-            <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
-              <option value="all">全部</option>
-              <option value="single">单车型</option>
-              <option value="comparison">对比</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>关键词</span>
-            <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="任务 ID / 车型" />
-          </label>
-          <label className="field">
-            <span>开始日期</span>
-            <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
-          </label>
-          <label className="field">
-            <span>结束日期</span>
-            <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
-          </label>
-          <label className="field">
-            <span>降级</span>
-            <select value={degradedFilter} onChange={(event) => setDegradedFilter(event.target.value as FlagFilter)}>
-              <option value="all">全部</option>
-              <option value="yes">是</option>
-              <option value="no">否</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>升级</span>
-            <select value={upgradedFilter} onChange={(event) => setUpgradedFilter(event.target.value as FlagFilter)}>
-              <option value="all">全部</option>
-              <option value="yes">是</option>
-              <option value="no">否</option>
-            </select>
-          </label>
-          <label className="field">
-            <span>平台状态</span>
-            <select value={platformStatus} onChange={(event) => setPlatformStatus(event.target.value as PlatformStatusFilter)}>
-              <option value="all">全部</option>
-              <option value="available">可用</option>
-              <option value="crowded">拥挤</option>
-            </select>
-          </label>
-        </div>
-      </SignalPanel>
+      <AccessGatePanel session={access} title="工作台授权" description="输入周口令后，任务中心会自动加载运行队列、平台负载和历史结果。" compact />
 
-      <SignalPanel className="stack">
-        <div className="task-table-head">
-          <strong>{loading ? "读取中" : `${filteredTasks.length} 个任务`}</strong>
-          {loadIssue ? (
-            <StatusPill tone={loadIssue.kind === "error" ? "danger" : "warning"}>{loadIssue.message}</StatusPill>
-          ) : (
-            <StatusPill tone="accent">负载已同步</StatusPill>
-          )}
-        </div>
-        <div className="task-table-wrap">
-          <table className="task-table">
-            <thead>
-              <tr>
-                <th>任务</th>
-                <th>类型</th>
-                <th>状态</th>
-                <th>阶段</th>
-                <th>ETA</th>
-                <th>标记</th>
-                <th>创建</th>
-                <th>完成</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredTasks.map((task) => (
-                <tr key={task.task_id}>
-                  <td>
-                    <Link className="task-link" href={`/tasks/${task.task_id}`}>
-                      <strong>{task.display_name}</strong>
-                      <span>{task.task_id}</span>
-                    </Link>
-                  </td>
-                  <td>{taskTypeLabels[task.task_type]}</td>
-                  <td>
-                    <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
-                  </td>
-                  <td>{labelFor(task.current_stage, statusLabels)}</td>
-                  <td>{formatEta(task.eta_seconds)}</td>
-                  <td>
-                    <div className="meta-row">
-                      {task.degraded ? <StatusPill tone="warning">降级</StatusPill> : null}
-                      {task.upgraded_to_full ? <StatusPill tone="success">升级</StatusPill> : null}
-                      {!task.degraded && !task.upgraded_to_full ? "-" : null}
-                    </div>
-                  </td>
-                  <td>{formatDateTime(task.created_at)}</td>
-                  <td>{formatDateTime(task.completed_at)}</td>
-                </tr>
-              ))}
-              {!filteredTasks.length ? (
-                <tr>
-                  <td colSpan={8}>没有匹配任务。</td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </SignalPanel>
+      {canUseWorkbench ? (
+        <>
+          <SignalPanel className="stack">
+            <div className="task-panel-head">
+              <h3 className="panel-title">
+                <Filter size={16} />
+                筛选
+              </h3>
+              <StatusPill tone={loading ? "warning" : "accent"}>{loading ? "同步中" : "已同步"}</StatusPill>
+            </div>
+            <div className="task-filter-grid">
+              <label className="field">
+                <span>状态</span>
+                <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+                  <option value="all">全部</option>
+                  {statusOptions.map((status) => (
+                    <option key={status} value={status}>
+                      {labelFor(status, statusLabels)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>类型</span>
+                <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)}>
+                  <option value="all">全部</option>
+                  <option value="single">单车型</option>
+                  <option value="comparison">多车型对比</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>关键词</span>
+                <input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="任务 ID / 车型" />
+              </label>
+              <label className="field">
+                <span>开始日期</span>
+                <input type="date" value={dateFrom} onChange={(event) => setDateFrom(event.target.value)} />
+              </label>
+              <label className="field">
+                <span>结束日期</span>
+                <input type="date" value={dateTo} onChange={(event) => setDateTo(event.target.value)} />
+              </label>
+              <label className="field">
+                <span>降级结果</span>
+                <select value={degradedFilter} onChange={(event) => setDegradedFilter(event.target.value as FlagFilter)}>
+                  <option value="all">全部</option>
+                  <option value="yes">是</option>
+                  <option value="no">否</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>后续升级</span>
+                <select value={upgradedFilter} onChange={(event) => setUpgradedFilter(event.target.value as FlagFilter)}>
+                  <option value="all">全部</option>
+                  <option value="yes">是</option>
+                  <option value="no">否</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>平台状态</span>
+                <select value={platformStatus} onChange={(event) => setPlatformStatus(event.target.value as PlatformStatusFilter)}>
+                  <option value="all">全部</option>
+                  <option value="available">有空闲车道</option>
+                  <option value="crowded">车道占满</option>
+                </select>
+              </label>
+            </div>
+          </SignalPanel>
+
+          <SignalPanel className="stack">
+            <div className="task-table-head">
+              <div className="panel-title-wrap">
+                <h3 className="panel-title">
+                  <ListChecks size={16} />
+                  任务列表
+                </h3>
+                <p className="helper">{loading ? "正在同步最新任务状态。" : `当前共 ${filteredTasks.length} 个匹配任务。`}</p>
+              </div>
+              {loadIssue ? (
+                <StatusPill tone={loadIssue.kind === "error" ? "danger" : "warning"}>{loadIssue.message}</StatusPill>
+              ) : (
+                <StatusPill tone="accent">负载已同步</StatusPill>
+              )}
+            </div>
+            <div className="task-table-wrap">
+              <table className="task-table">
+                <thead>
+                  <tr>
+                    <th>任务</th>
+                    <th>类型</th>
+                    <th>状态</th>
+                    <th>阶段</th>
+                    <th>预计</th>
+                    <th>标记</th>
+                    <th>创建</th>
+                    <th>完成</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTasks.map((task) => (
+                    <tr key={task.task_id}>
+                      <td>
+                        <Link className="task-link" href={`/tasks/${task.task_id}`}>
+                          <strong>{task.display_name}</strong>
+                          <span>{task.task_id}</span>
+                        </Link>
+                      </td>
+                      <td>{taskTypeLabels[task.task_type]}</td>
+                      <td>
+                        <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
+                      </td>
+                      <td>{labelFor(task.current_stage, stageLabels)}</td>
+                      <td>{formatEta(task.eta_seconds)}</td>
+                      <td>
+                        <div className="meta-row">
+                          {task.degraded ? <StatusPill tone="warning">降级</StatusPill> : null}
+                          {task.upgraded_to_full ? <StatusPill tone="success">升级</StatusPill> : null}
+                          {task.issue_summary ? <StatusPill tone="danger">{task.issue_summary}</StatusPill> : null}
+                          {!task.degraded && !task.upgraded_to_full && !task.issue_summary ? <span>-</span> : null}
+                        </div>
+                      </td>
+                      <td>{formatDateTime(task.created_at)}</td>
+                      <td>{formatDateTime(task.completed_at)}</td>
+                      <td>
+                        <Link className="table-action" href={`/tasks/${task.task_id}`}>
+                          <ArrowUpRight size={15} />
+                          查看
+                        </Link>
+                      </td>
+                    </tr>
+                  ))}
+                  {!filteredTasks.length ? (
+                    <tr>
+                      <td colSpan={9}>{loading ? "正在读取任务..." : "没有匹配任务。"}</td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          </SignalPanel>
+        </>
+      ) : (
+        <SignalPanel className="stack" tone="accent">
+          <div className="empty-state">
+            <div>
+              <p className="eyebrow">WORKBENCH LOCKED</p>
+              <h3>解锁后加载任务和结果列表</h3>
+              <p className="helper">任务中心默认就是主入口，不再跳去独立门禁页。授权完成后会直接留在当前页面。</p>
+            </div>
+          </div>
+        </SignalPanel>
+      )}
     </main>
   );
 }

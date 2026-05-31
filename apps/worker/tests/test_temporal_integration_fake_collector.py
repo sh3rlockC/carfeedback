@@ -38,10 +38,10 @@ from worker_app.temporal_workflows import run_single_vehicle_task
 
 class FakeTaskWorkflowClient:
     def __init__(self) -> None:
-        self.started: list[str] = []
+        self.started: list[tuple[str, str]] = []
 
-    def start_task(self, task_id: str) -> None:
-        self.started.append(task_id)
+    def start_task(self, task_id: str, task_type: str) -> None:
+        self.started.append((task_id, task_type))
 
 
 def _make_client(tmp_path: Path) -> tuple[TestClient, FakeTaskWorkflowClient, str]:
@@ -68,9 +68,33 @@ def _authenticate(client: TestClient) -> None:
 
 
 def _create_task(client: TestClient, task_type: str, vehicles: list[str]) -> dict[str, Any]:
+    if task_type == "single":
+        task_vehicles = [
+            {
+                "query": vehicle,
+                "selected_candidates": {
+                    "autohome": {
+                        "series_id": "8089",
+                        "url": "https://k.autohome.com.cn/8089/",
+                        "title": vehicle,
+                        "source": "fixture",
+                    },
+                    "dongchedi": {
+                        "series_id": "25398",
+                        "url": "https://www.dongchedi.com/auto/series/25398",
+                        "title": vehicle,
+                        "source": "fixture",
+                    },
+                },
+                "enabled_platforms": ["autohome", "dongchedi"],
+            }
+            for vehicle in vehicles
+        ]
+    else:
+        task_vehicles = [{"query": vehicle} for vehicle in vehicles]
     response = client.post(
         "/api/tasks",
-        json={"task_type": task_type, "vehicles": [{"query": vehicle} for vehicle in vehicles]},
+        json={"task_type": task_type, "vehicles": task_vehicles},
     )
     assert response.status_code == 200, response.text
     return response.json()
@@ -238,7 +262,7 @@ def test_api_created_single_task_runs_fake_collector_workflow_to_detail_payload(
     result = asyncio.run(run_single_vehicle_task(payload["task_id"], runner))
 
     assert result == {"task_id": payload["task_id"], "status": "completed"}
-    assert workflow_client.started == [payload["task_id"]]
+    assert workflow_client.started == [(payload["task_id"], "single")]
     detail_response = client.get(f"/api/tasks/{payload['task_id']}")
     assert detail_response.status_code == 200
     detail = detail_response.json()

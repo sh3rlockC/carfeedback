@@ -15,6 +15,10 @@ from app.models import CollectionRun, Task
 RUNNING_TASK_STATUSES = ("running",)
 QUEUED_TASK_STATUSES = ("queued", "waiting_agent", "retry_wait")
 RUNNING_COLLECTION_STATUSES = ("running",)
+DEFAULT_PLATFORM_SLOTS = {
+    "autohome": 1,
+    "dongchedi": 1,
+}
 
 
 @dataclass(frozen=True)
@@ -101,13 +105,15 @@ def project_task_load(
         for platform, agent_ids in agent_ids_source.items()
     }
     busy_by_platform = _platform_busy_agents(db)
-    platform_names = sorted(set(configured_agents) | set(busy_by_platform))
+    platform_names = sorted(set(DEFAULT_PLATFORM_SLOTS) | set(configured_agents) | set(busy_by_platform))
 
     platforms = {}
     for platform in platform_names:
         configured = set(configured_agents.get(platform, []))
         busy = busy_by_platform.get(platform, BusyAgents(set()))
         total = len(configured) if configured else len(busy.known_agent_ids) + busy.unknown_agent_count
+        if total == 0:
+            total = DEFAULT_PLATFORM_SLOTS.get(platform, 0)
         known_busy_count = len(busy.known_agent_ids)
         busy_slots = min(total, known_busy_count + busy.unknown_agent_count)
         available = max(0, total - busy_slots)

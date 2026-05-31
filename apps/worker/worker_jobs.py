@@ -107,12 +107,17 @@ def _copy_vehicle_downloadable_artifacts(
     vehicle_dir = output_dir / _safe_filename_part(vehicle.model_name)
     vehicle_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
+    used_names: set[str] = set()
     for source_value in source_paths:
         source = Path(source_value)
         if not source.exists() or not source.name.lower().endswith((".xlsx", ".png")):
             continue
-        target = _unique_target(vehicle_dir / source.name)
-        shutil.copy2(source, target)
+        target = vehicle_dir / source.name
+        if target.name in used_names:
+            target = _unique_target(target)
+        used_names.add(target.name)
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
         copied.append(str(target))
     return copied
 

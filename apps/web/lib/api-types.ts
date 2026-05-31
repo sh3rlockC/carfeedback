@@ -13,6 +13,8 @@ export type PlatformCandidate = {
   note?: string | null;
 };
 
+export type PlatformName = "autohome" | "dongchedi";
+
 export type PlatformCandidateGroup = {
   best: PlatformCandidate | null;
   candidates: PlatformCandidate[];
@@ -149,17 +151,33 @@ export type ComparisonCreateResponse = {
   result_url: string;
 };
 
+export type ComparisonExcludedVehicle = {
+  vehicle_id: number | null;
+  position: number | null;
+  query: string;
+  model_name: string;
+  status: string;
+  source_job_id: string | null;
+  child_task_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  missing_platforms: string[];
+};
+
 export type ComparisonVehicleProgress = {
+  position: number | null;
   query: string;
   model_name: string;
   status: string;
   source_job_id: string | null;
   child_job_id: string | null;
+  error_code: string | null;
   estimated_remaining_seconds: number | null;
   estimated_remaining_minutes: number | null;
   eta_label: string;
   eta_confidence: string;
   error_message: string | null;
+  missing_platforms: string[];
 };
 
 export type ComparisonProgressResponse = {
@@ -167,12 +185,16 @@ export type ComparisonProgressResponse = {
   status: string;
   current_stage: string;
   degraded: boolean;
+  requested_vehicle_count: number;
+  available_vehicle_count: number;
+  excluded_vehicle_count: number;
   overall_percent: number;
   estimated_remaining_seconds: number | null;
   estimated_remaining_minutes: number | null;
   eta_label: string;
   eta_confidence: string;
   vehicles: ComparisonVehicleProgress[];
+  excluded_vehicles: ComparisonExcludedVehicle[];
   message: string;
 };
 
@@ -181,7 +203,11 @@ export type ComparisonResultResponse = {
   status: string;
   degraded: boolean;
   retention_days: number;
+  requested_vehicle_count: number;
+  available_vehicle_count: number;
+  excluded_vehicle_count: number;
   vehicle_count: number;
+  excluded_vehicles: ComparisonExcludedVehicle[];
   report_json: Record<string, unknown>;
   artifacts: ArtifactItem[];
   zip_url: string;
@@ -307,13 +333,19 @@ export type TaskVehicle = {
   model_name: string | null;
   autohome_series_id: string | null;
   dcd_series_id: string | null;
+  enabled_platforms: PlatformName[];
   status: string;
+  error_code: string | null;
+  error_message: string | null;
+  missing_platforms: string[];
+  result_snapshot: Record<string, unknown>;
 };
 
 export type TaskEvent = {
   event_id: number;
   event_type: string;
   payload: Record<string, unknown>;
+  summary: string | null;
   created_at: string | null;
 };
 
@@ -322,6 +354,7 @@ export type TaskArtifact = {
   artifact_type: string;
   path: string;
   downloadable: boolean;
+  url: string | null;
   created_at: string | null;
 };
 
@@ -333,6 +366,7 @@ export type TaskListItem = {
   current_stage: string;
   degraded: boolean;
   upgraded_to_full: boolean;
+  issue_summary: string | null;
   eta_seconds: number | null;
   eta_reason: string | null;
   created_at: string;
@@ -347,6 +381,10 @@ export type TaskDetailResponse = TaskListItem & {
 
 export type TaskCreateVehicle = {
   query: string;
+  model_name?: string | null;
+  selected_candidates?: SelectedCandidates | null;
+  enabled_platforms?: PlatformName[];
+  cache_confirmed_platforms?: PlatformName[];
 };
 
 export type TaskCreateRequest = {
@@ -365,4 +403,24 @@ export type TaskLoadResponse = {
   running_task_count: number;
   queued_task_count: number;
   platforms: Record<string, { available: number; total: number }>;
+};
+
+export type AdminRuntimeInfoResponse = {
+  app_env: string;
+  passphrase_version: string;
+  access_control_enabled: boolean;
+  worker_queue_name: string;
+  artifact_retention_days: number;
+};
+
+export type SeriesValidationResponse = {
+  query: string;
+  platform: PlatformName;
+  series_id: string;
+  url: string;
+  status: "matched" | "mismatch" | "unverified" | "invalid";
+  can_create: boolean;
+  cacheable: boolean;
+  requires_confirmation: boolean;
+  message: string;
 };

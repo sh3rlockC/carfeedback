@@ -8,6 +8,7 @@ import re
 from copy import copy
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import JSON as SAJSON
@@ -96,7 +97,7 @@ class CorpusImportResult:
 def _engine_kwargs(database_url: str) -> dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {}
+    return {"pool_pre_ping": True}
 
 
 def create_corpus_engine(database_url: str):
@@ -137,7 +138,18 @@ def _clean(value: Any) -> str:
 
 
 def _source_link(row: dict[str, Any]) -> str:
-    return _clean(row.get("来源链接"))
+    return normalize_source_link(_clean(row.get("来源链接")))
+
+
+def normalize_source_link(value: str) -> str:
+    text = _clean(value)
+    if not text:
+        return ""
+    parts = urlsplit(text)
+    if not parts.scheme or not parts.netloc:
+        return text
+    path = parts.path.rstrip("/") if parts.path != "/" else parts.path
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, "", ""))
 
 
 def dedupe_key_for_row(platform: str, row: dict[str, Any]) -> str:
@@ -180,20 +192,17 @@ def _row_json(value: Any) -> dict[str, Any]:
 def load_platform_state(database_url: str, *, query: str, platform: str, series_id: str) -> PlatformCorpusState:
     engine = create_corpus_engine(database_url)
     ensure_corpus_schema(engine)
-    key = query_key(query)
     with engine.begin() as conn:
         existing_count = conn.execute(
-            select(func.count())
+            select(func.count(func.distinct(koubei_raw_comments.c.dedupe_key)))
             .select_from(koubei_raw_comments)
             .where(
-                koubei_raw_comments.c.query_key == key,
                 koubei_raw_comments.c.platform == platform,
                 koubei_raw_comments.c.series_id == str(series_id),
             )
         ).scalar_one()
         rows = conn.execute(
             select(koubei_raw_comments.c.source_link).where(
-                koubei_raw_comments.c.query_key == key,
                 koubei_raw_comments.c.platform == platform,
                 koubei_raw_comments.c.series_id == str(series_id),
                 koubei_raw_comments.c.source_link.is_not(None),
@@ -242,11 +251,10 @@ def upsert_platform_rows(
             dedupe_key = dedupe_key_for_row(platform, row)
             existing_id = conn.execute(
                 select(koubei_raw_comments.c.id).where(
-                    koubei_raw_comments.c.query_key == key,
                     koubei_raw_comments.c.platform == platform,
                     koubei_raw_comments.c.series_id == str(series_id),
                     koubei_raw_comments.c.dedupe_key == dedupe_key,
-                )
+                ).order_by(koubei_raw_comments.c.id.asc()).limit(1)
             ).scalar_one_or_none()
             payload = {
                 "query_key": key,
@@ -280,10 +288,9 @@ def upsert_platform_rows(
                 updated += 1
 
         total_count = conn.execute(
-            select(func.count())
+            select(func.count(func.distinct(koubei_raw_comments.c.dedupe_key)))
             .select_from(koubei_raw_comments)
             .where(
-                koubei_raw_comments.c.query_key == key,
                 koubei_raw_comments.c.platform == platform,
                 koubei_raw_comments.c.series_id == str(series_id),
             )
@@ -330,29 +337,30 @@ def export_platform_workbook(
 ) -> int:
     engine = create_corpus_engine(database_url)
     ensure_corpus_schema(engine)
-    key = query_key(query)
     with engine.begin() as conn:
         rows = conn.execute(
-            select(koubei_raw_comments.c.row_json)
+            select(koubei_raw_comments.c.dedupe_key, koubei_raw_comments.c.row_json)
             .where(
-                koubei_raw_comments.c.query_key == key,
                 koubei_raw_comments.c.platform == platform,
                 koubei_raw_comments.c.series_id == str(series_id),
             )
             .order_by(koubei_raw_comments.c.id.asc())
         ).all()
+    deduped_rows: dict[str, Any] = {}
+    for dedupe_key, row_json in rows:
+        deduped_rows[str(dedupe_key)] = row_json
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "口碑明细" if platform == "dongchedi" else "口碑"
     sheet.append(headers)
-    for row in rows:
-        item = _row_json(row[0])
+    for row_json in deduped_rows.values():
+        item = _row_json(row_json)
         sheet.append([item.get(header, "") for header in headers])
     _apply_basic_sheet_style(sheet, platform)
     workbook.save(output_path)
-    return len(rows)
+    return len(deduped_rows)
 
 
 def export_vehicle_merged_raw_workbook(
@@ -361,14 +369,15 @@ def export_vehicle_merged_raw_workbook(
     autohome_series_id: str,
     dongchedi_series_id: str,
     output_path: Path,
+    platforms: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> dict[str, int]:
     engine = create_corpus_engine(database_url)
     ensure_corpus_schema(engine)
-    key = query_key(query)
     platform_series = {
         "autohome": str(autohome_series_id),
         "dongchedi": str(dongchedi_series_id),
     }
+    requested_platforms = [platform for platform in ("autohome", "dongchedi") if platforms is None or platform in platforms]
     sheet_names = {
         "autohome": "汽车之家",
         "dongchedi": "懂车帝",
@@ -380,27 +389,30 @@ def export_vehicle_merged_raw_workbook(
     first_sheet = True
 
     with engine.begin() as conn:
-        for platform, series_id in platform_series.items():
+        for platform in requested_platforms:
+            series_id = platform_series[platform]
             rows = conn.execute(
-                select(koubei_raw_comments.c.row_json)
+                select(koubei_raw_comments.c.dedupe_key, koubei_raw_comments.c.row_json)
                 .where(
-                    koubei_raw_comments.c.query_key == key,
                     koubei_raw_comments.c.platform == platform,
                     koubei_raw_comments.c.series_id == series_id,
                 )
                 .order_by(koubei_raw_comments.c.id.asc())
             ).all()
+            deduped_rows: dict[str, Any] = {}
+            for dedupe_key, row_json in rows:
+                deduped_rows[str(dedupe_key)] = row_json
 
             sheet = workbook.active if first_sheet else workbook.create_sheet()
             first_sheet = False
             sheet.title = sheet_names[platform]
             headers = PLATFORM_HEADERS[platform]
             sheet.append(headers)
-            for row in rows:
-                item = _row_json(row[0])
+            for row_json in deduped_rows.values():
+                item = _row_json(row_json)
                 sheet.append([item.get(header, "") for header in headers])
             _apply_basic_sheet_style(sheet, platform)
-            counts[platform] = len(rows)
+            counts[platform] = len(deduped_rows)
 
     workbook.save(output_path)
     return counts

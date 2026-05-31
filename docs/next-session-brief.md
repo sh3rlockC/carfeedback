@@ -13,9 +13,9 @@
 ## 当前可用状态
 
 - 分支：`main`
-- remote：`origin https://github.com/sh3rlockC/vehicle-koubei-web-demo.git`
-- 主工作树：`/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo`
-- 功能 worktree 根目录：`/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo-worktrees`
+- remote：`origin https://github.com/sh3rlockC/carFeedbackv101.git`
+- 主工作树：`/Users/xyc/Documents/codexwork/carFeedbackv101`
+- 功能 worktree 根目录：`/Users/xyc/Documents/codexwork/carFeedbackv101-worktrees`
 - 最近关键提交：
   - `1dafe31 Initial vehicle koubei demo`
 - 本地 Web Demo 已通过 Docker Compose 运行：
@@ -106,7 +106,7 @@
 ## 常用命令
 
 ```bash
-cd /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
+cd /Users/xyc/Documents/codexwork/carFeedbackv101
 docker compose ps
 docker compose exec nginx nginx -t
 docker compose logs --tail=200 worker

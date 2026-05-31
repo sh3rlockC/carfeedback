@@ -26,7 +26,10 @@ from worker_app.collector_models import CollectorRunRequest  # noqa: E402
 def run_request(run_id: str = "run-1") -> CollectorRunRequest:
     return CollectorRunRequest(
         run_id=run_id,
+        task_id="task-1",
         platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
         series_id="s123",
         mode="full_refresh",
         known_links=["https://example.test/known"],
@@ -68,7 +71,10 @@ def test_submit_run_sends_expected_json_and_parses_status() -> None:
         assert request.url.host == "collector.test"
         assert json.loads(request.content) == {
             "run_id": "run-1",
+            "task_id": "task-1",
             "platform": "autohome",
+            "query_key": "测试车",
+            "model_name": "测试车",
             "series_id": "s123",
             "mode": "full_refresh",
             "known_links": ["https://example.test/known"],
@@ -154,7 +160,7 @@ def test_stop_retry_failures_are_not_retryable(category: str) -> None:
     assert is_stop_retry_failure(category) is True
 
 
-@pytest.mark.parametrize("category", [None, "parse_error", "rate_limited"])
+@pytest.mark.parametrize("category", [None, "parse_error"])
 def test_unknown_failure_categories_are_not_retryable(category: str | None) -> None:
     assert should_auto_retry_failure(category) is False
     assert is_stop_retry_failure(category) is False
@@ -164,7 +170,10 @@ def test_run_request_validation_rejects_empty_ids_and_invalid_scan_counts() -> N
     with pytest.raises(ValidationError) as exc_info:
         CollectorRunRequest(
             run_id="",
+            task_id="",
             platform="autohome",
+            query_key="",
+            model_name="",
             series_id="",
             mode="full_refresh",
             max_scan_pages=0,
@@ -174,6 +183,9 @@ def test_run_request_validation_rejects_empty_ids_and_invalid_scan_counts() -> N
     invalid_fields = {error["loc"][0] for error in exc_info.value.errors()}
     assert {
         "run_id",
+        "task_id",
+        "query_key",
+        "model_name",
         "series_id",
         "max_scan_pages",
         "stop_after_known_pages",

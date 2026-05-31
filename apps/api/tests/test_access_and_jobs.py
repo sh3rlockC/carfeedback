@@ -46,9 +46,10 @@ def make_client(
     queue: FakeQueue | UnavailableQueue | None = None,
     *,
     raise_server_exceptions: bool = True,
+    app_env: str = "test",
 ) -> tuple[TestClient, FakeQueue | UnavailableQueue]:
     settings = Settings(
-        app_env="test",
+        app_env=app_env,
         database_url=f"sqlite+pysqlite:///{tmp_path / 'test.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
@@ -61,6 +62,27 @@ def make_client(
     queue = queue or FakeQueue()
     app.dependency_overrides[get_job_queue] = lambda: queue
     return TestClient(app, raise_server_exceptions=raise_server_exceptions), queue
+
+
+def test_legacy_job_creation_is_disabled_outside_test_env(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path, app_env="development")
+
+    malformed_response = client.post("/api/jobs", json={"vehicle": {"name": "风云X3 PLUS"}})
+    response = client.post(
+        "/api/jobs",
+        json={
+            "query": "风云X3 PLUS",
+            "selected_candidates": {
+                "autohome": {"series_id": "8089", "title": "风云X3 PLUS", "source": "fixture"},
+                "dongchedi": {"series_id": "25398", "title": "风云X3 PLUS", "source": "fixture"},
+            },
+        },
+    )
+
+    assert malformed_response.status_code == 410
+    assert malformed_response.json()["detail"] == "legacy job API disabled; use /api/tasks"
+    assert response.status_code == 410
+    assert response.json()["detail"] == "legacy job API disabled; use /api/tasks"
 
 
 def test_access_verify_sets_cookie(tmp_path: Path) -> None:

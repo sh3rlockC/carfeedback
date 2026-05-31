@@ -14,6 +14,7 @@ from app.config import Settings, get_settings
 from app.db import get_db
 from app.models import Job, JobAIReport, JobArtifact, JobQAChunk, JobTimeReport
 from app.schemas import (
+    AdminRuntimeInfoResponse,
     AdminDbFailedJobItem,
     AdminFailedJobsDeleteResponse,
     AdminFailedJobsResponse,
@@ -22,6 +23,21 @@ from app.schemas import (
 from app.services.passphrase import require_passphrase_session
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+
+@router.get("/runtime", response_model=AdminRuntimeInfoResponse)
+def runtime_info(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> AdminRuntimeInfoResponse:
+    require_passphrase_session(request, settings)
+    return AdminRuntimeInfoResponse(
+        app_env=settings.app_env,
+        passphrase_version=settings.pass_phrase_version,
+        access_control_enabled=settings.access_control_enabled,
+        worker_queue_name=settings.worker_queue_name,
+        artifact_retention_days=settings.job_artifact_retention_days,
+    )
 
 
 def _failed_registry(settings: Settings) -> tuple[FailedJobRegistry, Queue]:

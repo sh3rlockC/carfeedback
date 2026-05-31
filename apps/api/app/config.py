@@ -31,11 +31,15 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     worker_queue_name: str = "vehicle-koubei"
     worker_job_timeout_seconds: int = 7200
+    temporal_address: str = "localhost:7233"
+    temporal_namespace: str = "default"
+    temporal_task_queue: str = "vehicle-koubei-temporal"
     artifact_root: str = "/srv/koubei/jobs"
     workspace_root: str = str(discover_workspace_root())
 
     pass_phrase_hash: str = ""
     pass_phrase_version: str = "2026-W17"
+    access_control_enabled: bool = True
     session_secret: str = "change-me"
     session_cookie_name: str = "koubei_access"
     session_ttl_seconds: int = 4 * 60 * 60

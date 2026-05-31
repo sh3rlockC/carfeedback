@@ -46,9 +46,9 @@ class FakeQueue:
         return FakeQueuedJob(job_id)
 
 
-def make_client(tmp_path: Path) -> tuple[TestClient, FakeQueue]:
+def make_client(tmp_path: Path, *, app_env: str = "test") -> tuple[TestClient, FakeQueue]:
     settings = Settings(
-        app_env="test",
+        app_env=app_env,
         database_url=f"sqlite+pysqlite:///{tmp_path / 'comparisons.db'}",
         pass_phrase_hash=hash_passphrase("weekly-secret"),
         pass_phrase_version="2026-W17",
@@ -61,6 +61,28 @@ def make_client(tmp_path: Path) -> tuple[TestClient, FakeQueue]:
     queue = FakeQueue()
     app.dependency_overrides[get_job_queue] = lambda: queue
     return TestClient(app), queue
+
+
+def test_legacy_comparison_creation_is_disabled_outside_test_env(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path, app_env="development")
+
+    malformed_options_response = client.post("/api/comparisons/options", json={"query": "测试车A"})
+    options_response = client.post("/api/comparisons/options", json={"vehicles": [{"query": "测试车A"}, {"query": "测试车B"}]})
+    create_response = client.post(
+        "/api/comparisons",
+        json={
+            "vehicles": [
+                {"query": "测试车A", "selected_candidates": selected_candidates("1001", "2001", "测试车A")},
+                {"query": "测试车B", "selected_candidates": selected_candidates("1002", "2002", "测试车B")},
+            ]
+        },
+    )
+
+    assert malformed_options_response.status_code == 410
+    assert options_response.status_code == 410
+    assert create_response.status_code == 410
+    assert malformed_options_response.json()["detail"] == "legacy comparison API disabled; use /api/tasks"
+    assert options_response.json()["detail"] == "legacy comparison API disabled; use /api/tasks"
 
 
 def authorize(client: TestClient) -> None:
@@ -272,6 +294,86 @@ def test_comparison_progress_reports_reused_vehicle_with_zero_eta(tmp_path: Path
     assert reused["status"] == "reused"
     assert reused["estimated_remaining_seconds"] == 0
     assert reused["eta_label"] == "预计剩余 0 分钟"
+
+
+def test_comparison_progress_and_result_expose_excluded_vehicle_details(tmp_path: Path) -> None:
+    client, _queue = make_client(tmp_path)
+    authorize(client)
+    session = get_session_local()()
+    try:
+        session.add(
+            ComparisonJob(
+                comparison_id="cmp_degraded",
+                status="completed_degraded",
+                current_stage="completed_degraded",
+                degraded=True,
+                passphrase_version="2026-W17",
+                vehicle_count=3,
+                report_json={
+                    "headline": "竞品口碑对比",
+                    "vehicles": [{"model_name": "测试车A"}, {"model_name": "测试车B"}],
+                },
+            )
+        )
+        session.add_all(
+            [
+                ComparisonVehicle(
+                    comparison_id="cmp_degraded",
+                    query="测试车A",
+                    model_name="测试车A",
+                    position=1,
+                    status="completed",
+                    source_job_id="task_a",
+                    selected_candidates=selected_candidates("1001", "2001", "测试车A"),
+                ),
+                ComparisonVehicle(
+                    comparison_id="cmp_degraded",
+                    query="测试车B",
+                    model_name="测试车B",
+                    position=2,
+                    status="completed",
+                    source_job_id="task_b",
+                    selected_candidates=selected_candidates("1002", "2002", "测试车B"),
+                ),
+                ComparisonVehicle(
+                    comparison_id="cmp_degraded",
+                    query="零跑D19",
+                    model_name="零跑D19",
+                    position=3,
+                    status="excluded",
+                    child_job_id="task_child_failed",
+                    selected_candidates={"autohome": {}, "dongchedi": {}},
+                    error_code="series_not_found",
+                    error_message="missing autohome_series_id and dcd_series_id",
+                ),
+            ]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    progress = client.get("/api/comparisons/cmp_degraded/progress")
+    result = client.get("/api/comparisons/cmp_degraded")
+
+    assert progress.status_code == 200
+    progress_payload = progress.json()
+    assert progress_payload["requested_vehicle_count"] == 3
+    assert progress_payload["available_vehicle_count"] == 2
+    assert progress_payload["excluded_vehicle_count"] == 1
+    excluded = progress_payload["excluded_vehicles"][0]
+    assert excluded["query"] == "零跑D19"
+    assert excluded["status"] == "excluded"
+    assert excluded["error_code"] == "series_not_found"
+    assert excluded["error_message"] == "missing autohome_series_id and dcd_series_id"
+    assert excluded["missing_platforms"] == ["autohome", "dongchedi"]
+    assert excluded["child_task_id"] == "task_child_failed"
+
+    assert result.status_code == 200
+    result_payload = result.json()
+    assert result_payload["requested_vehicle_count"] == 3
+    assert result_payload["available_vehicle_count"] == 2
+    assert result_payload["excluded_vehicle_count"] == 1
+    assert result_payload["excluded_vehicles"][0]["error_code"] == "series_not_found"
 
 
 def test_comparison_progress_uses_child_job_live_stage_progress(tmp_path: Path) -> None:

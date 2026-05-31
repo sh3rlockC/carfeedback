@@ -172,6 +172,143 @@ def test_task_detail_payload_projects_sorted_children_without_token_hashes(tmp_p
     assert "manage_token_revoked_at" not in detail
 
 
+def test_task_detail_payload_summarizes_series_not_found_failure_and_artifact_urls(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    init_db(settings)
+    session_local = get_session_local()
+
+    created_at = datetime(2026, 1, 1, 10, 0)
+    with session_local() as session:
+        task = Task(
+            task_id="task_failed",
+            task_type="single_vehicle",
+            display_name="零跑D19",
+            status="failed",
+            current_stage="failed",
+            view_token_hash="view-hash",
+            manage_token_hash="manage-hash",
+            manage_token_expires_at=created_at + timedelta(days=7),
+            created_at=created_at,
+        )
+        session.add(task)
+        session.add(
+            TaskVehicle(
+                task_id="task_failed",
+                position=1,
+                query="零跑D19",
+                model_name="零跑D19",
+                autohome_series_id=None,
+                dcd_series_id=None,
+                status="failed",
+            )
+        )
+        session.add(
+            TaskEvent(
+                task_id="task_failed",
+                event_type="task_failed",
+                payload_json={
+                    "results": {
+                        "failed_platforms": [
+                            {
+                                "platform": "autohome",
+                                "failure_category": "series_not_found",
+                                "message": "missing autohome_series_id for first vehicle",
+                            },
+                            {
+                                "platform": "dongchedi",
+                                "failure_category": "series_not_found",
+                                "message": "missing dcd_series_id for first vehicle",
+                            },
+                        ]
+                    }
+                },
+                created_at=created_at,
+            )
+        )
+        session.add(
+            TaskArtifact(
+                task_id="task_failed",
+                artifact_type="business_zip",
+                path="/tmp/task_failed.zip",
+                downloadable=True,
+                created_at=created_at,
+            )
+        )
+        session.commit()
+
+        loaded = session.get(Task, "task_failed")
+        assert loaded is not None
+        detail = task_detail_payload(loaded)
+
+    vehicle = detail["vehicles"][0]
+    assert vehicle["error_code"] == "series_not_found"
+    assert "missing autohome_series_id" in vehicle["error_message"]
+    assert vehicle["missing_platforms"] == ["autohome", "dongchedi"]
+    assert detail["events"][0]["summary"] == "series_not_found: autohome、dongchedi"
+    assert detail["artifacts"][0]["url"] == "/api/tasks/task_failed/artifacts/1"
+
+
+def test_task_detail_payload_deduplicates_retried_platform_failures(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    reset_engine_cache()
+    init_db(settings)
+    session_local = get_session_local()
+
+    created_at = datetime(2026, 1, 1, 10, 0)
+    with session_local() as session:
+        task = Task(
+            task_id="task_degraded",
+            task_type="single_vehicle",
+            display_name="风云T11",
+            status="completed_degraded",
+            current_stage="completed_degraded",
+            degraded=True,
+            view_token_hash="view-hash",
+            manage_token_hash="manage-hash",
+            manage_token_expires_at=created_at + timedelta(days=7),
+            created_at=created_at,
+            completed_at=created_at + timedelta(minutes=12),
+        )
+        session.add(task)
+        session.add(
+            TaskVehicle(
+                task_id="task_degraded",
+                position=1,
+                query="风云T11",
+                model_name="风云T11",
+                autohome_series_id="7411",
+                dcd_series_id="9436",
+                status="completed_degraded",
+            )
+        )
+        session.add(
+            TaskEvent(
+                task_id="task_degraded",
+                event_type="degraded_published",
+                payload_json={
+                    "results": {
+                        "failed_platforms": [
+                            {"platform": "autohome", "failure_category": "collector_missing_result"},
+                            {"platform": "autohome", "failure_category": "collector_missing_result"},
+                            {"platform": "autohome", "failure_category": "collector_missing_result"},
+                        ]
+                    }
+                },
+                created_at=created_at,
+            )
+        )
+        session.commit()
+
+        loaded = session.get(Task, "task_degraded")
+        assert loaded is not None
+        detail = task_detail_payload(loaded)
+
+    assert detail["issue_summary"] == "collector_missing_result: autohome"
+    assert detail["vehicles"][0]["missing_platforms"] == ["autohome"]
+    assert detail["events"][0]["summary"] == "collector_missing_result: autohome"
+
+
 def test_task_list_payload_sorts_newest_first_with_task_id_tiebreaker(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     reset_engine_cache()

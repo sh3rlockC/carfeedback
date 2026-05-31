@@ -73,6 +73,7 @@ class TaskVehicle(Base):
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     autohome_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dcd_series_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    enabled_platforms: Mapped[list] = mapped_column(JSON, nullable=False, default=lambda: ["autohome", "dongchedi"])
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="queued")
     result_snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)

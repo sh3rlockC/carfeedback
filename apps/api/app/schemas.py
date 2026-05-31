@@ -46,6 +46,9 @@ class PlatformCandidate(BaseModel):
     note: str | None = None
 
 
+PlatformName = Literal["autohome", "dongchedi"]
+
+
 class PlatformCandidateGroup(BaseModel):
     best: PlatformCandidate | None = None
     candidates: list[PlatformCandidate] = Field(default_factory=list)
@@ -82,6 +85,10 @@ class CreateJobResponse(BaseModel):
 
 class TaskCreateVehicle(BaseModel):
     query: str = Field(min_length=1, max_length=255)
+    model_name: str | None = Field(default=None, max_length=255)
+    selected_candidates: SelectedCandidates | None = None
+    enabled_platforms: list[PlatformName] = Field(default_factory=lambda: ["autohome", "dongchedi"], min_length=1, max_length=2)
+    cache_confirmed_platforms: list[PlatformName] = Field(default_factory=list, max_length=2)
 
 
 class TaskCreateRequest(BaseModel):
@@ -104,6 +111,7 @@ class TaskListItem(BaseModel):
     current_stage: str
     degraded: bool
     upgraded_to_full: bool
+    issue_summary: str | None = None
     eta_seconds: int | None
     eta_reason: str | None
     created_at: datetime
@@ -114,6 +122,25 @@ class TaskDetailResponse(TaskListItem):
     vehicles: list[dict]
     events: list[dict]
     artifacts: list[dict]
+
+
+class SeriesValidationRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=255)
+    platform: PlatformName
+    series_id: str = Field(min_length=1, max_length=64)
+    url: str | None = Field(default=None, max_length=500)
+
+
+class SeriesValidationResponse(BaseModel):
+    query: str
+    platform: PlatformName
+    series_id: str
+    url: str
+    status: Literal["matched", "mismatch", "unverified", "invalid"]
+    can_create: bool
+    cacheable: bool
+    requires_confirmation: bool
+    message: str
 
 
 class JobOverviewResponse(BaseModel):
@@ -211,16 +238,32 @@ class ComparisonCreateResponse(BaseModel):
 
 
 class ComparisonVehicleProgress(BaseModel):
+    position: int | None = None
     query: str
     model_name: str
     status: str
     source_job_id: str | None = None
     child_job_id: str | None = None
+    error_code: str | None = None
     estimated_remaining_seconds: int | None = None
     estimated_remaining_minutes: int | None = None
     eta_label: str = "预计剩余时间计算中"
     eta_confidence: str = "unknown"
     error_message: str | None = None
+    missing_platforms: list[str] = Field(default_factory=list)
+
+
+class ComparisonExcludedVehicleResponse(BaseModel):
+    vehicle_id: int | None = None
+    position: int | None = None
+    query: str
+    model_name: str
+    status: str = "excluded"
+    source_job_id: str | None = None
+    child_task_id: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    missing_platforms: list[str] = Field(default_factory=list)
 
 
 class ComparisonProgressResponse(BaseModel):
@@ -228,12 +271,16 @@ class ComparisonProgressResponse(BaseModel):
     status: str
     current_stage: str
     degraded: bool
+    requested_vehicle_count: int
+    available_vehicle_count: int
+    excluded_vehicle_count: int
     overall_percent: int
     estimated_remaining_seconds: int | None = None
     estimated_remaining_minutes: int | None = None
     eta_label: str = "预计剩余时间计算中"
     eta_confidence: str = "unknown"
     vehicles: list[ComparisonVehicleProgress] = Field(default_factory=list)
+    excluded_vehicles: list[ComparisonExcludedVehicleResponse] = Field(default_factory=list)
     message: str
 
 
@@ -250,7 +297,11 @@ class ComparisonResultResponse(BaseModel):
     status: str
     degraded: bool
     retention_days: int
+    requested_vehicle_count: int
+    available_vehicle_count: int
+    excluded_vehicle_count: int
     vehicle_count: int
+    excluded_vehicles: list[ComparisonExcludedVehicleResponse] = Field(default_factory=list)
     report_json: dict = Field(default_factory=dict)
     artifacts: list[ComparisonArtifactItem] = Field(default_factory=list)
     zip_url: str
@@ -421,6 +472,14 @@ class AdminFailedJobsDeleteResponse(BaseModel):
     db_expired_job_ids: list[str] = Field(default_factory=list)
     deleted_artifact_dirs: list[str] = Field(default_factory=list)
     redis_error: str | None = None
+
+
+class AdminRuntimeInfoResponse(BaseModel):
+    app_env: str
+    passphrase_version: str
+    access_control_enabled: bool
+    worker_queue_name: str
+    artifact_retention_days: int
 
 
 class TimeReportListResponse(BaseModel):

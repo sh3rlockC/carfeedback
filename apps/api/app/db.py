@@ -16,7 +16,7 @@ _SESSION_LOCAL = None
 def _engine_kwargs(database_url: str) -> dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {}
+    return {"pool_pre_ping": True}
 
 
 def init_db(settings: Settings | None = None) -> None:
@@ -46,19 +46,35 @@ def reset_engine_cache() -> None:
 def _sync_existing_schema(engine) -> None:
     inspector = inspect(engine)
     table_names = set(inspector.get_table_names())
-    if "jobs" not in table_names:
-        return
-
-    job_columns = {column["name"] for column in inspector.get_columns("jobs")}
     dialect = engine.dialect.name
     with engine.begin() as conn:
-        if "collection_mode" not in job_columns:
-            conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
-        if "collection_summary" not in job_columns:
-            if dialect == "postgresql":
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSONB NOT NULL DEFAULT '{}'::jsonb"))
-            else:
-                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
+        if "jobs" in table_names:
+            job_columns = {column["name"] for column in inspector.get_columns("jobs")}
+            if "collection_mode" not in job_columns:
+                conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
+            if "collection_summary" not in job_columns:
+                if dialect == "postgresql":
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSONB NOT NULL DEFAULT '{}'::jsonb"))
+                else:
+                    conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
+
+        if "task_vehicles" in table_names:
+            task_vehicle_columns = {column["name"] for column in inspector.get_columns("task_vehicles")}
+            if "enabled_platforms" not in task_vehicle_columns:
+                if dialect == "postgresql":
+                    conn.execute(
+                        text(
+                            "ALTER TABLE task_vehicles "
+                            "ADD COLUMN enabled_platforms JSONB NOT NULL DEFAULT '[\"autohome\", \"dongchedi\"]'::jsonb"
+                        )
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE task_vehicles "
+                            "ADD COLUMN enabled_platforms JSON NOT NULL DEFAULT '[\"autohome\", \"dongchedi\"]'"
+                        )
+                    )
 
 
 def get_session_local():

@@ -13,6 +13,8 @@ AUTO_RETRY_FAILURES = {
     "anti_bot_or_captcha",
     "page_load_error",
     "empty_data",
+    "collector_missing_result",
+    "rate_limited",
 }
 STOP_RETRY_FAILURES = {
     "series_not_found",

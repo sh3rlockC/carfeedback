@@ -1,6 +1,6 @@
 # 云服务器部署清单与上线步骤
 
-本文面向准备租用云服务器上线 `vehicle-koubei-web-demo` 的用户。当前项目是单机 Docker Compose 部署：Nginx 对外提供 Web 入口，后端 API、worker、Postgres、Redis 在同一台服务器内运行。
+本文面向准备租用云服务器上线 `carFeedbackv101` 的用户。当前项目是单机 Docker Compose 部署：Nginx 对外提供 Web 入口，后端 API、worker、Postgres、Redis 在同一台服务器内运行。
 
 ## 推荐服务器配置
 
@@ -69,11 +69,11 @@ volumes:
   - ..:/workspace:ro
 ```
 
-因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传 `vehicle-koubei-web-demo` 目录。推荐放置方式：
+因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传 `carFeedbackv101` 目录。推荐放置方式：
 
 ```text
 /opt/codexwork/
-  vehicle-koubei-web-demo/
+  carFeedbackv101/
   data/
     repos/
       vehicle-id-finder/
@@ -87,7 +87,7 @@ volumes:
 运行目录是：
 
 ```bash
-cd /opt/codexwork/vehicle-koubei-web-demo
+cd /opt/codexwork/carFeedbackv101
 ```
 
 容器内会通过 `WORKSPACE_ROOT=/workspace` 访问这些依赖目录：
@@ -111,34 +111,16 @@ cp .env.example .env
 
 然后编辑 `.env`。上线前至少需要确认以下项目。
 
-### 周口令
+### 访问策略
 
-项目通过周口令哈希做访问门禁：
-
-```env
-PASS_PHRASE_HASH=sha256:...
-PASS_PHRASE_VERSION=2026-W17
-SESSION_SECRET=请改成高强度随机字符串
-```
-
-要求：
-
-- 不要使用 `.env.example` 中的默认周口令
-- `PASS_PHRASE_HASH` 使用 `sha256:<hex>` 格式
-- `PASS_PHRASE_VERSION` 建议按周更新，例如 `2026-W17`
-- `SESSION_SECRET` 必须改成随机值，不能使用 `change-me`
-
-可用以下命令在服务器上生成 SHA-256 哈希：
-
-```bash
-printf '%s' '你的周口令' | sha256sum
-```
-
-然后写入：
+当前部署保留开放访问，不启用周口令门禁：
 
 ```env
-PASS_PHRASE_HASH=sha256:上一步输出的64位hex
+ACCESS_CONTROL_ENABLED=false
+NEXT_PUBLIC_ACCESS_CONTROL_ENABLED=false
 ```
+
+`PASS_PHRASE_HASH`、`PASS_PHRASE_VERSION`、`SESSION_SECRET` 仍保留为未来恢复门禁的兼容配置。本轮上线不要把 `ACCESS_CONTROL_ENABLED` 改回 `true`。
 
 ### Tavily
 
@@ -222,11 +204,11 @@ Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内�
 
 1. 准备服务器并安装 Docker、Docker Compose v2、Git。
 2. 将完整 workspace 放到服务器，例如 `/opt/codexwork`。
-3. 确认 `vehicle-koubei-web-demo` 与外部依赖目录位于同一个 workspace 下。
+3. 确认 `carFeedbackv101` 与外部依赖目录位于同一个 workspace 下。
 4. 进入项目目录：
 
 ```bash
-cd /opt/codexwork/vehicle-koubei-web-demo
+cd /opt/codexwork/carFeedbackv101
 ```
 
 5. 创建并编辑 `.env`：
@@ -459,13 +441,12 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - 域名已解析到服务器公网 IP。
 - 云厂商安全组已放行 TCP `80`，如接入 HTTPS 也已放行 TCP `443`。
 - Docker Engine、Docker Compose v2、Git 已安装。
-- 完整 workspace 已放置到服务器，且 `vehicle-koubei-web-demo` 与外部依赖目录保持相对位置。
+- 完整 workspace 已放置到服务器，且 `carFeedbackv101` 与外部依赖目录保持相对位置。
 - `.env` 已从 `.env.example` 复制并完成修改。
 - `APP_ENV=production`。
 - `BASE_URL` 已改成线上域名。
-- `PASS_PHRASE_HASH` 已替换默认值。
-- `PASS_PHRASE_VERSION` 已设置为当前周版本。
-- `SESSION_SECRET` 已替换为高强度随机字符串。
+- `ACCESS_CONTROL_ENABLED=false`，`NEXT_PUBLIC_ACCESS_CONTROL_ENABLED=false`。
+- 如未来恢复门禁，`PASS_PHRASE_HASH`、`PASS_PHRASE_VERSION`、`SESSION_SECRET` 已重新设置并完成验证。
 - `POSTGRES_PASSWORD` 已替换默认值，且与 `DATABASE_URL` 一致。
 - `TAVILY_API_KEY` 已配置。
 - LLM provider、API key、base URL 和模型名已配置并验证可用。
@@ -475,5 +456,5 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - `docker compose ps` 中核心服务为 running 或 healthy。
 - 两个 temporal-worker 副本均在运行。
 - `curl http://你的域名/healthz` 返回 `ok`。
-- Web 页面可打开，并能通过周口令门禁。
+- Web 页面可打开，创建任务不要求输入周口令。
 - 已制定 Postgres volume、Redis volume、job artifacts 和 corpus 目录的备份策略。

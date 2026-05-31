@@ -80,7 +80,7 @@ def record_stage_duration(
 def _engine_kwargs(database_url: str) -> dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {}
+    return {"pool_pre_ping": True}
 
 
 def _db_dimension_value(value: str | None) -> str:

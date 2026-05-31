@@ -72,6 +72,15 @@ def _write_business_zip(output_path: Path, files: Iterable[Path]) -> None:
     _write_zip_atomic(output_path, entries)
 
 
+def _write_structured_zip(output_path: Path, entries: Iterable[tuple[str | Path, str]]) -> None:
+    used: set[str] = set()
+    normalized_entries = [
+        (_existing_file(path), _unique_arcname(used, arcname))
+        for path, arcname in entries
+    ]
+    _write_zip_atomic(output_path, normalized_entries)
+
+
 def _normalise_vehicle_raw_paths(vehicle_raw_paths: Mapping[str, str | Path] | Iterable[str | Path]) -> list[tuple[str, Path]]:
     if isinstance(vehicle_raw_paths, Mapping):
         return [(str(label), Path(path)) for label, path in vehicle_raw_paths.items()]
@@ -83,15 +92,25 @@ def create_single_task_downloads(
     output_dir: str | Path,
     merged_raw_path: str | Path,
     business_files: Iterable[str | Path],
+    *,
+    one_pager_path: str | Path | None = None,
+    bundle_entries: Iterable[tuple[str | Path, str]] | None = None,
 ) -> list[TaskArtifactRecord]:
     merged_raw = _existing_file(merged_raw_path)
     business_paths = _existing_files(business_files)
+    one_pager = _existing_file(one_pager_path) if one_pager_path is not None else None
     business_zip_path = Path(output_dir) / f"{task_id}_business.zip"
-    _write_business_zip(business_zip_path, business_paths)
-    return [
+    if bundle_entries is None:
+        _write_business_zip(business_zip_path, business_paths)
+    else:
+        _write_structured_zip(business_zip_path, bundle_entries)
+    records = [
         TaskArtifactRecord(task_id=task_id, artifact_type="business_zip", path=str(business_zip_path)),
         TaskArtifactRecord(task_id=task_id, artifact_type="merged_raw_excel", path=str(merged_raw)),
     ]
+    if one_pager is not None:
+        records.append(TaskArtifactRecord(task_id=task_id, artifact_type="one_pager_excel", path=str(one_pager)))
+    return records
 
 
 def create_comparison_downloads(

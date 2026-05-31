@@ -6,12 +6,13 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { SectionHeader, SignalPanel, StatusPill } from "@/app/components/ui";
 import { apiRequest, ApiError } from "@/lib/api";
 import type { TaskArtifact, TaskDetailResponse } from "@/lib/api-types";
+import { withBasePath } from "@/lib/paths";
 
 type DetailView = "progress" | "result";
 
 const completedStatuses = new Set(["completed", "completed_degraded"]);
 const activeStatuses = new Set(["queued", "running", "waiting_agent", "retry_wait", "retry_paused"]);
-const resultArtifactTypes = new Set(["business_zip", "merged_raw_excel", "vehicle_raw_excel"]);
+const resultArtifactTypes = new Set(["business_zip", "merged_raw_excel", "vehicle_raw_excel", "one_pager_excel"]);
 
 const statusLabels: Record<string, string> = {
   queued: "排队中",
@@ -35,6 +36,7 @@ const stageLabels: Record<string, string> = {
   postprocessing: "汇总整理",
   summarizing: "摘要生成",
   rendering_wordcloud: "词云生成",
+  generating_hermes_outputs: "Hermes 报告生成",
   generating_ai_report: "AI 一页纸",
   building_qa_corpus: "问答索引",
   collecting_models: "补齐车型",
@@ -91,13 +93,146 @@ function isResultArtifact(artifact: TaskArtifact) {
   return resultArtifactTypes.has(artifact.artifact_type);
 }
 
+function isOnePagerArtifact(artifact: TaskArtifact): artifact is TaskArtifact & { url: string } {
+  return artifact.artifact_type === "json" && artifact.path.endsWith("final_report.json") && Boolean(artifact.url);
+}
+
 function artifactLabel(artifact: TaskArtifact) {
   const labels: Record<string, string> = {
     business_zip: "业务 ZIP",
     merged_raw_excel: "合并原始 Excel",
     vehicle_raw_excel: "车型原始 Excel",
+    one_pager_excel: "一页纸 Excel",
   };
   return labels[artifact.artifact_type] ?? artifact.artifact_type;
+}
+
+function platformLabel(platform: string) {
+  return platform === "autohome" ? "汽车之家" : platform === "dongchedi" ? "懂车帝" : platform;
+}
+
+function platformSeriesCell(vehicle: { enabled_platforms: string[]; autohome_series_id: string | null; dcd_series_id: string | null }, platform: "autohome" | "dongchedi") {
+  if (!vehicle.enabled_platforms.includes(platform)) {
+    return <StatusPill>用户跳过</StatusPill>;
+  }
+  return platform === "autohome" ? vehicle.autohome_series_id ?? "-" : vehicle.dcd_series_id ?? "-";
+}
+
+function formatPayload(payload: Record<string, unknown>) {
+  return JSON.stringify(payload, null, 2);
+}
+
+type OnePagerBlock = {
+  title: string;
+  summary: string;
+  evidenceIds: string[];
+};
+
+type OnePagerReport = {
+  headline: string;
+  executiveSummary: string;
+  bossBrief: string[];
+  platformStatuses: OnePagerBlock[];
+  strengthBlocks: OnePagerBlock[];
+  weaknessBlocks: OnePagerBlock[];
+  platformDifferenceBlocks: OnePagerBlock[];
+  actionBlocks: OnePagerBlock[];
+};
+
+function readString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function readStringArray(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map(readString).filter(Boolean);
+}
+
+function readBlocks(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const block = item as Record<string, unknown>;
+      const title = readString(block.title);
+      const summary = readString(block.summary);
+      const evidenceIds = readStringArray(block.evidence_ids);
+      if (!title && !summary) {
+        return null;
+      }
+      return {
+        title: title || "未命名条目",
+        summary,
+        evidenceIds,
+      } satisfies OnePagerBlock;
+    })
+    .filter((item): item is OnePagerBlock => Boolean(item));
+}
+
+function readPlatformStatuses(value: unknown): OnePagerBlock[] {
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+  const blocks: OnePagerBlock[] = [];
+  for (const [platform, status] of Object.entries(value as Record<string, Record<string, unknown>>)) {
+    if (!status || typeof status !== "object") {
+      continue;
+    }
+    const label = readString(status.label) || readString(status.status);
+    const rowCount = typeof status.row_count === "number" ? status.row_count : 0;
+    const title = `${platformLabel(platform)}：${label}`;
+    const summary =
+      label === "未查新增"
+        ? `本轮未完成新增检查，当前结论使用已入库历史评论 ${rowCount} 条。`
+        : `本轮已完成新增检查，当前结论使用已入库历史评论与新增评论 ${rowCount} 条。`;
+    blocks.push({ title, summary, evidenceIds: [] });
+  }
+  return blocks;
+}
+
+function normalizeOnePagerReport(payload: Record<string, unknown> | null): OnePagerReport | null {
+  if (!payload) {
+    return null;
+  }
+  return {
+    headline: readString(payload.headline),
+    executiveSummary: readString(payload.executive_summary),
+    bossBrief: readStringArray(payload.boss_brief),
+    platformStatuses: readPlatformStatuses(payload.platform_source_status),
+    strengthBlocks: readBlocks(payload.strength_blocks),
+    weaknessBlocks: readBlocks(payload.weakness_blocks),
+    platformDifferenceBlocks: readBlocks(payload.platform_difference_blocks),
+    actionBlocks: readBlocks(payload.action_blocks),
+  };
+}
+
+function OnePagerSection({ title, blocks }: { title: string; blocks: OnePagerBlock[] }) {
+  if (!blocks.length) {
+    return null;
+  }
+  return (
+    <section className="one-pager-section">
+      <div className="one-pager-section-head">
+        <p className="eyebrow">SECTION</p>
+        <h5>{title}</h5>
+      </div>
+      <div className="one-pager-blocks">
+        {blocks.map((block) => (
+          <article className="one-pager-block" key={`${title}-${block.title}-${block.summary}`}>
+            <strong>{block.title}</strong>
+            {block.summary ? <p>{block.summary}</p> : null}
+            {block.evidenceIds.length ? <span>证据：{block.evidenceIds.join("、")}</span> : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function progressPercent(task: TaskDetailResponse) {
@@ -124,6 +259,9 @@ function TaskDetailContent() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState("");
   const [error, setError] = useState("");
+  const [onePagerReport, setOnePagerReport] = useState<Record<string, unknown> | null>(null);
+  const [onePagerError, setOnePagerError] = useState("");
+  const [onePagerLoading, setOnePagerLoading] = useState(false);
 
   const detailPath = useMemo(() => {
     const paramsForRequest = new URLSearchParams();
@@ -176,7 +314,58 @@ function TaskDetailContent() {
     };
   }, [detailPath]);
 
+  useEffect(() => {
+    if (!task || !activeStatuses.has(task.status)) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      void loadTask();
+    }, 5000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [detailPath, task, task?.status]);
+
   const resultArtifacts = useMemo(() => (task?.artifacts ?? []).filter(isResultArtifact), [task?.artifacts]);
+  const onePagerArtifact = useMemo(() => (task?.artifacts ?? []).find(isOnePagerArtifact) || null, [task?.artifacts]);
+  const onePager = normalizeOnePagerReport(onePagerReport);
+
+  useEffect(() => {
+    if (!onePagerArtifact?.url) {
+      setOnePagerReport(null);
+      setOnePagerError("");
+      return;
+    }
+
+    let cancelled = false;
+
+    const run = async () => {
+      setOnePagerLoading(true);
+      setOnePagerError("");
+      try {
+        const artifactUrl = onePagerArtifact.url!;
+        const report = await apiRequest<Record<string, unknown>>(withBasePath(artifactUrl));
+        if (!cancelled) {
+          setOnePagerReport(report);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setOnePagerError(err instanceof ApiError ? err.message : "读取一页纸失败。");
+        }
+      } finally {
+        if (!cancelled) {
+          setOnePagerLoading(false);
+        }
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [onePagerArtifact?.url]);
 
   const runManagementAction = async (action: "cancel" | "retry" | "pause-retry") => {
     if (!manageToken) {
@@ -240,6 +429,12 @@ function TaskDetailContent() {
             <span>后续重试补齐了完整结果。</span>
           </SignalPanel>
         ) : null}
+        {task.issue_summary ? (
+          <SignalPanel tone="danger" className="task-inline-banner">
+            <strong>问题摘要</strong>
+            <span>{task.issue_summary}</span>
+          </SignalPanel>
+        ) : null}
 
         <div className="task-load-row">
           <div>
@@ -294,15 +489,31 @@ function TaskDetailContent() {
                   <th>状态</th>
                   <th>汽车之家</th>
                   <th>懂车帝</th>
+                  <th>问题</th>
                 </tr>
               </thead>
               <tbody>
                 {task.vehicles.map((vehicle) => (
                   <tr key={vehicle.task_vehicle_id}>
                     <td>{vehicle.model_name || vehicle.query}</td>
-                    <td>{labelFor(vehicle.status, statusLabels)}</td>
-                    <td>{vehicle.autohome_series_id ?? "-"}</td>
-                    <td>{vehicle.dcd_series_id ?? "-"}</td>
+                    <td>
+                      <StatusPill tone={statusTone(vehicle.status)}>{labelFor(vehicle.status, statusLabels)}</StatusPill>
+                    </td>
+                    <td>{platformSeriesCell(vehicle, "autohome")}</td>
+                    <td>{platformSeriesCell(vehicle, "dongchedi")}</td>
+                    <td>
+                      {vehicle.error_code || vehicle.error_message || vehicle.missing_platforms.length ? (
+                        <div className="stack">
+                          {vehicle.error_code ? <StatusPill tone="danger">{vehicle.error_code}</StatusPill> : null}
+                          {vehicle.missing_platforms.length ? (
+                            <span className="field-hint">缺失：{vehicle.missing_platforms.map(platformLabel).join("、")}</span>
+                          ) : null}
+                          {vehicle.error_message ? <span className="error">{vehicle.error_message}</span> : null}
+                        </div>
+                      ) : (
+                        "-"
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -318,12 +529,63 @@ function TaskDetailContent() {
             </div>
             <StatusPill tone={statusTone(task.status)}>{labelFor(task.status, statusLabels)}</StatusPill>
           </div>
+          {onePagerArtifact ? <h4>AI 一页纸（在线）</h4> : null}
+          {onePagerArtifact ? (
+            <div className="stack">
+              {onePagerLoading ? <p className="status-copy">一页纸加载中...</p> : null}
+              {onePagerError ? <p className="error">{onePagerError}</p> : null}
+              {onePager ? (
+                <section className="one-pager-sheet">
+                  <div className="one-pager-hero">
+                    <p className="eyebrow">ONE PAGER</p>
+                    <h4>{onePager.headline || "AI 一页纸"}</h4>
+                    {onePager.executiveSummary ? <p>{onePager.executiveSummary}</p> : null}
+                  </div>
+                  {onePager.bossBrief.length ? (
+                    <section className="one-pager-section one-pager-brief">
+                      <div className="one-pager-section-head">
+                        <p className="eyebrow">BOSS BRIEF</p>
+                        <h5>管理层摘要</h5>
+                      </div>
+                      <div className="one-pager-brief-list">
+                        {onePager.bossBrief.map((item) => (
+                          <article className="brief-card" key={item}>
+                            <span>摘要</span>
+                            <p>{item}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </section>
+                  ) : null}
+                  <OnePagerSection title="数据状态" blocks={onePager.platformStatuses} />
+                  <div className="one-pager-grid">
+                    <OnePagerSection title="核心优势" blocks={onePager.strengthBlocks} />
+                    <OnePagerSection title="核心短板" blocks={onePager.weaknessBlocks} />
+                  </div>
+                  <div className="one-pager-grid">
+                    <OnePagerSection title="平台差异" blocks={onePager.platformDifferenceBlocks} />
+                    <OnePagerSection title="行动建议" blocks={onePager.actionBlocks} />
+                  </div>
+                </section>
+              ) : null}
+              {onePagerReport && !onePager ? <pre className="artifact-path">{formatPayload(onePagerReport)}</pre> : null}
+              <a className="button secondary" href={withBasePath(onePagerArtifact.url)}>
+                下载一页纸 JSON
+              </a>
+            </div>
+          ) : null}
           <div className="artifact-grid">
             {resultArtifacts.map((artifact) => (
               <div className="card" key={artifact.artifact_id}>
                 <h4>{artifactLabel(artifact)}</h4>
                 <p className="artifact-path">{artifact.path}</p>
-                <StatusPill tone="warning">{artifact.downloadable ? "下载入口未暴露" : "不可直接下载"}</StatusPill>
+                {artifact.downloadable && artifact.url ? (
+                  <a className="button secondary" href={withBasePath(artifact.url)}>
+                    下载
+                  </a>
+                ) : (
+                  <StatusPill tone="warning">不可直接下载</StatusPill>
+                )}
               </div>
             ))}
             {!resultArtifacts.length ? <p className="status-copy">当前详情未返回可展示产物。</p> : null}
@@ -371,6 +633,13 @@ function TaskDetailContent() {
               <div>
                 <strong>{event.event_type}</strong>
                 <p className="field-hint">{formatDateTime(event.created_at)}</p>
+                {event.summary ? <p className="status-copy">{event.summary}</p> : null}
+                {Object.keys(event.payload).length ? (
+                  <details>
+                    <summary>查看 payload</summary>
+                    <pre className="artifact-path">{formatPayload(event.payload)}</pre>
+                  </details>
+                ) : null}
               </div>
             </div>
           ))}

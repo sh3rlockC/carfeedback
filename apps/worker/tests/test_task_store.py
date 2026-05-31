@@ -47,6 +47,7 @@ def create_schema(db_path: Path) -> None:
                 model_name TEXT NOT NULL,
                 autohome_series_id TEXT,
                 dcd_series_id TEXT,
+                enabled_platforms TEXT NOT NULL DEFAULT '["autohome", "dongchedi"]',
                 status TEXT NOT NULL DEFAULT 'queued',
                 result_snapshot_json TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL,
@@ -145,9 +146,9 @@ def seed_vehicle(db_path: Path, *, task_id: str, position: int, query: str, mode
             """
             INSERT INTO task_vehicles (
                 task_id, position, query, model_name, autohome_series_id, dcd_series_id,
-                status, result_snapshot_json, created_at, updated_at
+                enabled_platforms, status, result_snapshot_json, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, '8089', '25398', 'queued', ?, datetime('now'), datetime('now'))
+            VALUES (?, ?, ?, ?, '8089', '25398', '["autohome", "dongchedi"]', 'queued', ?, datetime('now'), datetime('now'))
             """,
             (task_id, position, query, model_name, json.dumps({"position": position})),
         )
@@ -174,6 +175,7 @@ def test_load_task_returns_task_with_sorted_vehicles(tmp_path: Path) -> None:
     assert task.collection_mode == "full"
     assert [vehicle.position for vehicle in task.vehicles] == [1, 2]
     assert task.vehicles[0].query == "测试车 A"
+    assert task.vehicles[0].enabled_platforms == ["autohome", "dongchedi"]
     assert task.vehicles[0].result_snapshot_json == {"position": 1}
 
 

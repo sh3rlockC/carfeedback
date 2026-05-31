@@ -4,6 +4,8 @@ import asyncio
 import json
 import sqlite3
 import sys
+import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,7 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from test_task_store import create_schema, seed_task
+from test_task_store import create_schema, seed_task, seed_vehicle
+from worker_app.corpus import upsert_platform_rows
 from worker_app.task_store import TaskStore
 from worker_app.temporal_activities import (
     DEFAULT_COLLECTOR_WAIT_POLL_SECONDS,
@@ -79,7 +82,7 @@ def run_workflow(runner: FakeActivityRunner) -> dict[str, Any]:
     return asyncio.run(run_single_vehicle_task("task_1", runner))
 
 
-def task_payload() -> dict[str, Any]:
+def task_payload(*, enabled_platforms: list[str] | None = None, dcd_series_id: str | None = "25398") -> dict[str, Any]:
     return {
         "task_id": "task_1",
         "task_type": "single_vehicle",
@@ -92,7 +95,8 @@ def task_payload() -> dict[str, Any]:
                 "query": "测试车",
                 "model_name": "测试车",
                 "autohome_series_id": "8089",
-                "dcd_series_id": "25398",
+                "dcd_series_id": dcd_series_id,
+                "enabled_platforms": enabled_platforms or ["autohome", "dongchedi"],
             }
         ],
     }
@@ -121,6 +125,72 @@ def resolved_inputs() -> dict[str, Any]:
         },
         "failed_platforms": [],
     }
+
+
+def test_resolve_vehicle_inputs_ignores_user_disabled_platform() -> None:
+    payload = task_payload(enabled_platforms=["autohome"], dcd_series_id=None)
+
+    result = asyncio.run(
+        TaskActivities().resolve_vehicle_inputs(
+            {
+                "task_id": "task_1",
+                "vehicles": payload["vehicles"],
+                "mode": "incremental",
+            }
+        )
+    )
+
+    assert result["ok"] is True
+    assert set(result["platforms"]) == {"autohome"}
+    assert result["failed_platforms"] == []
+    assert result["enabled_platforms"] == ["autohome"]
+
+
+def test_single_platform_task_publishes_degraded_without_retrying_skipped_platform() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload(enabled_platforms=["autohome"], dcd_series_id=None)],
+            "resolve_vehicle_inputs": [
+                {
+                    "ok": True,
+                    "platforms": {
+                        "autohome": {
+                            "task_id": "task_1",
+                            "platform": "autohome",
+                            "query_key": "测试车",
+                            "model_name": "测试车",
+                            "series_id": "8089",
+                            "mode": "incremental",
+                        }
+                    },
+                    "failed_platforms": [],
+                    "enabled_platforms": ["autohome"],
+                }
+            ],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome"],
+                    "failed_platforms": [],
+                    "runs": {"autohome": {"run_id": "run_ah"}},
+                }
+            ],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
+            "publish_degraded_result": [{"status": "completed_degraded"}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "completed_degraded"}
+    assert task.status == "completed_degraded"
+    assert "schedule_retry" not in runner.call_names()
+    assert "mark_task_failed" not in runner.call_names()
 
 
 def test_both_platforms_succeed_completes_full_result() -> None:
@@ -219,6 +289,39 @@ def test_one_retryable_platform_failure_publishes_degraded_and_schedules_retry()
     assert degraded_payload["report_result"]["artifact_paths"] == ["/tmp/final_report.json"]
 
 
+def test_retry_paused_skips_automatic_retry_after_degraded_publish() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": ["autohome"],
+                    "failed_platforms": [
+                        {"platform": "dongchedi", "run_id": "run_dcd", "failure_category": "timeout", "retryable": True}
+                    ],
+                }
+            ],
+            "import_run_rows_to_corpus": [{"imported_rows": 12}],
+            "export_vehicle_workbooks": [{"artifact_paths": ["/tmp/raw.xlsx"]}],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
+            "publish_degraded_result": [{"status": "completed_degraded"}],
+            "is_retry_paused": [{"paused": True}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "completed_degraded"}
+    assert "is_retry_paused" in runner.call_names()
+    assert "schedule_retry" not in runner.call_names()
+    assert "retry_failed_platforms" not in runner.call_names()
+
+
 def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
     task = FakeTask()
     runner = FakeActivityRunner(
@@ -268,7 +371,7 @@ def test_failed_platform_retry_success_upgrades_task_to_full() -> None:
     assert any(event.event_type == "upgraded_to_full" for event in task.events)
 
 
-def test_all_platforms_failed_marks_task_failed() -> None:
+def test_all_platforms_failed_without_history_marks_task_failed() -> None:
     task = FakeTask()
     runner = FakeActivityRunner(
         task,
@@ -285,6 +388,10 @@ def test_all_platforms_failed_marks_task_failed() -> None:
                     ],
                 }
             ],
+            "import_run_rows_to_corpus": [{"imported_rows": 0}],
+            "export_vehicle_workbooks": [{"artifact_paths": [], "task_raw_paths": [], "report_platforms": []}],
+            "run_postprocess": [{"artifact_paths": [], "skipped": True}],
+            "run_llm_report": [{"artifact_paths": [], "skipped": True}],
             "mark_task_failed": [{"status": "failed"}],
         },
     )
@@ -294,6 +401,49 @@ def test_all_platforms_failed_marks_task_failed() -> None:
     assert result == {"task_id": "task_1", "status": "failed"}
     assert task.status == "failed"
     assert any(event.event_type == "task_failed" for event in task.events)
+
+
+def test_all_platforms_failed_with_history_publishes_degraded_result() -> None:
+    task = FakeTask()
+    runner = FakeActivityRunner(
+        task,
+        {
+            "load_task": [task_payload()],
+            "resolve_vehicle_inputs": [resolved_inputs()],
+            "create_or_join_collection_run": [{"run_id": "run_ah"}, {"run_id": "run_dcd"}],
+            "wait_for_collection_runs": [
+                {
+                    "successful_platforms": [],
+                    "failed_platforms": [
+                        {"platform": "autohome", "run_id": "run_ah", "failure_category": "timeout", "retryable": True},
+                        {"platform": "dongchedi", "run_id": "run_dcd", "failure_category": "timeout", "retryable": True},
+                    ],
+                    "runs": {"autohome": {"run_id": "run_ah"}, "dongchedi": {"run_id": "run_dcd"}},
+                }
+            ],
+            "import_run_rows_to_corpus": [{"imported_rows": 0}],
+            "export_vehicle_workbooks": [
+                {
+                    "artifact_paths": ["/tmp/autohome.xlsx", "/tmp/dcd.xlsx"],
+                    "task_raw_paths": ["/tmp/autohome.xlsx", "/tmp/dcd.xlsx"],
+                    "report_platforms": ["autohome", "dongchedi"],
+                    "platform_statuses": {
+                        "autohome": {"status": "historical_unchecked", "label": "未查新增"},
+                        "dongchedi": {"status": "historical_unchecked", "label": "未查新增"},
+                    },
+                }
+            ],
+            "run_postprocess": [{"artifact_paths": ["/tmp/analysis_facts.jsonl"], "skipped": False}],
+            "run_llm_report": [{"artifact_paths": ["/tmp/final_report.json"], "skipped": False}],
+            "publish_degraded_result": [{"status": "completed_degraded"}],
+        },
+    )
+
+    result = run_workflow(runner)
+
+    assert result == {"task_id": "task_1", "status": "completed_degraded"}
+    assert task.status == "completed_degraded"
+    assert "mark_task_failed" not in runner.call_names()
 
 
 def test_pending_with_one_success_times_out_to_degraded_without_full_publish() -> None:
@@ -442,6 +592,11 @@ def test_all_pending_marks_task_failed_instead_of_publishing_full() -> None:
             "run_id": "run_dcd",
             "failure_category": "collector_pending_timeout",
             "retryable": True,
+        },
+        {
+            "platform": "postprocess_or_report",
+            "failure_category": "postprocess_or_report_deferred",
+            "retryable": False,
         },
     ]
 
@@ -642,6 +797,10 @@ def test_wait_for_collection_runs_polls_until_terminal_before_returning_pending(
 
     monkeypatch.setenv("COLLECTOR_WAIT_POLL_SECONDS", "1")
     monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "30")
+    async def no_dispatch(self, task_id, run_ids) -> None:
+        return None
+
+    monkeypatch.setattr(TaskActivities, "_dispatch_pending_collection_runs", no_dispatch)
     monkeypatch.setattr(
         temporal_activities,
         "asyncio",
@@ -659,3 +818,447 @@ def test_wait_for_collection_runs_polls_until_terminal_before_returning_pending(
     assert sleep_calls == [1.0]
     assert result["successful_platforms"] == ["autohome", "dongchedi"]
     assert result["pending_platforms"] == []
+
+
+def test_wait_for_collection_runs_dispatches_queued_runs_before_returning(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    dispatched: list[str] = []
+
+    def fake_dispatch(self, queued_run, *, task_id: str | None = None) -> None:
+        asyncio.run(asyncio.sleep(0))
+        dispatched.append(queued_run.run_id)
+        connection = sqlite3.connect(db_path)
+        try:
+            connection.execute(
+                "UPDATE collection_runs SET status = 'succeeded', output_path = ? WHERE run_id = ?",
+                (str(tmp_path / "run-output.xlsx"), queued_run.run_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    monkeypatch.setattr(TaskActivities, "_dispatch_collection_run", fake_dispatch, raising=False)
+    monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "0")
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(activity.wait_for_collection_runs({"task_id": "task_1", "run_ids": [run.run_id]}))
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            "SELECT status, current_stage FROM tasks WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert dispatched == [run.run_id]
+    assert result["successful_platforms"] == ["autohome"]
+    assert result["pending_platforms"] == []
+    assert task_row == ("running", "running")
+
+
+def test_wait_for_collection_runs_submits_and_polls_collector_service(tmp_path: Path, monkeypatch) -> None:
+    from worker_app.collector_models import CollectorRunStatus
+
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="incremental",
+        task_id="task_1",
+    )
+    output_path = tmp_path / "ZJ测试车原始口碑.xlsx"
+    submitted: list[dict[str, Any]] = []
+    polled: list[str] = []
+
+    class FakeCollectorClient:
+        def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
+            assert base_url == "http://collector.test"
+
+        def submit_run(self, request):
+            submitted.append(request.model_dump())
+            return CollectorRunStatus(
+                run_id=request.run_id,
+                platform=request.platform,
+                status="running",
+                progress_current=0,
+                progress_total=1,
+            )
+
+        def get_run(self, run_id: str):
+            polled.append(run_id)
+            return CollectorRunStatus(
+                run_id=run_id,
+                platform="autohome",
+                status="succeeded",
+                progress_current=1,
+                progress_total=1,
+                output_path=str(output_path),
+                resume_cursor={"page": 1},
+            )
+
+    monkeypatch.setenv("AUTOHOME_COLLECTOR_SERVICE_URL", "http://collector.test")
+    monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "0")
+    monkeypatch.setattr(temporal_activities, "CollectorClient", FakeCollectorClient)
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(activity.wait_for_collection_runs({"task_id": "task_1", "run_ids": [run.run_id]}))
+
+    assert submitted == [
+        {
+            "run_id": run.run_id,
+            "task_id": "task_1",
+            "platform": "autohome",
+            "query_key": "测试车",
+            "model_name": "测试车",
+            "series_id": "8089",
+            "mode": "incremental",
+            "known_links": [],
+            "resume_cursor": {},
+            "max_scan_pages": 10,
+            "stop_after_known_pages": 2,
+        }
+    ]
+    assert polled == [run.run_id]
+    assert result["successful_platforms"] == ["autohome"]
+    assert result["pending_platforms"] == []
+    assert result["runs"]["autohome"]["output_path"] == str(output_path)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        event_types = [
+            row[0]
+            for row in connection.execute(
+                "SELECT event_type FROM collector_events WHERE run_id = ? ORDER BY id",
+                (run.run_id,),
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+    assert event_types == ["collector_submitted", "collector_status_polled", "collector_succeeded"]
+
+
+def test_publish_full_result_creates_task_center_download_artifacts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    database_url = f"sqlite+pysqlite:///{db_path}"
+
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="autohome",
+        series_id="8089",
+        job_id="task_1",
+        rows=[{"用户名": "车主A", "发表日期": "2026-05-01", "评价详情": "汽车之家评论", "来源链接": "https://a.example/1"}],
+    )
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="dongchedi",
+        series_id="25398",
+        job_id="task_1",
+        rows=[{"用户名": "车主B", "发布时间": "2026-05-02", "评价全文": "懂车帝评论", "来源链接": "https://d.example/1"}],
+    )
+
+    final_report = tmp_path / "ai" / "final_report.json"
+    analysis_facts = tmp_path / "ai" / "analysis_facts.jsonl"
+    summary = tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx"
+    final_report.parent.mkdir(parents=True, exist_ok=True)
+    summary.parent.mkdir(parents=True, exist_ok=True)
+    final_report.write_text('{"headline":"测试车口碑摘要"}', encoding="utf-8")
+    analysis_facts.write_text('{"fact":"ok"}\n', encoding="utf-8")
+    summary.write_text("summary", encoding="utf-8")
+
+    activity = TaskActivities(database_url=database_url)
+    result = asyncio.run(
+        activity.publish_full_result(
+            {
+                "task_id": "task_1",
+                "task": {
+                    "vehicles": [
+                        {
+                            "id": 1,
+                            "position": 1,
+                            "query": "测试车",
+                            "model_name": "测试车",
+                            "autohome_series_id": "8089",
+                            "dcd_series_id": "25398",
+                            "enabled_platforms": ["autohome", "dongchedi"],
+                        }
+                    ]
+                },
+                "results": {"successful_platforms": ["autohome", "dongchedi"], "failed_platforms": []},
+                "postprocess_result": {"artifact_paths": [str(analysis_facts)]},
+                "report_result": {"artifact_paths": [str(summary), str(final_report)]},
+            }
+        )
+    )
+
+    assert result == {"task_id": "task_1", "status": "completed"}
+
+    connection = sqlite3.connect(db_path)
+    try:
+        artifact_rows = connection.execute(
+            "SELECT artifact_type, path, downloadable FROM task_artifacts WHERE task_id = ? ORDER BY artifact_type, path",
+            ("task_1",),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    artifact_types = [row[0] for row in artifact_rows]
+    assert "business_zip" in artifact_types
+    assert "merged_raw_excel" in artifact_types
+
+
+def test_export_vehicle_workbooks_exposes_failed_platform_history_as_unchecked(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("KOUBEI_CORPUS_ROOT", str(tmp_path / "corpus"))
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    database_url = f"sqlite+pysqlite:///{db_path}"
+
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="autohome",
+        series_id="8089",
+        job_id="history_autohome",
+        rows=[{"用户名": "车主A", "发表日期": "2026-05-01", "评价详情": "汽车之家历史评论", "来源链接": "https://a.example/1"}],
+    )
+    upsert_platform_rows(
+        database_url=database_url,
+        query="测试车",
+        model_name="测试车",
+        platform="dongchedi",
+        series_id="25398",
+        job_id="task_1",
+        rows=[{"用户名": "车主B", "发布时间": "2026-05-02", "评价全文": "懂车帝当前评论", "来源链接": "https://d.example/1"}],
+    )
+
+    activity = TaskActivities(database_url=database_url)
+    result = asyncio.run(
+        activity.export_vehicle_workbooks(
+            {
+                "task_id": "task_1",
+                "task": task_payload(),
+                "results": {
+                    "successful_platforms": ["dongchedi"],
+                    "failed_platforms": [{"platform": "autohome", "failure_category": "collector_missing_result"}],
+                },
+            }
+        )
+    )
+
+    task_raw_paths = result["task_raw_paths"]
+    assert task_raw_paths == [
+        str(tmp_path / "artifacts" / "task_1" / "outputs" / "raw" / "ZJ测试车原始口碑.xlsx"),
+        str(tmp_path / "artifacts" / "task_1" / "outputs" / "raw" / "DCD口碑_测试车.xlsx"),
+    ]
+    assert set(result["corpus"]["platforms"]) == {"autohome", "dongchedi"}
+    assert result["report_platforms"] == ["autohome", "dongchedi"]
+    assert result["platform_statuses"]["autohome"]["status"] == "historical_unchecked"
+    assert result["platform_statuses"]["autohome"]["label"] == "未查新增"
+    assert result["platform_statuses"]["dongchedi"]["status"] == "current_collected"
+    assert any("autohome/source_status.json" in path for path in result["artifact_paths"])
+    assert any("dongchedi/source_status.json" in path for path in result["artifact_paths"])
+
+
+def test_run_postprocess_marks_task_stage_before_running(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    monkeypatch.setenv("TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED", "true")
+    monkeypatch.setattr(
+        TaskActivities,
+        "_build_stage_command",
+        lambda self, **kwargs: (object(), None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        TaskActivities,
+        "_run_stage_command",
+        lambda self, **kwargs: {"status": "success", "artifact_paths": [str(tmp_path / "post.xlsx")], "output_metadata": {}},
+        raising=False,
+    )
+
+    result = asyncio.run(
+        activity.run_postprocess(
+            {
+                "task_id": "task_1",
+                "task": task_payload(),
+                "results": {"successful_platforms": ["autohome", "dongchedi"]},
+            }
+        )
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            "SELECT status, current_stage FROM tasks WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert result["fallback"] is False
+    assert task_row == ("running", "postprocessing")
+
+
+def test_run_llm_report_marks_task_stage_before_running(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    final_report = tmp_path / "final_report.json"
+    final_report.write_text('{"headline":"测试车"}', encoding="utf-8")
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    monkeypatch.setenv("TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED", "true")
+    monkeypatch.setattr(
+        TaskActivities,
+        "_build_stage_command",
+        lambda self, **kwargs: (object(), None),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        TaskActivities,
+        "_run_stage_command",
+        lambda self, **kwargs: {"status": "success", "artifact_paths": [str(final_report)], "output_metadata": {}},
+        raising=False,
+    )
+
+    result = asyncio.run(
+        activity.run_llm_report(
+            {
+                "task_id": "task_1",
+                "task": task_payload(),
+                "results": {"successful_platforms": ["autohome", "dongchedi"]},
+            }
+        )
+    )
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_row = connection.execute(
+            "SELECT status, current_stage FROM tasks WHERE task_id = ?",
+            ("task_1",),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert result["fallback"] is False
+    assert task_row == ("running", "generating_hermes_outputs")
+
+
+def test_run_llm_report_marks_historical_platform_as_unchecked(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    seed_vehicle(db_path, task_id="task_1", position=1, query="测试车", model_name="测试车")
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(
+        activity.run_llm_report(
+            {
+                "task_id": "task_1",
+                "task": task_payload(),
+                "results": {
+                    "successful_platforms": ["dongchedi"],
+                    "failed_platforms": [{"platform": "autohome", "failure_category": "collector_missing_result"}],
+                },
+                "export_result": {
+                    "report_platforms": ["autohome", "dongchedi"],
+                    "platform_statuses": {
+                        "autohome": {
+                            "platform": "autohome",
+                            "status": "historical_unchecked",
+                            "label": "未查新增",
+                            "row_count": 12,
+                        },
+                        "dongchedi": {
+                            "platform": "dongchedi",
+                            "status": "current_collected",
+                            "label": "已查新增",
+                            "row_count": 5,
+                        },
+                    },
+                },
+            }
+        )
+    )
+
+    final_report_path = next(Path(path) for path in result["artifact_paths"] if str(path).endswith("final_report.json"))
+    report = json.loads(final_report_path.read_text(encoding="utf-8"))
+
+    assert report["platform_source_status"]["autohome"]["label"] == "未查新增"
+    assert "未查新增" in json.dumps(report["platform_difference_blocks"], ensure_ascii=False)
+
+
+def test_run_llm_report_stage_execution_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+    final_report = tmp_path / "final_report.json"
+    final_report.write_text("{}", encoding="utf-8")
+    activity = TaskActivities(database_url=None)
+
+    monkeypatch.setenv("TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED", "true")
+    monkeypatch.setattr(
+        TaskActivities,
+        "_build_stage_command",
+        lambda self, **kwargs: (object(), None),
+        raising=False,
+    )
+
+    def slow_stage(self, **kwargs):
+        time.sleep(0.1)
+        return {"status": "success", "artifact_paths": [str(final_report)], "output_metadata": {}}
+
+    monkeypatch.setattr(TaskActivities, "_run_stage_command", slow_stage, raising=False)
+
+    async def scenario() -> dict[str, Any]:
+        report_task = asyncio.create_task(
+            activity.run_llm_report(
+                {
+                    "task_id": "task_1",
+                    "task": task_payload(),
+                    "results": {"successful_platforms": ["autohome", "dongchedi"]},
+                }
+            )
+        )
+        started_at = time.perf_counter()
+        await asyncio.sleep(0.02)
+        elapsed = time.perf_counter() - started_at
+        assert elapsed < 0.08
+        assert not report_task.done()
+        return await report_task
+
+    result = asyncio.run(scenario())
+
+    assert result["fallback"] is False

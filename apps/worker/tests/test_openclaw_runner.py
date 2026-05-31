@@ -446,6 +446,41 @@ def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_acceptance(tm
     assert set(result.artifact_paths) == set(stage.expected_artifacts)
 
 
+def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_completion(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+
+    class CompletedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            def write_artifacts() -> None:
+                time.sleep(0.05)
+                for artifact in stage.expected_artifacts:
+                    Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                    Path(artifact).write_text("artifact", encoding="utf-8")
+
+            threading.Thread(target=write_artifacts, daemon=True).start()
+            return {"status": "completed", "taskId": "task-1"}
+
+    result = run_autohome_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(enabled=True, timeout_seconds=2, artifact_poll_interval_seconds=0.01),
+        gateway_client=CompletedGatewayClient(),
+    )
+
+    assert set(result.artifact_paths) == set(stage.expected_artifacts)
+
+
 def test_run_autohome_via_openclaw_fails_fast_when_accepted_task_fails(tmp_path: Path) -> None:
     stage = make_autohome_stage(tmp_path)
     job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,26 @@ def test_comparison_collects_two_vehicles_and_reuses_existing_corpus_snapshot() 
     report_payload = runner.payloads("generate_comparison_report")[0]
     assert [vehicle["vehicle_id"] for vehicle in report_payload["vehicles"]] == [1, 2, 3]
     assert report_payload["vehicles"][2]["reused"] is True
+
+
+def test_comparison_marks_comparing_before_generating_report() -> None:
+    runner = FakeComparisonActivityRunner(
+        {
+            "load_comparison_task": [comparison_task()],
+            "ensure_vehicle_subworkflow": [{"child_task_id": "job_1"}, {"child_task_id": "job_2"}],
+            "wait_for_vehicle_results": [
+                usable_vehicle(1, "测试车A"),
+                usable_vehicle(2, "测试车B"),
+                usable_vehicle(3, "测试车C", reused=True, source_job_id="job_reused_c"),
+            ],
+            "generate_comparison_report": [{"report_json": {}, "artifact_paths": []}],
+            "publish_comparison_result": [{"status": "completed"}],
+        }
+    )
+
+    run_workflow(runner)
+
+    assert runner.call_names().index("mark_comparison_comparing") < runner.call_names().index("generate_comparison_report")
 
 
 def test_comparison_starts_all_child_workflows_before_waiting_for_results() -> None:
@@ -543,6 +564,98 @@ def test_ensure_vehicle_subworkflow_reuses_child_task_from_comparison_vehicle(tm
     assert child_job_id == first["child_task_id"]
 
 
+def test_load_comparison_task_reads_native_task_table(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            INSERT INTO tasks (
+                task_id, task_type, display_name, status, current_stage,
+                view_token_hash, manage_token_hash, manage_token_expires_at,
+                collection_mode, created_at, updated_at
+            )
+            VALUES (?, 'comparison', ?, 'queued', 'queued', 'view', 'manage', '2030-01-01T00:00:00+00:00', 'incremental', datetime('now'), datetime('now'))
+            """,
+            ("task_cmp_1", "测试车A vs 测试车B"),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_vehicles (
+                task_id, position, query, model_name, autohome_series_id, dcd_series_id,
+                enabled_platforms, status, result_snapshot_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, '["autohome", "dongchedi"]', 'queued', '{}', datetime('now'), datetime('now'))
+            """,
+            ("task_cmp_1", 1, "测试车A", "测试车A", "1001", "2001"),
+        )
+        connection.execute(
+            """
+            INSERT INTO task_vehicles (
+                task_id, position, query, model_name, autohome_series_id, dcd_series_id,
+                enabled_platforms, status, result_snapshot_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, '["autohome", "dongchedi"]', 'queued', '{}', datetime('now'), datetime('now'))
+            """,
+            ("task_cmp_1", 2, "测试车B", "测试车B", "1002", "2002"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    payload = asyncio.run(activities.load_comparison_task("task_cmp_1"))
+
+    assert payload["comparison_id"] == "task_cmp_1"
+    assert payload["task_type"] == "comparison"
+    assert [vehicle["query"] for vehicle in payload["vehicles"]] == ["测试车A", "测试车B"]
+    assert payload["vehicles"][0]["autohome_series_id"] == "1001"
+    assert payload["vehicles"][0]["dcd_series_id"] == "2001"
+    assert payload["vehicles"][0]["selected_candidates"]["autohome"]["series_id"] == "1001"
+
+
+def test_native_comparison_child_task_is_reused_from_task_vehicle_snapshot(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_parent")
+    seed_vehicle(db_path, task_id="task_parent", position=1, query="测试车A", model_name="测试车A")
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    payload = {
+        "comparison_id": "task_parent",
+        "task": {"passphrase_version": ""},
+        "vehicle": {
+            "id": 1,
+            "native_task_vehicle_id": 1,
+            "position": 1,
+            "query": "测试车A",
+            "model_name": "测试车A",
+            "autohome_series_id": "1001",
+            "dcd_series_id": "2001",
+        },
+    }
+
+    first = asyncio.run(activities.ensure_vehicle_subworkflow(payload))
+    second = asyncio.run(activities.ensure_vehicle_subworkflow(payload))
+
+    connection = sqlite3.connect(db_path)
+    try:
+        task_count = connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        snapshot = json.loads(
+            connection.execute("SELECT result_snapshot_json FROM task_vehicles WHERE id = 1").fetchone()[0]
+        )
+    finally:
+        connection.close()
+
+    assert second["child_task_id"] == first["child_task_id"]
+    assert task_count == 2
+    assert snapshot["child_task_id"] == first["child_task_id"]
+
+
 def test_wait_for_vehicle_results_reads_upgrade_and_snapshot_from_child_task(tmp_path: Path, monkeypatch) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)
@@ -617,6 +730,82 @@ def test_wait_for_vehicle_results_reads_upgrade_and_snapshot_from_child_task(tmp
     assert "incomplete_source" not in result["labels"]
     assert Path(result["snapshot"]["final_report_path"]).exists()
     assert Path(result["snapshot"]["analysis_facts_path"]).exists()
+
+
+def test_wait_for_vehicle_results_copies_task_downloads_idempotently(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_child")
+    seed_vehicle(db_path, task_id="task_child", position=1, query="测试车A", model_name="测试车A")
+    final_report = tmp_path / "task_child.final_report.json"
+    analysis_facts = tmp_path / "task_child.analysis_facts.jsonl"
+    raw_excel = tmp_path / "raw.xlsx"
+    final_report.write_text('{"headline":"ok"}', encoding="utf-8")
+    analysis_facts.write_text('{"comment_id":"1"}\n', encoding="utf-8")
+    raw_excel.write_text("xlsx-placeholder", encoding="utf-8")
+    snapshot = {
+        "model_name": "测试车A",
+        "source_job_id": "task_child",
+        "final_report_path": str(final_report),
+        "analysis_facts_path": str(analysis_facts),
+    }
+
+    import sqlite3
+
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE comparison_vehicles (
+                id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL,
+                source_job_id TEXT,
+                child_job_id TEXT,
+                error_code TEXT,
+                error_message TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'completed', current_stage = 'completed'
+            WHERE task_id = 'task_child'
+            """
+        )
+        connection.execute(
+            "UPDATE task_vehicles SET result_snapshot_json = ? WHERE task_id = ?",
+            (json.dumps({"comparison_snapshot": snapshot}), "task_child"),
+        )
+        connection.execute(
+            "INSERT INTO task_artifacts (task_id, artifact_type, path, downloadable, created_at) VALUES (?, ?, ?, ?, datetime('now'))",
+            ("task_child", "vehicle_raw_excel", str(raw_excel), 1),
+        )
+        connection.execute(
+            "INSERT INTO comparison_vehicles (id, status, child_job_id) VALUES (?, ?, ?)",
+            (21, "running", "task_child"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+    activities = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+    payload = {
+        "comparison_id": "cmp_1",
+        "vehicle": {"id": 21, "position": 1, "query": "测试车A", "model_name": "测试车A"},
+        "subworkflow": {"child_task_id": "task_child"},
+        "reused": False,
+    }
+
+    first = asyncio.run(activities.wait_for_vehicle_results(payload))
+    second = asyncio.run(activities.wait_for_vehicle_results(payload))
+
+    vehicle_dir = tmp_path / "artifacts" / "cmp_1" / "comparisons" / "测试车A"
+    copied_names = sorted(path.name for path in vehicle_dir.glob("*.xlsx"))
+    assert copied_names == ["raw.xlsx"]
+    assert first["artifact_paths"] == second["artifact_paths"]
 
 
 def test_default_single_vehicle_activities_publish_snapshot_consumable_by_comparison(
@@ -810,8 +999,32 @@ def test_fewer_than_two_usable_vehicles_marks_comparison_failed() -> None:
         "error_message": "竞品对比至少需要 2 个可用车型结果",
         "available_vehicle_count": 1,
         "excluded": [
-            {"model_name": "测试车B", "reason": "collection_failed"},
-            {"model_name": "测试车C", "reason": "missing_snapshot"},
+            {
+                "vehicle_id": 2,
+                "position": 2,
+                "query": "测试车B",
+                "model_name": "测试车B",
+                "status": "excluded",
+                "reason": "collection_failed",
+                "error_code": None,
+                "error_message": "collection_failed",
+                "missing_platforms": [],
+                "source_job_id": None,
+                "child_task_id": None,
+            },
+            {
+                "vehicle_id": 3,
+                "position": 3,
+                "query": "测试车C",
+                "model_name": "测试车C",
+                "status": "excluded",
+                "reason": "missing_snapshot",
+                "error_code": None,
+                "error_message": "missing_snapshot",
+                "missing_platforms": [],
+                "source_job_id": "job_reused_c",
+                "child_task_id": None,
+            },
         ],
     }
     assert "generate_comparison_report" not in runner.call_names()

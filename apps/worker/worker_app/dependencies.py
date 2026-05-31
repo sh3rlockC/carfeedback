@@ -39,7 +39,7 @@ def resolve_workspace_path(workspace_root: Path, value: str) -> Path:
 
 def discover_manifest_path(source_path: Path | None = None, workspace_root: Path | None = None) -> Path:
     resolved_workspace_root = workspace_root or get_workspace_root()
-    workspace_candidate = (resolved_workspace_root / "vehicle-koubei-web-demo" / "config" / "dependencies.yaml").resolve()
+    workspace_candidate = (resolved_workspace_root / "carFeedbackv101" / "config" / "dependencies.yaml").resolve()
     if workspace_candidate.exists():
         return workspace_candidate
 

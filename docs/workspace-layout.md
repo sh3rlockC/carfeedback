@@ -4,7 +4,7 @@ This app is the integration layer for the existing koubei repos.
 
 ## App Root
 
-`/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo`
+`/Users/xyc/Documents/codexwork/carFeedbackv101`
 
 ## Runtime Areas
 

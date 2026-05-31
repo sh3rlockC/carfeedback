@@ -352,11 +352,13 @@ def test_wordcloud_stage_uses_configured_font_path(monkeypatch, tmp_path: Path) 
     assert font_path == str(tmp_path / "font.ttc")
 
 
-def test_build_stage_commands_adds_incremental_check_and_known_link_options(monkeypatch, tmp_path: Path) -> None:
+def test_build_stage_commands_limits_incremental_options_to_dongchedi(monkeypatch, tmp_path: Path) -> None:
     job_paths = ensure_job_dirs(tmp_path / "jobs", "job_incremental")
     monkeypatch.setattr(stages_module, "WORDCLOUD_FONT_PATH", str(tmp_path / "missing.ttc"))
     known_links = tmp_path / "known_autohome.txt"
     known_links.write_text("https://k.autohome.com.cn/detail/view_01abc.html\n", encoding="utf-8")
+    dcd_known_links = tmp_path / "known_dcd.txt"
+    dcd_known_links.write_text("https://www.dongchedi.com/koubei/123\n", encoding="utf-8")
 
     stages = build_stage_commands(
         job_paths=job_paths,
@@ -371,19 +373,26 @@ def test_build_stage_commands_adds_incremental_check_and_known_link_options(monk
                 "max_scan_pages": 10,
                 "stop_after_known_pages": 2,
             },
-            "dongchedi": {"mode": "full_refresh"},
+            "dongchedi": {
+                "mode": "incremental",
+                "known_links_file": str(dcd_known_links),
+                "max_scan_pages": 10,
+                "stop_after_known_pages": 2,
+            },
         },
     )
 
     assert stages[0].name == "checking_incremental"
     autohome_stage = next(stage for stage in stages if stage.name == "collecting_autohome")
-    assert "--known-links-file" in autohome_stage.command
-    assert autohome_stage.command[autohome_stage.command.index("--known-links-file") + 1] == str(known_links)
-    assert autohome_stage.command[autohome_stage.command.index("--max-scan-pages") + 1] == "10"
-    assert autohome_stage.command[autohome_stage.command.index("--stop-after-known-pages") + 1] == "2"
+    assert "--known-links-file" not in autohome_stage.command
+    assert "--max-scan-pages" not in autohome_stage.command
+    assert "--stop-after-known-pages" not in autohome_stage.command
 
     dcd_stage = next(stage for stage in stages if stage.name == "collecting_dcd")
-    assert "--known-links-file" not in dcd_stage.command
+    assert "--known-links-file" in dcd_stage.command
+    assert dcd_stage.command[dcd_stage.command.index("--known-links-file") + 1] == str(dcd_known_links)
+    assert dcd_stage.command[dcd_stage.command.index("--max-scan-pages") + 1] == "10"
+    assert dcd_stage.command[dcd_stage.command.index("--stop-after-known-pages") + 1] == "2"
 
 
 def test_build_stage_commands_uses_hermes_outputs_after_postprocess(monkeypatch, tmp_path: Path) -> None:

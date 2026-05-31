@@ -37,6 +37,14 @@ def _successful_platforms(results: dict[str, Any]) -> set[str]:
     return {str(platform) for platform in results.get("successful_platforms", [])}
 
 
+def _enabled_platforms_from_task(task: dict[str, Any]) -> set[str]:
+    vehicles = task.get("vehicles") if isinstance(task, dict) else []
+    vehicle = vehicles[0] if isinstance(vehicles, list) and vehicles and isinstance(vehicles[0], dict) else {}
+    raw_platforms = vehicle.get("enabled_platforms") or list(PLATFORMS)
+    enabled = {str(platform) for platform in raw_platforms if str(platform) in PLATFORMS}
+    return enabled or set(PLATFORMS)
+
+
 def _pending_platform_name(pending_platform: Any) -> str | None:
     if isinstance(pending_platform, str):
         return pending_platform
@@ -69,10 +77,19 @@ def _comparison_model_name(vehicle: dict[str, Any]) -> str:
     return str(vehicle.get("model_name") or vehicle.get("query") or vehicle.get("id") or "vehicle")
 
 
-def _comparison_exclusion(result: dict[str, Any], vehicle: dict[str, Any]) -> dict[str, str]:
+def _comparison_exclusion(result: dict[str, Any], vehicle: dict[str, Any]) -> dict[str, Any]:
     return {
+        "vehicle_id": _comparison_vehicle_id(vehicle, int(result.get("vehicle_id") or 0)),
+        "position": int(result.get("position") or vehicle.get("position") or 0),
+        "query": str(vehicle.get("query") or result.get("query") or _comparison_model_name(vehicle)),
         "model_name": str(result.get("model_name") or _comparison_model_name(vehicle)),
+        "status": str(result.get("status") or "excluded"),
         "reason": str(result.get("reason") or result.get("error_message") or "vehicle_result_unusable"),
+        "error_code": result.get("error_code"),
+        "error_message": result.get("error_message") or result.get("reason"),
+        "missing_platforms": list(result.get("missing_platforms") or []),
+        "source_job_id": result.get("source_job_id") or vehicle.get("source_job_id"),
+        "child_task_id": result.get("child_task_id") or result.get("child_job_id") or vehicle.get("child_job_id"),
     }
 
 
@@ -84,7 +101,7 @@ def _usable_comparison_result(result: dict[str, Any]) -> bool:
     return bool(result.get("snapshot"))
 
 
-def _comparison_status(*, excluded: list[dict[str, str]], vehicles: list[dict[str, Any]], report: dict[str, Any]) -> str:
+def _comparison_status(*, excluded: list[dict[str, Any]], vehicles: list[dict[str, Any]], report: dict[str, Any]) -> str:
     if excluded or report.get("degraded") or any(vehicle.get("degraded") for vehicle in vehicles):
         return "completed_degraded"
     return "completed"
@@ -146,11 +163,12 @@ def _collection_results_with_pending_timeouts(results: dict[str, Any]) -> dict[s
     return normalized
 
 
-def _collection_results_with_missing_failures(results: dict[str, Any]) -> dict[str, Any]:
+def _collection_results_with_missing_failures(results: dict[str, Any], *, target_platforms: set[str] | None = None) -> dict[str, Any]:
+    targets = target_platforms or set(PLATFORMS)
     successful_platforms = _successful_platforms(results)
     failed_platforms = list(results.get("failed_platforms") or [])
     failed_names = {_failed_platform_name(failure) for failure in failed_platforms}
-    for platform in PLATFORMS:
+    for platform in targets:
         if platform in successful_platforms or platform in failed_names:
             continue
         failed_platforms.append(
@@ -163,6 +181,7 @@ def _collection_results_with_missing_failures(results: dict[str, Any]) -> dict[s
         )
     normalized = dict(results)
     normalized["failed_platforms"] = failed_platforms
+    normalized["skipped_platforms"] = [platform for platform in PLATFORMS if platform not in targets]
     return normalized
 
 
@@ -385,6 +404,7 @@ async def run_single_vehicle_task(
     )
 
     platform_inputs = dict(resolved.get("platforms") or {})
+    target_platforms = set(str(platform) for platform in resolved.get("enabled_platforms") or []) or _enabled_platforms_from_task(task)
     initial_failed_platforms = list(resolved.get("failed_platforms") or [])
     runs = {}
     for platform in PLATFORMS:
@@ -427,7 +447,10 @@ async def run_single_vehicle_task(
         "runs": {**runs, **dict(results.get("runs") or {})},
         "failed_platforms": [*initial_failed_platforms, *list(results.get("failed_platforms") or [])],
     }
-    results = _collection_results_with_missing_failures(_collection_results_with_pending_timeouts(results))
+    results = _collection_results_with_missing_failures(
+        _collection_results_with_pending_timeouts(results),
+        target_platforms=target_platforms,
+    )
     cancellation = await _cancel_if_requested(
         task_id=task_id,
         activity_runner=activity_runner,
@@ -438,6 +461,30 @@ async def run_single_vehicle_task(
 
     successful_platforms = _successful_platforms(results)
     failed_platforms = list(results.get("failed_platforms") or [])
+    if target_platforms.issubset(successful_platforms) and not failed_platforms:
+        cancellation = await _cancel_if_requested(
+            task_id=task_id,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+        if cancellation is not None:
+            return cancellation
+        if target_platforms == set(PLATFORMS):
+            return await _publish_full_pipeline(
+                task_id=task_id,
+                task=task,
+                results=results,
+                activity_runner=activity_runner,
+                cancel_requested=cancel_requested,
+            )
+        return await _publish_degraded_pipeline(
+            task_id=task_id,
+            task=task,
+            results=results,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+
     if successful_platforms and failed_platforms:
         cancellation = await _cancel_if_requested(
             task_id=task_id,
@@ -457,6 +504,13 @@ async def run_single_vehicle_task(
             return degraded_publish
         retryable = _retryable_failures(failed_platforms)
         if retryable:
+            retry_pause = await activity_runner(
+                "is_retry_paused",
+                {"task_id": task_id, "failed_platforms": retryable, "results": results},
+                timedelta(minutes=2),
+            )
+            if retry_pause.get("paused") is True:
+                return {"task_id": task_id, "status": "completed_degraded"}
             await activity_runner(
                 "schedule_retry",
                 {"task_id": task_id, "failed_platforms": retryable, "results": results},
@@ -471,7 +525,7 @@ async def run_single_vehicle_task(
                 results = _merge_retry_results(results, retry_result)
                 successful_platforms = _successful_platforms(results)
                 failed_platforms = list(results.get("failed_platforms") or [])
-        if set(PLATFORMS).issubset(successful_platforms) and not failed_platforms:
+        if target_platforms.issubset(successful_platforms) and not failed_platforms:
             cancellation = await _cancel_if_requested(
                 task_id=task_id,
                 activity_runner=activity_runner,
@@ -479,7 +533,15 @@ async def run_single_vehicle_task(
             )
             if cancellation is not None:
                 return cancellation
-            return await _publish_full_pipeline(
+            if target_platforms == set(PLATFORMS):
+                return await _publish_full_pipeline(
+                    task_id=task_id,
+                    task=task,
+                    results=results,
+                    activity_runner=activity_runner,
+                    cancel_requested=cancel_requested,
+                )
+            return await _publish_degraded_pipeline(
                 task_id=task_id,
                 task=task,
                 results=results,
@@ -511,6 +573,15 @@ async def run_single_vehicle_task(
     )
     if cancellation is not None:
         return cancellation
+    if failed_platforms:
+        return await _publish_degraded_pipeline(
+            task_id=task_id,
+            task=task,
+            results=results,
+            activity_runner=activity_runner,
+            cancel_requested=cancel_requested,
+        )
+
     await activity_runner("mark_task_failed", {"task_id": task_id, "results": results}, timedelta(minutes=2))
     return {"task_id": task_id, "status": "failed"}
 
@@ -581,7 +652,7 @@ async def run_comparison_task(
             )
 
     available: list[dict[str, Any]] = []
-    excluded: list[dict[str, str]] = []
+    excluded: list[dict[str, Any]] = []
     for state in vehicle_states:
         vehicle = state["vehicle"]
         result = await activity_runner(
@@ -628,6 +699,16 @@ async def run_comparison_task(
             "excluded": excluded,
         }
 
+    await activity_runner(
+        "mark_comparison_comparing",
+        {
+            "comparison_id": task_id,
+            "task": task,
+            "vehicles": available,
+            "excluded": excluded,
+        },
+        timedelta(minutes=2),
+    )
     report = await activity_runner(
         "generate_comparison_report",
         {

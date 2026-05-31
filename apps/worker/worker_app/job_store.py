@@ -34,7 +34,7 @@ def _as_datetime(value: datetime | str | None) -> datetime | None:
 def _engine_kwargs(database_url: str) -> dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
-    return {}
+    return {"pool_pre_ping": True}
 
 
 def _db_bool(value: Any) -> bool:
@@ -400,7 +400,7 @@ class DatabaseJobStore:
                 },
             )
             conn.execute(text("DELETE FROM comparison_artifacts WHERE comparison_id = :comparison_id"), {"comparison_id": comparison_id})
-            for artifact_path in artifact_paths:
+            for artifact_path in dict.fromkeys(artifact_paths):
                 artifact_name = artifact_path.rsplit("/", 1)[-1]
                 conn.execute(
                     text(

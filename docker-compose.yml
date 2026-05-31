@@ -18,12 +18,14 @@ services:
       context: .
       dockerfile: ./ops/docker/web.Dockerfile
       args:
-        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
+        NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+        NEXT_PUBLIC_ACCESS_CONTROL_ENABLED: ${NEXT_PUBLIC_ACCESS_CONTROL_ENABLED:-false}
     environment:
       PORT: 3000
       NODE_ENV: production
       BACKEND_ORIGIN: ${BACKEND_ORIGIN:-http://api:8000}
-      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-}
+      NEXT_PUBLIC_BASE_PATH: ${NEXT_PUBLIC_BASE_PATH:-/car-user-feedback}
+      NEXT_PUBLIC_ACCESS_CONTROL_ENABLED: ${NEXT_PUBLIC_ACCESS_CONTROL_ENABLED:-false}
     healthcheck:
       test: ["CMD-SHELL", "node -e \"const base = process.env.NEXT_PUBLIC_BASE_PATH || ''; fetch('http://127.0.0.1:3000' + base + '/passphrase').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
       interval: 30s
@@ -50,6 +52,7 @@ services:
       VEHICLE_RESOLVE_PLATFORM_TIMEOUT_SECONDS: ${VEHICLE_RESOLVE_PLATFORM_TIMEOUT_SECONDS:-60}
       JOB_ARTIFACT_RETENTION_DAYS: ${JOB_ARTIFACT_RETENTION_DAYS:-3}
       JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS: ${JOB_ARTIFACT_CLEANUP_INTERVAL_SECONDS:-43200}
+      ACCESS_CONTROL_ENABLED: ${ACCESS_CONTROL_ENABLED:-false}
       PASS_PHRASE_HASH: ${PASS_PHRASE_HASH:-}
       PASS_PHRASE_VERSION: ${PASS_PHRASE_VERSION:-2026-W17}
       SESSION_SECRET: ${SESSION_SECRET:-change-me}
@@ -108,28 +111,11 @@ services:
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
       CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
-      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-false}
-      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
-      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
-      OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
-      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
-      OPENCLAW_AUTOHOME_AGENT_ID: ${OPENCLAW_AUTOHOME_AGENT_ID:-autohome}
-      OPENCLAW_DCD_AGENT_ID: ${OPENCLAW_DCD_AGENT_ID:-dongchedi}
-      OPENCLAW_TIMEOUT_SECONDS: ${OPENCLAW_TIMEOUT_SECONDS:-1800}
-      OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS: ${OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS:-5}
-      OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
-      OPENCLAW_AUTOHOME_COLLECTOR_SKILL: ${OPENCLAW_AUTOHOME_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
-      OPENCLAW_DCD_COLLECTOR_SKILL: ${OPENCLAW_DCD_COLLECTOR_SKILL:-sh3rlockC/dcd-koubei-collector}
-      OPENCLAW_ARTIFACT_ROOT_HOST: ${OPENCLAW_ARTIFACT_ROOT_HOST:-}
-      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
-      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/vehicle-koubei-worker-device.json}
+      TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: ${TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED:-false}
       WORDCLOUD_FONT_PATH: ${WORDCLOUD_FONT_PATH:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}
     volumes:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ..:/workspace:ro
-      - ${OPENCLAW_STATE_HOST_PATH:-./ops/openclaw-state-placeholder}:/openclaw-state:ro
-    secrets:
-      - openclaw_gateway_token
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
@@ -164,6 +150,7 @@ services:
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
       CROWDED_WAIT_SECONDS: ${CROWDED_WAIT_SECONDS:-300}
+      TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: ${TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED:-false}
       COMPARISON_MODEL_CONCURRENCY: ${COMPARISON_MODEL_CONCURRENCY:-2}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-deepseek}
@@ -208,6 +195,20 @@ services:
       dockerfile: ./ops/docker/collector-service.Dockerfile
     environment:
       COLLECTOR_PLATFORM: autohome
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://koubei:koubei@postgres:5432/koubei}
+      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-/srv/koubei/jobs}
+      CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
+      KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
+      WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
+    volumes:
+      - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
+      - ${CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
+      - ..:/workspace:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz')\""]
       interval: 30s
@@ -221,6 +222,20 @@ services:
       dockerfile: ./ops/docker/collector-service.Dockerfile
     environment:
       COLLECTOR_PLATFORM: dongchedi
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://koubei:koubei@postgres:5432/koubei}
+      ARTIFACT_ROOT: ${ARTIFACT_ROOT:-/srv/koubei/jobs}
+      CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
+      KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
+      WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
+    volumes:
+      - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
+      - ${CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
+      - ..:/workspace:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8100/healthz')\""]
       interval: 30s
@@ -280,7 +295,3 @@ services:
 volumes:
   postgres_data:
   redis_data:
-
-secrets:
-  openclaw_gateway_token:
-    file: ${OPENCLAW_GATEWAY_TOKEN_FILE_HOST:-./ops/secrets/openclaw_gateway_token.placeholder}

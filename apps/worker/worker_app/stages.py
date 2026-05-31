@@ -76,6 +76,8 @@ def build_wordcloud_font_args() -> list[str]:
 def _collection_args(collection_plan: dict[str, Any] | None, platform: str) -> list[str]:
     if not collection_plan:
         return []
+    if platform != "dongchedi":
+        return []
     platform_plan = collection_plan.get(platform) or {}
     known_links_file = platform_plan.get("known_links_file")
     if not known_links_file:

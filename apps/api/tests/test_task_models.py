@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.config import Settings
+import app.db as app_db
 from app.db import get_engine, init_db, reset_engine_cache
 from app.models import CollectionRun, CollectionRunTask, CollectorEvent, EtaMetric, Task, TaskArtifact, TaskEvent, TaskVehicle
 
@@ -42,6 +43,12 @@ def test_task_tables_are_created(tmp_path: Path) -> None:
         "collection_run_tasks",
         "eta_metrics",
     } <= set(inspector.get_table_names())
+
+
+def test_postgres_engine_uses_pre_ping() -> None:
+    kwargs = app_db._engine_kwargs("postgresql+psycopg://user:pass@localhost:5432/test")
+
+    assert kwargs["pool_pre_ping"] is True
 
 
 def test_task_model_relationships_persist(tmp_path: Path) -> None:

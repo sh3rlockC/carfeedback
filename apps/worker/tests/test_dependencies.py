@@ -24,7 +24,7 @@ def test_discover_workspace_root_prefers_workspace_mount(tmp_path: Path) -> None
 
 
 def test_discover_manifest_path_uses_workspace_root(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "vehicle-koubei-web-demo" / "config" / "dependencies.yaml"
+    manifest_path = tmp_path / "carFeedbackv101" / "config" / "dependencies.yaml"
     manifest_path.parent.mkdir(parents=True)
     manifest_path.write_text("dependencies: []\n", encoding="utf-8")
 
