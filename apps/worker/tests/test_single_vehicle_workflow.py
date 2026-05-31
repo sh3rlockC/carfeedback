@@ -893,7 +893,7 @@ def test_wait_for_collection_runs_submits_and_polls_collector_service(tmp_path: 
             assert base_url == "http://collector.test"
 
         def submit_run(self, request):
-            submitted.append(request.model_dump())
+            submitted.append(request.model_dump(exclude_none=True))
             return CollectorRunStatus(
                 run_id=request.run_id,
                 platform=request.platform,

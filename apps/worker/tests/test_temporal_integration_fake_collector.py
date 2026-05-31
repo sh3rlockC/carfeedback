@@ -28,6 +28,7 @@ from app.main import create_app
 from app.models import Task
 from app.services.passphrase import hash_passphrase
 from app.services.task_workflow_client import get_task_workflow_client
+from worker_app.collector_models import CollectorRunStatus
 from worker_app.corpus import AUTOHOME_HEADERS, DCD_HEADERS, load_platform_state
 from worker_app.task_eta import estimate_queue_seconds, eta_reason_for_platform
 from worker_app.task_scheduler import QueuedRun, plan_dispatch_order
@@ -68,30 +69,27 @@ def _authenticate(client: TestClient) -> None:
 
 
 def _create_task(client: TestClient, task_type: str, vehicles: list[str]) -> dict[str, Any]:
-    if task_type == "single":
-        task_vehicles = [
-            {
-                "query": vehicle,
-                "selected_candidates": {
-                    "autohome": {
-                        "series_id": "8089",
-                        "url": "https://k.autohome.com.cn/8089/",
-                        "title": vehicle,
-                        "source": "fixture",
-                    },
-                    "dongchedi": {
-                        "series_id": "25398",
-                        "url": "https://www.dongchedi.com/auto/series/25398",
-                        "title": vehicle,
-                        "source": "fixture",
-                    },
+    task_vehicles = [
+        {
+            "query": vehicle,
+            "selected_candidates": {
+                "autohome": {
+                    "series_id": "8089",
+                    "url": "https://k.autohome.com.cn/8089/",
+                    "title": vehicle,
+                    "source": "fixture",
                 },
-                "enabled_platforms": ["autohome", "dongchedi"],
-            }
-            for vehicle in vehicles
-        ]
-    else:
-        task_vehicles = [{"query": vehicle} for vehicle in vehicles]
+                "dongchedi": {
+                    "series_id": "25398",
+                    "url": "https://www.dongchedi.com/auto/series/25398",
+                    "title": vehicle,
+                    "source": "fixture",
+                },
+            },
+            "enabled_platforms": ["autohome", "dongchedi"],
+        }
+        for vehicle in vehicles
+    ]
     response = client.post(
         "/api/tasks",
         json={"task_type": task_type, "vehicles": task_vehicles},
@@ -398,3 +396,52 @@ def test_four_user_fake_load_shares_runs_limits_lanes_and_records_upgrade(tmp_pa
     assert "degraded_published" in event_types
     assert "upgraded_to_full" in event_types
     assert event_types.index("degraded_published") < event_types.index("upgraded_to_full")
+
+
+def test_dispatch_collection_runs_assigns_distinct_v3_pool_agents(tmp_path: Path, monkeypatch) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'dispatch.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    run_1 = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车-A",
+        model_name="测试车A",
+        series_id="8089",
+        mode="incremental",
+    )
+    run_2 = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车-B",
+        model_name="测试车B",
+        series_id="8090",
+        mode="incremental",
+    )
+    captured_requests = []
+
+    class CapturingCollectorClient:
+        def submit_run(self, request):
+            captured_requests.append(request)
+            return CollectorRunStatus(
+                run_id=request.run_id,
+                platform=request.platform,
+                status="running",
+                progress_current=0,
+                progress_total=1,
+            )
+
+    activities = TaskActivities(database_url)
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_IDS", "autohome-1,autohome-2")
+    monkeypatch.setenv("OPENCLAW_DCD_AGENT_IDS", "dongchedi-1,dongchedi-2")
+    monkeypatch.setattr(activities, "_collector_client", lambda platform: CapturingCollectorClient())
+
+    asyncio.run(activities._dispatch_pending_collection_runs(task_id, [run_1.run_id, run_2.run_id]))
+
+    assert [request.agent_id for request in captured_requests] == ["autohome-1", "autohome-2"]
+    stored_runs = store.load_collection_runs([run_1.run_id, run_2.run_id])
+    assert [run.agent_id for run in stored_runs] == ["autohome-1", "autohome-2"]

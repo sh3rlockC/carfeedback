@@ -13,6 +13,7 @@ from sqlalchemy import inspect as inspect_database
 from sqlalchemy import text
 from temporalio import activity
 
+from worker_app.agent_pool import choose_available_agent, platform_agent_ids_from_env
 from worker_app.collector_client import CollectorClient, should_auto_retry_failure
 from worker_app.collector_models import CollectorRunRequest, CollectorRunStatus
 from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
@@ -538,9 +539,11 @@ class TaskActivities:
         return CollectorClient(base_url, timeout_seconds=timeout_seconds)
 
     def _collector_request(self, run: CollectionRunRecord, owner_task_id: str) -> CollectorRunRequest:
+        agent_id = None if run.agent_id and run.agent_id.startswith("collector-service:") else run.agent_id
         return CollectorRunRequest(
             run_id=run.run_id,
             task_id=owner_task_id,
+            agent_id=agent_id,
             platform=run.platform,  # type: ignore[arg-type]
             query_key=run.query_key,
             model_name=run.model_name,
@@ -615,12 +618,39 @@ class TaskActivities:
                 },
             )
 
+    def _claim_run_agent(self, store: TaskStore, run: CollectionRunRecord) -> CollectionRunRecord | None:
+        configured_agents = platform_agent_ids_from_env()
+        platform_agents = configured_agents.get(run.platform, [])
+        if not platform_agents:
+            return store.start_collection_run(run.run_id, agent_id=f"collector-service:{run.platform}")
+
+        busy_agents = store.running_agent_ids_by_platform()
+        agent_id = choose_available_agent(run.platform, configured_agents, busy_agents)
+        if agent_id is None:
+            store.mark_collection_run_waiting_agent(run.run_id)
+            return None
+        claimed = store.claim_collection_run_with_agent(run.run_id, agent_id)
+        if claimed is None:
+            store.mark_collection_run_waiting_agent(run.run_id)
+        return claimed
+
     def _dispatch_collection_run(self, queued_run: CollectionRunRecord, *, task_id: str | None = None) -> None:
         if not self.database_url:
             return
         store = self._store()
         owner_task_id = task_id or (queued_run.shared_by_task_ids[0] if queued_run.shared_by_task_ids else None)
-        started = store.start_collection_run(queued_run.run_id, agent_id=f"collector-service:{queued_run.platform}")
+        started = self._claim_run_agent(store, queued_run)
+        if started is None:
+            store.record_collector_event(
+                queued_run.run_id,
+                "collector_waiting_agent",
+                {
+                    "task_id": owner_task_id,
+                    "platform": queued_run.platform,
+                    "message": "No platform OpenClaw agent is currently available.",
+                },
+            )
+            return
         if started.status != "running":
             return
         stage_name = COLLECTOR_STAGE_NAMES.get(queued_run.platform, f"collecting_{queued_run.platform}")
@@ -630,30 +660,31 @@ class TaskActivities:
         try:
             if owner_task_id is None:
                 raise RuntimeError(f"collection run has no owner task: {queued_run.run_id}")
-            request = self._collector_request(queued_run, owner_task_id)
-            status = self._collector_client(queued_run.platform).submit_run(request)
+            request = self._collector_request(started, owner_task_id)
+            status = self._collector_client(started.platform).submit_run(request)
             store.record_collector_event(
-                queued_run.run_id,
+                started.run_id,
                 "collector_submitted",
                 {
                     "task_id": owner_task_id,
-                    "platform": queued_run.platform,
-                    "mode": queued_run.mode,
-                    "series_id": queued_run.series_id,
+                    "platform": started.platform,
+                    "mode": started.mode,
+                    "series_id": started.series_id,
+                    "agent_id": started.agent_id,
                     "collector_status": status.status,
                 },
             )
             if status.status in {"succeeded", "failed", "cancelled", "cancel_requested"}:
-                self._apply_collector_status(queued_run, status, owner_task_id=owner_task_id, event_type="collector_status_polled")
+                self._apply_collector_status(started, status, owner_task_id=owner_task_id, event_type="collector_status_polled")
         except Exception as exc:
             failure_category = self._collector_error_failure_category(exc)
-            store.fail_collection_run(queued_run.run_id, failure_category=failure_category)
+            store.fail_collection_run(started.run_id, failure_category=failure_category)
             store.record_collector_event(
-                queued_run.run_id,
+                started.run_id,
                 "collector_failed",
                 {
                     "task_id": owner_task_id,
-                    "platform": queued_run.platform,
+                    "platform": started.platform,
                     "failure_category": failure_category,
                     "error_code": getattr(exc, "error_code", exc.__class__.__name__),
                     "error_message": str(exc) or exc.__class__.__name__,
@@ -668,10 +699,8 @@ class TaskActivities:
             for run in self._store().load_collection_runs(run_ids)
             if run.status in {"queued", "waiting_agent", "retry_wait"}
         ]
-        if pending:
-            await asyncio.gather(
-                *(asyncio.to_thread(self._dispatch_collection_run, run, task_id=task_id) for run in pending)
-            )
+        for run in pending:
+            await asyncio.to_thread(self._dispatch_collection_run, run, task_id=task_id)
 
     def _poll_collection_run(self, run: CollectionRunRecord, *, task_id: str | None = None) -> None:
         owner_task_id = task_id or (run.shared_by_task_ids[0] if run.shared_by_task_ids else None)
