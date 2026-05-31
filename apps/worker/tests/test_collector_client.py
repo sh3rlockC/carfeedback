@@ -97,6 +97,25 @@ def test_submit_run_sends_expected_json_and_parses_status() -> None:
     assert status.output_path == "/tmp/run-1.json"
 
 
+def test_submit_run_sends_assigned_agent_id_when_present() -> None:
+    seen_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json=status_payload("run-agent"))
+
+    client = CollectorClient(
+        "https://collector.test/", transport=httpx.MockTransport(handler)
+    )
+    request = run_request("run-agent")
+    request.agent_id = "autohome-3"
+
+    status = client.submit_run(request)
+
+    assert status.run_id == "run-agent"
+    assert seen_payloads[0]["agent_id"] == "autohome-3"
+
+
 def test_get_run_sends_expected_endpoint() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "GET"

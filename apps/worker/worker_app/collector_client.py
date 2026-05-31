@@ -47,7 +47,7 @@ class CollectorClient:
     def submit_run(self, request: CollectorRunRequest) -> CollectorRunStatus:
         with self._client() as client:
             response = client.post(
-                f"{self.base_url}/runs", json=request.model_dump(mode="json")
+                f"{self.base_url}/runs", json=request.model_dump(mode="json", exclude_none=True)
             )
             response.raise_for_status()
             return CollectorRunStatus.model_validate(response.json())
