@@ -8,8 +8,8 @@
 > - 本地 worktree：`/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild`
 > - 服务器新目录：`/opt/codexwork/carFeedback`
 > - 服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`
-> - 新并行服务：Compose project `carfeedback-v3`，端口 `18080`，base path `/car-user-feedback`
-> - 旧 80 服务：`koubei-20260527`，2026-06-01 验证时仍在运行，未停止。
+> - 当前入口：Compose project `carfeedback-v3`，端口 `80`，base path `/car-user-feedback`
+> - 旧 80 入口：`koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
 >
 > 下方 2026-04-27 内容是早期历史上下文，涉及 `/opt/codexwork/carFeedback`、80 端口单服务、单体 `autohome` / `dongchedi` agent 的描述不能作为 V3 重建现状使用。
 

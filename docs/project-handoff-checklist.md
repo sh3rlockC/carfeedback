@@ -2,7 +2,7 @@
 
 > 2026-06-01 V3 重建状态已更新到 `docs/session-2026-06-01-carfeedback-v3-rebuild.md`。
 >
-> 当前生产替代版在服务器 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 并行运行，入口端口为 `18080`，base path 为 `/car-user-feedback`。旧 80 端口服务 `koubei-20260527` 保持运行，未在 2026-06-01 会话中切换或删除。
+> 当前生产替代版在服务器 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 运行，入口端口为 `80`，base path 为 `/car-user-feedback`。旧 80 入口 `koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
 >
 > V3 已接入 8 Agent 池：`autohome-1..4` 和 `dongchedi-1..4`；`main` 仅作 fallback。小米 SU7 `/api/tasks` full refresh 主链路已验证完成：汽车之家 40 页 / 400 条，懂车帝 63 页 / 938 条，任务 `task_20260601_021155_8a8fd6` 状态 `completed` 且非降级。
 >
@@ -34,7 +34,7 @@
 - Web 版优先，暂未做微信小程序。
 - 当前访问方式为开放链接，不做账号登录；周口令门禁暂不恢复。
 - 本地和腾讯云单机 Docker Compose 均已跑通基础服务。
-- 当前生产替代版在云端通过 Docker Compose project `carfeedback-v3` 并行监听 `18080`；旧 `80` 服务仍由 `koubei-20260527` 占用，尚未切换。
+- 当前生产替代版在云端通过 Docker Compose project `carfeedback-v3` 监听 `80`；旧 `koubei-20260527` 的 nginx 入口已停止。
 
 ## 2. 代码和部署位置
 
@@ -145,8 +145,8 @@ OpenClaw 服务：
 2026-06-01 核对状态：
 
 - Docker 服务：`carfeedback-v3-api/web/worker/temporal-worker/collector/postgres/redis` 均 healthy。
-- 并行入口：`http://127.0.0.1:18080/healthz` 返回 `ok`。
-- 旧 80 服务：`koubei-20260527-nginx-1` 仍在运行，未停止、未删除。
+- 当前入口：`http://127.0.0.1/healthz` 返回 `ok`，`http://129.211.223.252/car-user-feedback/tasks` 和 `/car-user-feedback/api/tasks?limit=1` 返回 200。
+- 旧 80 入口：`koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
 - OpenClaw systemd：active。
 - OpenClaw gateway：宿主机端口 `18790`。
 - OpenClaw agent 池：`autohome-1..4`、`dongchedi-1..4` 已接入；`main` 仅 fallback。
@@ -160,7 +160,7 @@ OpenClaw 服务：
 
 ```env
 APP_ENV=production
-BASE_URL=http://服务器IP或域名
+BASE_URL=http://服务器IP或域名/car-user-feedback
 HTTP_PORT=80
 BACKEND_ORIGIN=http://api:8000
 
@@ -317,7 +317,8 @@ ERROR: 未能从摘要 Excel 中识别到可用词项
 cd /opt/codexwork/carFeedback
 sudo docker compose -p carfeedback-v3 ps
 systemctl is-active openclaw-koubei.service
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://127.0.0.1/healthz
+curl -fsS http://129.211.223.252/car-user-feedback/tasks
 curl -fsS http://127.0.0.1:18790/healthz
 ```
 
@@ -402,7 +403,7 @@ openclaw --profile koubei gateway status
 1. 用浏览器检查 `/car-user-feedback/tasks/new` 的“增量 / 全量”控件在桌面和移动端的实际效果。
 2. 修复汽车之家 OpenClaw progress 百分比运行中可能超过 100 的显示问题。
 3. 保留旧两个单体 agent 一段时间；确认不再需要后再删除。
-4. 准备替换 80 端口前，用 18080 的小米 SU7 和风云 T11 结果作为验收基线。
+4. 观察 80 入口稳定性，再单独规划旧项目剩余容器、旧 volumes 和旧 artifact 的清理窗口。
 
 中期：
 

@@ -4,9 +4,9 @@
 
 2026-06-01 当前状态：
 
-- 生产替代版已在 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 并行运行。
-- 并行验证端口是 `18080`，base path 是 `/car-user-feedback`。
-- 旧 80 端口服务 `koubei-20260527` 仍在运行，尚未切换。
+- 生产替代版已在 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 运行。
+- 当前入口端口是 `80`，base path 是 `/car-user-feedback`。
+- 旧 80 入口 `koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
 - OpenClaw 使用 8 Agent 池：`autohome-1..4`、`dongchedi-1..4`；`main` 仅作 fallback。
 - 本地和 GitHub 项目命名已清理为 `carfeedback`；服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`。
 
@@ -36,21 +36,19 @@
 对外访问入口由 `nginx` 容器提供：
 
 - 最终上线默认监听服务器 `80` 端口，对应 `.env` 中的 `HTTP_PORT=80`
-- 当前 V3 并行验证使用 `HTTP_PORT=18080`，不影响旧 80 端口服务
 - 需要在云厂商安全组放行 TCP `80`
-- 并行验证期间还需要放行或本机代理 TCP `18080`
 - 如果之后接入 HTTPS，还需要放行 TCP `443`，并在云服务器或负载均衡层配置证书
 - 域名需要添加 `A` 记录，解析到云服务器公网 IP
 
-最终切换 80 端口时建议设置：
+当前 80 入口建议设置：
 
 ```env
-BASE_URL=http://你的域名
+BASE_URL=http://你的域名/car-user-feedback
 HTTP_PORT=80
 BACKEND_ORIGIN=http://api:8000
 ```
 
-当前并行验证环境使用：
+如需再次做并行验证环境，可临时使用：
 
 ```env
 BASE_URL=http://你的域名或服务器IP:18080/car-user-feedback
@@ -206,9 +204,8 @@ LLM_MODEL_QA=用于问答的模型
 
 ```env
 APP_ENV=production
-BASE_URL=http://你的域名
+BASE_URL=http://你的域名/car-user-feedback
 BACKEND_ORIGIN=http://api:8000
-# 最终切换 80 端口时使用 80；当前 V3 并行验证环境使用 18080
 HTTP_PORT=80
 ARTIFACT_ROOT=/srv/koubei/jobs
 CORPUS_ROOT=/srv/koubei/corpus
@@ -252,7 +249,7 @@ cp .env.example .env
 nano .env
 ```
 
-6. 构建并启动当前 V3 并行服务：
+6. 构建并启动当前 V3 服务：
 
 ```bash
 docker compose -p carfeedback-v3 up -d --build --scale temporal-worker=2
@@ -279,7 +276,7 @@ docker compose -p carfeedback-v3 logs -f nginx web api worker
 9. 浏览器访问：
 
 ```text
-http://你的域名:18080/car-user-feedback/
+http://你的域名/car-user-feedback/
 ```
 
 ## 健康检查命令
@@ -293,8 +290,8 @@ docker compose -p carfeedback-v3 ps
 检查 Nginx 对外健康接口：
 
 ```bash
-curl -i http://127.0.0.1:18080/healthz
-curl -i http://你的域名:18080/healthz
+curl -i http://127.0.0.1/healthz
+curl -i http://你的域名/healthz
 ```
 
 检查 API 容器健康接口：
@@ -489,6 +486,6 @@ docker compose -p carfeedback-v3 exec worker sh -lc 'ls -la /workspace/data/repo
 - `docker compose -p carfeedback-v3 up -d --build --scale temporal-worker=2` 启动成功。
 - `docker compose -p carfeedback-v3 ps` 中核心服务为 running 或 healthy。
 - 两个 temporal-worker 副本均在运行。
-- `curl http://你的域名:18080/healthz` 返回 `ok`。
+- `curl http://你的域名/healthz` 返回 `ok`。
 - Web 页面可打开，创建任务不要求输入周口令。
 - 已制定 Postgres volume、Redis volume、job artifacts 和 corpus 目录的备份策略。

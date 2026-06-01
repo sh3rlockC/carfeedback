@@ -1,6 +1,6 @@
 # 2026-06-01 carfeedback V3 重建会话交接
 
-本文记录 2026-06-01 在 `codex/carfeedback-v3-rebuild` 分支完成的服务器并行重建、OpenClaw 8 Agent 池接入、全量采集修复与小米 SU7 验证结果。本文不保存任何 API Key、OpenClaw token、数据库密码或访问 token 明文。
+本文记录 2026-06-01 在 `codex/carfeedback-v3-rebuild` 分支完成的服务器重建、OpenClaw 8 Agent 池接入、全量采集修复、小米 SU7 验证结果和 80 端口切换。本文不保存任何 API Key、OpenClaw token、数据库密码或访问 token 明文。
 
 ## 1. 部署状态
 
@@ -10,9 +10,9 @@
 - 服务器新目录：`/opt/codexwork/carFeedback`
 - 服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`
 - Docker Compose project：`carfeedback-v3`
-- 新服务端口：`18080`
-- 新服务 base path：`/car-user-feedback`
-- 旧 80 服务：`koubei-20260527`，2026-06-01 验证时仍在运行，未停止、未删除。
+- 当前服务端口：`80`
+- 当前服务 base path：`/car-user-feedback`
+- 旧 80 入口：`koubei-20260527-nginx-1` 已于 2026-06-01 停止；旧项目其他容器仍保留，未删除。
 - OpenClaw gateway：`openclaw-koubei.service`，宿主机端口 `18790`
 - OpenClaw agent 池：
   - 汽车之家：`autohome-1`、`autohome-2`、`autohome-3`、`autohome-4`
@@ -22,9 +22,13 @@
 2026-06-01 验证命令显示：
 
 ```text
-http://127.0.0.1:18080/healthz -> ok
+http://127.0.0.1/healthz -> ok
+http://129.211.223.252/car-user-feedback/tasks -> 200
+http://129.211.223.252/car-user-feedback/api/tasks?limit=1 -> 200
+http://127.0.0.1:18080/healthz -> connection refused
 carfeedback-v3-api/web/worker/temporal-worker/collector/postgres/redis -> healthy
-koubei-20260527-nginx-1 -> Up, 0.0.0.0:80->80/tcp
+carfeedback-v3-nginx-1 -> 0.0.0.0:80->80/tcp
+koubei-20260527-nginx-1 -> Exited
 ```
 
 ## 2. 关键代码提交
@@ -147,9 +151,11 @@ docker compose config --quiet
 服务器验证：
 
 ```bash
-curl -fsS http://127.0.0.1:18080/healthz
+curl -fsS http://127.0.0.1/healthz
+curl -fsS http://129.211.223.252/car-user-feedback/tasks
+curl -fsS 'http://129.211.223.252/car-user-feedback/api/tasks?limit=1'
 sudo docker ps --filter 'name=carfeedback-v3' --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
-sudo docker ps --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
+sudo docker ps -a --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
 
 ## 6. 命名与部署注意事项
@@ -157,6 +163,11 @@ sudo docker ps --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.
 - 项目命名统一为 `carfeedback`；本地和 GitHub 不再使用旧版本后缀命名。
 - 服务器当前执行目录仍按用户指定保留为 `/opt/codexwork/carFeedback`。这是部署路径，不是旧版本后缀命名残留。
 - `/opt/codexwork/carfeedback-legacy-20260601` 仅为旧目录备份，不参与 `carfeedback-v3` 执行。
+- 2026-06-01 切换 80 端口前，V3 `.env` 已备份为 `/opt/codexwork/carFeedback/.env.backup-20260601111743-pre-80-cutover`。
+- 当前 `.env` 端口相关值：
+  - `HTTP_PORT=80`
+  - `BASE_URL=http://129.211.223.252/car-user-feedback`
+  - `NEXT_PUBLIC_BASE_PATH=/car-user-feedback`
 - 以后 rsync 到 `/opt/codexwork/carFeedback` 时必须排除：
   - `.env`
   - `.runtime`
@@ -171,4 +182,4 @@ sudo docker ps --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.
 - 用浏览器检查 `/car-user-feedback/tasks/new` 的“增量 / 全量”控件在桌面和移动端是否符合预期。
 - 修复汽车之家 OpenClaw progress 百分比运行中可能超过 100 的显示问题。
 - 如果确认不再需要旧单体 agent，再执行旧 agent 删除；2026-06-01 会话未删除旧两个 agent。
-- 若准备替换 80 端口，先用 18080 的小米 SU7 和风云 T11 结果作为验收基线，再切 Nginx/Compose 入口。
+- 观察 80 入口稳定后，再单独规划旧项目剩余容器、旧 volumes 和旧 artifact 的清理窗口。
