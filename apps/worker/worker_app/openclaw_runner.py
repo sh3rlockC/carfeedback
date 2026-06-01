@@ -211,6 +211,10 @@ def _optional_command_arg(command: StageCommand, option: str) -> str | None:
         return None
 
 
+def _is_full_refresh_command(command: StageCommand) -> bool:
+    return _optional_command_arg(command, "--known-links-file") is None
+
+
 def _host_path(path: str, settings: OpenClawSettings) -> str:
     if not settings.artifact_root_host:
         return path
@@ -227,22 +231,34 @@ def _host_path(path: str, settings: OpenClawSettings) -> str:
 
 def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -> str:
     series_id = _command_arg(command, "--series-id")
+    start_page = _optional_command_arg(command, "--start-page") or "1"
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
     known_links_file = _optional_command_arg(command, "--known-links-file")
     max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
     stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
+    is_full_refresh = _is_full_refresh_command(command)
 
     lines = [
             "请调用已安装或已加载的汽车之家口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.collector_skill}",
             f"series_id={series_id}",
+            f"start_page={start_page}",
             f"output_path={_host_path(output_path, settings)}",
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
     ]
-    if known_links_file:
+    if is_full_refresh:
+        lines.extend(
+            [
+                "collection_mode=full_refresh",
+                "page_mode=auto_detect_all_pages",
+                "command_contract=运行汽车之家 skill 附带脚本时必须传 --start-page 1 --auto-detect-pages，并让脚本自动探测最后一页。",
+                "禁止添加 --end-page 10、固定抓取 10 页、或在探测到更多页面时提前结束。",
+            ]
+        )
+    else:
         lines.extend(
             [
                 f"known_links_file={_host_path(known_links_file, settings)}",
@@ -260,7 +276,8 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "5. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
             "6. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "7. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
-            "8. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "8. 全量模式必须采集到自动探测的最后一页；如果接口显示 pagecount/rowcount 超过本轮页数，必须返回失败原因。",
+            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
@@ -276,6 +293,7 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
     stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     failed_pages_path = str(Path(output_path).with_suffix(".failed-pages.json"))
+    is_full_refresh = _is_full_refresh_command(command)
 
     lines = [
             "请调用已安装或已加载的懂车帝口碑采集 skill，并严格按以下 contract 输出。",
@@ -287,7 +305,17 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
     ]
-    if known_links_file:
+    if is_full_refresh:
+        lines.extend(
+            [
+                "collection_mode=full_refresh",
+                "page_mode=auto_detect_all_pages",
+                "command_contract=运行懂车帝 skill 附带脚本时必须省略 --end-page，让脚本自动探测最后一页。",
+                "validation_requirement=input.end_page_auto_detected=true；如果 page_meta 最后一页 has_more=true，不能报告完成。",
+                "禁止添加 --end-page 10、固定抓取 10 页、或在 total_count/has_more 表明还有更多页面时提前结束。",
+            ]
+        )
+    else:
         lines.extend(
             [
                 f"known_links_file={_host_path(known_links_file, settings)}",
@@ -306,7 +334,8 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "6. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
             "7. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "8. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
-            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "9. 全量模式必须采集到自动探测的最后一页；如果 total_count/has_more 表明还有更多页面，必须返回失败原因。",
+            "10. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
@@ -484,6 +513,57 @@ def _response_accepted_at(response: dict[str, Any] | None) -> int | None:
         if isinstance(value, str) and value.isdigit():
             return int(value)
     return None
+
+
+def _read_validation_payload(command: StageCommand) -> dict[str, Any] | None:
+    try:
+        validation_path = Path(_command_arg(command, "--output")).with_suffix(".validation.json")
+    except StageExecutionError:
+        return None
+    if not validation_path.exists():
+        return None
+    try:
+        payload = json.loads(validation_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _validate_full_refresh_dcd_output(command: StageCommand, payload: dict[str, Any]) -> None:
+    input_payload = payload.get("input")
+    if isinstance(input_payload, dict) and input_payload.get("end_page_auto_detected") is False:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="OPENCLAW_PARTIAL_COLLECTION",
+            message=(
+                "DCD full refresh completed with input.end_page_auto_detected=false; "
+                "this usually means OpenClaw added a manual page cap such as --end-page 10."
+            ),
+        )
+
+    page_meta = payload.get("page_meta")
+    if not isinstance(page_meta, list):
+        return
+    valid_meta = [item for item in page_meta if isinstance(item, dict)]
+    if not valid_meta:
+        return
+    last_meta = max(valid_meta, key=lambda item: int(item.get("page") or 0))
+    if last_meta.get("has_more") is True:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="OPENCLAW_PARTIAL_COLLECTION",
+            message="DCD full refresh stopped while validation page_meta still reports has_more=true.",
+        )
+
+
+def _validate_collector_output_contract(command: StageCommand) -> None:
+    if not _is_full_refresh_command(command):
+        return
+    payload = _read_validation_payload(command)
+    if payload is None:
+        return
+    if command.name == "collecting_dcd":
+        _validate_full_refresh_dcd_output(command, payload)
 
 
 class OpenClawGatewayClient:
@@ -671,6 +751,7 @@ def run_collector_via_openclaw(
     _write_stage_log(stderr_log, "")
 
     _wait_for_expected_artifacts(command, settings, response=response)
+    _validate_collector_output_contract(command)
 
     artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
     output_metadata.update(
