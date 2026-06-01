@@ -4,8 +4,11 @@
 
 ## 1. 部署状态
 
+- 本地主目录：`/Users/xyc/Documents/codexwork/carfeedback`
 - 本地 worktree：`/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild`
+- 远端仓库：`https://github.com/sh3rlockC/carfeedback.git`
 - 服务器新目录：`/opt/codexwork/carFeedback`
+- 服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`
 - Docker Compose project：`carfeedback-v3`
 - 新服务端口：`18080`
 - 新服务 base path：`/car-user-feedback`
@@ -26,6 +29,14 @@ koubei-20260527-nginx-1 -> Up, 0.0.0.0:80->80/tcp
 
 ## 2. 关键代码提交
 
+- `4309f86 Protect runtime secrets during deploy sync`
+  - 部署同步默认排除 `.runtime`，避免覆盖或删除服务器端 token、runtime secrets。
+  - 服务器 token 文件恢复到 `/opt/codexwork/carFeedback/.runtime/secrets/openclaw_gateway_token`，权限 `0600`。
+- `182fd46 Remove legacy project naming`
+  - 本地目录、远端仓库、package name 和依赖路径命名清理为 `carfeedback`。
+  - 服务端历史目录只保留为 legacy 备份，不再作为新服务执行目录。
+- `c8a5717 Document V3 rebuild handoff`
+  - 记录 V3 并行部署、8 Agent 池、full refresh 修复和小米 SU7 验证结果。
 - `4fa33f9 Expose task full refresh mode`
   - `/api/tasks` 支持 `collection_mode: "incremental" | "full_refresh"`。
   - 新建任务页新增“增量 / 全量”采集策略控件。
@@ -141,10 +152,23 @@ sudo docker ps --filter 'name=carfeedback-v3' --format '{{.Names}}\t{{.Status}}\
 sudo docker ps --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.Status}}\t{{.Ports}}'
 ```
 
-## 6. 后续建议
+## 6. 命名与部署注意事项
+
+- 项目命名统一为 `carfeedback`；本地和 GitHub 不再使用旧版本后缀命名。
+- 服务器当前执行目录仍按用户指定保留为 `/opt/codexwork/carFeedback`。这是部署路径，不是旧版本后缀命名残留。
+- `/opt/codexwork/carfeedback-legacy-20260601` 仅为旧目录备份，不参与 `carfeedback-v3` 执行。
+- 以后 rsync 到 `/opt/codexwork/carFeedback` 时必须排除：
+  - `.env`
+  - `.runtime`
+  - `storage`
+  - `node_modules`
+  - `.next`
+  - `.venv`
+- `.runtime` 内含服务器侧 runtime secrets；不要从本地覆盖，也不要写入 Git。
+
+## 7. 后续建议
 
 - 用浏览器检查 `/car-user-feedback/tasks/new` 的“增量 / 全量”控件在桌面和移动端是否符合预期。
-- 把 `docs/cloud-deployment.md` 中的旧路径 `/opt/codexwork/carFeedback`、旧 80 单服务描述，在切换主服务前统一改为 V3 并行部署说明。
 - 修复汽车之家 OpenClaw progress 百分比运行中可能超过 100 的显示问题。
 - 如果确认不再需要旧单体 agent，再执行旧 agent 删除；2026-06-01 会话未删除旧两个 agent。
 - 若准备替换 80 端口，先用 18080 的小米 SU7 和风云 T11 结果作为验收基线，再切 Nginx/Compose 入口。

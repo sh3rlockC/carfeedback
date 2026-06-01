@@ -3,8 +3,11 @@
 > 2026-06-01 最新接手入口：
 >
 > - `docs/session-2026-06-01-carfeedback-v3-rebuild.md`
+> - 远端仓库：`https://github.com/sh3rlockC/carfeedback.git`
+> - 本地主目录：`/Users/xyc/Documents/codexwork/carfeedback`
 > - 本地 worktree：`/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild`
 > - 服务器新目录：`/opt/codexwork/carFeedback`
+> - 服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`
 > - 新并行服务：Compose project `carfeedback-v3`，端口 `18080`，base path `/car-user-feedback`
 > - 旧 80 服务：`koubei-20260527`，2026-06-01 验证时仍在运行，未停止。
 >

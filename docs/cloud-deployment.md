@@ -2,6 +2,14 @@
 
 本文面向准备租用云服务器上线 `carfeedback` 的用户。当前项目是单机 Docker Compose 部署：Nginx 对外提供 Web 入口，后端 API、worker、Postgres、Redis 在同一台服务器内运行。
 
+2026-06-01 当前状态：
+
+- 生产替代版已在 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 并行运行。
+- 并行验证端口是 `18080`，base path 是 `/car-user-feedback`。
+- 旧 80 端口服务 `koubei-20260527` 仍在运行，尚未切换。
+- OpenClaw 使用 8 Agent 池：`autohome-1..4`、`dongchedi-1..4`；`main` 仅作 fallback。
+- 本地和 GitHub 项目命名已清理为 `carfeedback`；服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`。
+
 ## 推荐服务器配置
 
 最低可用配置：
@@ -27,17 +35,27 @@
 
 对外访问入口由 `nginx` 容器提供：
 
-- 默认监听服务器 `80` 端口，对应 `.env` 中的 `HTTP_PORT=80`
+- 最终上线默认监听服务器 `80` 端口，对应 `.env` 中的 `HTTP_PORT=80`
+- 当前 V3 并行验证使用 `HTTP_PORT=18080`，不影响旧 80 端口服务
 - 需要在云厂商安全组放行 TCP `80`
+- 并行验证期间还需要放行或本机代理 TCP `18080`
 - 如果之后接入 HTTPS，还需要放行 TCP `443`，并在云服务器或负载均衡层配置证书
 - 域名需要添加 `A` 记录，解析到云服务器公网 IP
 
-上线时建议设置：
+最终切换 80 端口时建议设置：
 
 ```env
 BASE_URL=http://你的域名
 HTTP_PORT=80
 BACKEND_ORIGIN=http://api:8000
+```
+
+当前并行验证环境使用：
+
+```env
+BASE_URL=http://你的域名或服务器IP:18080/car-user-feedback
+HTTP_PORT=18080
+NEXT_PUBLIC_BASE_PATH=/car-user-feedback
 ```
 
 当前 `ops/nginx/default.conf` 使用 `server_name _;`，可以直接用任意绑定到服务器的域名访问。如果需要多站点或 HTTPS，需要另行调整 Nginx 配置。
@@ -69,11 +87,11 @@ volumes:
   - ..:/workspace:ro
 ```
 
-因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传 `carfeedback` 目录。推荐放置方式：
+因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传项目目录。当前服务器执行目录按部署目标保留为 `/opt/codexwork/carFeedback`。推荐放置方式：
 
 ```text
 /opt/codexwork/
-  carfeedback/
+  carFeedback/
   data/
     repos/
       vehicle-id-finder/
@@ -100,6 +118,21 @@ cd /opt/codexwork/carFeedback
 - `/workspace/koubei-wordcloud`
 
 如果依赖目录缺失，worker 即使能启动，也无法完成对应采集、后处理、摘要或词云任务。
+
+同步代码到服务器时必须排除 runtime 和产物目录，尤其不要覆盖 `.runtime`：
+
+```bash
+rsync -az --delete \
+  --exclude '.env' \
+  --exclude '.runtime' \
+  --exclude 'storage' \
+  --exclude 'node_modules' \
+  --exclude '.next' \
+  --exclude '.venv' \
+  ./ ubuntu@服务器:/opt/codexwork/carFeedback/
+```
+
+`.runtime` 内含 OpenClaw gateway token 等服务器侧 secrets，应只在服务器上创建和维护。
 
 ## `.env` 必填项
 
@@ -175,6 +208,7 @@ LLM_MODEL_QA=用于问答的模型
 APP_ENV=production
 BASE_URL=http://你的域名
 BACKEND_ORIGIN=http://api:8000
+# 最终切换 80 端口时使用 80；当前 V3 并行验证环境使用 18080
 HTTP_PORT=80
 ARTIFACT_ROOT=/srv/koubei/jobs
 CORPUS_ROOT=/srv/koubei/corpus
@@ -188,13 +222,13 @@ AUTOHOME_COLLECTOR_SERVICE_URL=http://autohome-collector:8100
 DCD_COLLECTOR_SERVICE_URL=http://dongchedi-collector:8100
 JOB_ARTIFACT_CLEANUP_ENABLED=false
 COMPARISON_MODEL_CONCURRENCY=2
-OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2
-OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2
+OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2,autohome-3,autohome-4
+OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4
 OPENCLAW_AGENT_LEASE_SECONDS=2400
 OPENCLAW_AGENT_POOL_WAIT_SECONDS=1800
 ```
 
-上线前需要在 OpenClaw 中从现有 `autohome`、`dongchedi` agent 复制出 `autohome-1`、`autohome-2`、`dongchedi-1`、`dongchedi-2`，并同步 auth、模型和 skill 配置。
+上线前需要在 OpenClaw 中准备 `autohome-1..4`、`dongchedi-1..4`，并同步 auth、模型和 skill 配置。
 
 Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内置 `temporal` 服务；生产环境如果接入外部 Temporal 集群，只需要把 `TEMPORAL_ADDRESS`、`TEMPORAL_NAMESPACE` 和 `TEMPORAL_TASK_QUEUE` 指向目标集群，不需要改业务代码。
 
@@ -204,7 +238,7 @@ Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内�
 
 1. 准备服务器并安装 Docker、Docker Compose v2、Git。
 2. 将完整 workspace 放到服务器，例如 `/opt/codexwork`。
-3. 确认 `carfeedback` 与外部依赖目录位于同一个 workspace 下。
+3. 确认项目目录与外部依赖目录位于同一个 workspace 下。当前服务器执行目录是 `/opt/codexwork/carFeedback`。
 4. 进入项目目录：
 
 ```bash
@@ -218,34 +252,34 @@ cp .env.example .env
 nano .env
 ```
 
-6. 构建并启动：
+6. 构建并启动当前 V3 并行服务：
 
 ```bash
-docker compose up -d --build --scale temporal-worker=2
+docker compose -p carfeedback-v3 up -d --build --scale temporal-worker=2
 ```
 
 7. 查看容器状态：
 
 ```bash
-docker compose ps
+docker compose -p carfeedback-v3 ps
 ```
 
 `temporal-worker` 应显示 2 个副本；如果只看到 1 个 `temporal-worker`，使用：
 
 ```bash
-docker compose up -d --scale temporal-worker=2
+docker compose -p carfeedback-v3 up -d --scale temporal-worker=2
 ```
 
 8. 查看启动日志：
 
 ```bash
-docker compose logs -f nginx web api worker
+docker compose -p carfeedback-v3 logs -f nginx web api worker
 ```
 
 9. 浏览器访问：
 
 ```text
-http://你的域名/
+http://你的域名:18080/car-user-feedback/
 ```
 
 ## 健康检查命令
@@ -253,51 +287,51 @@ http://你的域名/
 检查 Compose 服务状态：
 
 ```bash
-docker compose ps
+docker compose -p carfeedback-v3 ps
 ```
 
 检查 Nginx 对外健康接口：
 
 ```bash
-curl -i http://127.0.0.1/healthz
-curl -i http://你的域名/healthz
+curl -i http://127.0.0.1:18080/healthz
+curl -i http://你的域名:18080/healthz
 ```
 
 检查 API 容器健康接口：
 
 ```bash
-docker compose exec api python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read().decode())"
+docker compose -p carfeedback-v3 exec api python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read().decode())"
 ```
 
 检查 Redis：
 
 ```bash
-docker compose exec redis redis-cli ping
+docker compose -p carfeedback-v3 exec redis redis-cli ping
 ```
 
 检查 Postgres：
 
 ```bash
-docker compose exec postgres sh -lc 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+docker compose -p carfeedback-v3 exec postgres sh -lc 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
 查看 worker 日志：
 
 ```bash
-docker compose logs --tail=200 worker
+docker compose -p carfeedback-v3 logs --tail=200 worker
 ```
 
 检查 Temporal 和 collector：
 
 ```bash
-docker compose ps temporal temporal-worker autohome-collector dongchedi-collector
-docker compose logs --tail=100 temporal-worker autohome-collector dongchedi-collector
+docker compose -p carfeedback-v3 ps temporal temporal-worker autohome-collector dongchedi-collector
+docker compose -p carfeedback-v3 logs --tail=100 temporal-worker autohome-collector dongchedi-collector
 ```
 
 查看全部服务最近日志：
 
 ```bash
-docker compose logs --tail=200
+docker compose -p carfeedback-v3 logs --tail=200
 ```
 
 ## Sandbox 验证与生产切换
@@ -326,7 +360,7 @@ docker compose -p vehicle-koubei-sandbox --env-file .sandbox/vehicle-koubei/.env
 服务器上如果还保留少量旧的汽车之家或懂车帝 raw Excel，可以一次性导入长期语料库。缺失的平台不要伪造数据，脚本会跳过并在 summary JSON 里标记 `skipped`。
 
 ```bash
-docker compose exec worker sh -lc 'python scripts/backfill_raw_excels.py \
+docker compose -p carfeedback-v3 exec worker sh -lc 'python scripts/backfill_raw_excels.py \
   --database-url "$DATABASE_URL" \
   --corpus-root "$CORPUS_ROOT" \
   --model-name "风云T11" \
@@ -340,7 +374,7 @@ docker compose exec worker sh -lc 'python scripts/backfill_raw_excels.py \
 导入后检查对应车型目录：
 
 ```bash
-docker compose exec worker sh -lc 'find "$CORPUS_ROOT" -maxdepth 3 -type f | sort | head -100'
+docker compose -p carfeedback-v3 exec worker sh -lc 'find "$CORPUS_ROOT" -maxdepth 3 -type f | sort | head -100'
 ```
 
 ## 常见问题
@@ -358,8 +392,8 @@ docker compose exec worker sh -lc 'find "$CORPUS_ROOT" -maxdepth 3 -type f | sor
 
 ```bash
 sudo ss -lntp | grep ':80'
-docker compose ps nginx
-docker compose logs --tail=100 nginx
+docker compose -p carfeedback-v3 ps nginx
+docker compose -p carfeedback-v3 logs --tail=100 nginx
 ```
 
 如果宿主机已有服务占用 `80`，可以停止宿主机服务，或把 `.env` 改成其他端口：
@@ -371,7 +405,7 @@ HTTP_PORT=8080
 然后重新启动：
 
 ```bash
-docker compose up -d
+docker compose -p carfeedback-v3 up -d
 ```
 
 ### 数据库密码或 volume 问题
@@ -401,7 +435,7 @@ docker volume ls | grep postgres_data
 如果 `TAVILY_API_KEY` 为空，依赖联网检索的能力会失败或降级。处理方式是申请 Tavily API Key，写入 `.env`，然后重启 API 和 worker：
 
 ```bash
-docker compose up -d api worker
+docker compose -p carfeedback-v3 up -d api worker
 ```
 
 ### `agent-browser` 缺失
@@ -429,8 +463,8 @@ docker compose up -d api worker
 建议排查：
 
 ```bash
-docker compose logs --tail=200 worker
-docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koubei-wordcloud'
+docker compose -p carfeedback-v3 logs --tail=200 worker
+docker compose -p carfeedback-v3 exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koubei-wordcloud'
 ```
 
 如果是目标站访问限制或页面结构变化，需要由采集器维护方处理，不应仅通过 Web Demo 层规避。
@@ -451,10 +485,10 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - `TAVILY_API_KEY` 已配置。
 - LLM provider、API key、base URL 和模型名已配置并验证可用。
 - 已确认是否需要真实汽车之家采集；如需要，已提供 `agent-browser` CLI 或替代采集运行时。
-- OpenClaw 已准备 `autohome-1/2`、`dongchedi-1/2` 四个采集 agent。
-- `docker compose up -d --build --scale temporal-worker=2` 启动成功。
-- `docker compose ps` 中核心服务为 running 或 healthy。
+- OpenClaw 已准备 `autohome-1..4`、`dongchedi-1..4` 八个采集 agent。
+- `docker compose -p carfeedback-v3 up -d --build --scale temporal-worker=2` 启动成功。
+- `docker compose -p carfeedback-v3 ps` 中核心服务为 running 或 healthy。
 - 两个 temporal-worker 副本均在运行。
-- `curl http://你的域名/healthz` 返回 `ok`。
+- `curl http://你的域名:18080/healthz` 返回 `ok`。
 - Web 页面可打开，创建任务不要求输入周口令。
 - 已制定 Postgres volume、Redis volume、job artifacts 和 corpus 目录的备份策略。
