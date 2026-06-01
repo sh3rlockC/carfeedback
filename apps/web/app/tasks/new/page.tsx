@@ -14,6 +14,7 @@ import type {
   PlatformName,
   SelectedCandidates,
   SeriesValidationResponse,
+  TaskCollectionMode,
   TaskCreateRequest,
   TaskCreateResponse,
   VehicleResolveResponse,
@@ -163,6 +164,7 @@ export default function NewTaskPage() {
   const access = useAccessSession();
   const router = useRouter();
   const [mode, setMode] = useState<CreateMode>("single");
+  const [collectionMode, setCollectionMode] = useState<TaskCollectionMode>("incremental");
   const [singleQuery, setSingleQuery] = useState("");
   const [singleResolve, setSingleResolve] = useState<VehicleResolveResponse | null>(null);
   const [singleDrafts, setSingleDrafts] = useState<Record<PlatformName, PlatformDraft>>({
@@ -414,6 +416,7 @@ export default function NewTaskPage() {
     setValidations(nextValidations);
     const payload: TaskCreateRequest = {
       task_type: "single",
+      collection_mode: collectionMode,
       vehicles: [
         {
           query: resolve.query,
@@ -489,7 +492,7 @@ export default function NewTaskPage() {
     setComparisonValidations(nextValidations);
     const response = await apiRequest<TaskCreateResponse>("/api/tasks", {
       method: "POST",
-      body: toJsonBody({ task_type: "comparison", vehicles } satisfies TaskCreateRequest),
+      body: toJsonBody({ task_type: "comparison", collection_mode: collectionMode, vehicles } satisfies TaskCreateRequest),
     });
     router.push(normalizeManageUrl(response.manage_url));
   };
@@ -552,6 +555,7 @@ export default function NewTaskPage() {
         </div>
         <div className="meta-row">
           <StatusPill tone={mode === "single" ? "accent" : "default"}>{mode === "single" ? "单车型采集" : "多车型对比"}</StatusPill>
+          <StatusPill tone={collectionMode === "full_refresh" ? "warning" : "accent"}>{collectionMode === "full_refresh" ? "全量采集" : "增量采集"}</StatusPill>
           <StatusPill tone={!access.accessControlEnabled || access.accessState === "authorized" ? "success" : access.accessState === "checking" ? "accent" : "warning"}>
             {!access.accessControlEnabled ? "开放访问" : access.accessState === "authorized" ? "已授权" : access.accessState === "checking" ? "校验中" : "待授权"}
           </StatusPill>
@@ -569,6 +573,19 @@ export default function NewTaskPage() {
       <SignalPanel tone="accent">
         <form className="stack-lg" onSubmit={handleSubmit}>
           <fieldset className="task-form-frame" disabled={!canUseWorkbench || submitting}>
+            <div className="field">
+              <span>采集策略</span>
+              <div className="task-tabs" role="radiogroup" aria-label="采集策略">
+                <button className={collectionMode === "incremental" ? "active" : ""} type="button" onClick={() => setCollectionMode("incremental")}>
+                  <Plus size={15} />
+                  增量
+                </button>
+                <button className={collectionMode === "full_refresh" ? "active" : ""} type="button" onClick={() => setCollectionMode("full_refresh")}>
+                  <RefreshCw size={15} />
+                  全量
+                </button>
+              </div>
+            </div>
           {mode === "single" ? (
             <div className="stack">
               <label className="field">

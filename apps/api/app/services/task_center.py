@@ -72,6 +72,7 @@ def _task_base(task: Task, *, eta_seconds: int | None = None, eta_reason: str | 
         "task_id": task.task_id,
         "task_type": task.task_type,
         "display_name": task.display_name,
+        "collection_mode": task.collection_mode,
         "status": task.status,
         "current_stage": task.current_stage,
         "degraded": bool(task.degraded),

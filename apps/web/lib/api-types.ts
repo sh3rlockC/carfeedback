@@ -14,6 +14,7 @@ export type PlatformCandidate = {
 };
 
 export type PlatformName = "autohome" | "dongchedi";
+export type TaskCollectionMode = "incremental" | "full_refresh";
 
 export type PlatformCandidateGroup = {
   best: PlatformCandidate | null;
@@ -362,6 +363,7 @@ export type TaskListItem = {
   task_id: string;
   task_type: "single" | "comparison";
   display_name: string;
+  collection_mode: TaskCollectionMode;
   status: string;
   current_stage: string;
   degraded: boolean;
@@ -389,6 +391,7 @@ export type TaskCreateVehicle = {
 
 export type TaskCreateRequest = {
   task_type: "single" | "comparison";
+  collection_mode?: TaskCollectionMode;
   vehicles: TaskCreateVehicle[];
 };
 

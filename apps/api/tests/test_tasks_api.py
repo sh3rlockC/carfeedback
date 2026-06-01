@@ -135,6 +135,37 @@ def test_post_tasks_creates_single_vehicle_task_and_returns_access_urls(tmp_path
     assert fake_workflow.started == [(payload["task_id"], "single")]
 
 
+def test_post_tasks_persists_requested_full_refresh_collection_mode(tmp_path: Path) -> None:
+    client, _ = make_client(tmp_path)
+    authenticate(client)
+
+    response = client.post(
+        "/api/tasks",
+        json={
+            "task_type": "single",
+            "collection_mode": "full_refresh",
+            "vehicles": [
+                {
+                    "query": "小米SU7",
+                    "selected_candidates": selected_candidates(),
+                    "enabled_platforms": ["autohome", "dongchedi"],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    session = get_session_local()()
+    try:
+        task = session.get(Task, payload["task_id"])
+        assert task is not None
+        assert task.collection_mode == "full_refresh"
+    finally:
+        session.close()
+
+
 def test_tasks_runtime_and_creation_work_without_passphrase_when_access_control_disabled(tmp_path: Path) -> None:
     client, _ = make_client(tmp_path, access_control_enabled=False)
 

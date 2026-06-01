@@ -93,6 +93,7 @@ class TaskCreateVehicle(BaseModel):
 
 class TaskCreateRequest(BaseModel):
     task_type: Literal["single", "comparison"]
+    collection_mode: Literal["incremental", "full_refresh"] = "incremental"
     vehicles: list[TaskCreateVehicle] = Field(min_length=1, max_length=5)
 
 
@@ -107,6 +108,7 @@ class TaskListItem(BaseModel):
     task_id: str
     task_type: str
     display_name: str
+    collection_mode: str = "incremental"
     status: str
     current_stage: str
     degraded: bool

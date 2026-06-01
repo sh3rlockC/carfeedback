@@ -115,6 +115,7 @@ def create_task(
     task = Task(
         task_type=payload.task_type,
         display_name=_display_name(payload),
+        collection_mode=payload.collection_mode,
         status="queued",
         current_stage="queued",
         view_token_hash=tokens.view_token_hash,
@@ -164,6 +165,7 @@ def create_task(
             task_id=task.task_id,
             event_type="created",
             payload_json={
+                "collection_mode": payload.collection_mode,
                 "vehicles": [
                     {
                         "query": vehicle.query,

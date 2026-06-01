@@ -58,6 +58,11 @@ def _sync_existing_schema(engine) -> None:
                 else:
                     conn.execute(text("ALTER TABLE jobs ADD COLUMN collection_summary JSON NOT NULL DEFAULT '{}'"))
 
+        if "tasks" in table_names:
+            task_columns = {column["name"] for column in inspector.get_columns("tasks")}
+            if "collection_mode" not in task_columns:
+                conn.execute(text("ALTER TABLE tasks ADD COLUMN collection_mode VARCHAR(32) NOT NULL DEFAULT 'incremental'"))
+
         if "task_vehicles" in table_names:
             task_vehicle_columns = {column["name"] for column in inspector.get_columns("task_vehicles")}
             if "enabled_platforms" not in task_vehicle_columns:
