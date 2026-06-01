@@ -965,6 +965,7 @@ Run from `/Users/xyc/Documents/codexwork/carfeedback`:
 ```bash
 rsync -az --delete \
   --exclude '.git/' \
+  --exclude '.runtime/' \
   --exclude '.venv/' \
   --exclude 'apps/api/.venv/' \
   --exclude 'apps/web/node_modules/' \
