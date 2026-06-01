@@ -1,5 +1,11 @@
 # 车型口碑情报舱项目交接清单
 
+> 2026-06-01 V3 重建状态已更新到 `docs/session-2026-06-01-carfeedback-v3-rebuild.md`。
+>
+> 当前生产替代版在服务器 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 并行运行，入口端口为 `18080`，base path 为 `/car-user-feedback`。旧 80 端口服务 `koubei-20260527` 保持运行，未在 2026-06-01 会话中切换或删除。
+>
+> V3 已接入 8 Agent 池：`autohome-1..4` 和 `dongchedi-1..4`；`main` 仅作 fallback。小米 SU7 `/api/tasks` full refresh 主链路已验证完成：汽车之家 40 页 / 400 条，懂车帝 63 页 / 938 条，任务 `task_20260601_021155_8a8fd6` 状态 `completed` 且非降级。
+
 更新时间：2026-04-28
 
 本文用于新模型、新对话或新工程师快速接手 `carFeedbackv101`，重点覆盖当前状态、架构、排查入口、已知问题和后续优化方向。本文不保存任何 API Key、数据库密码、OpenClaw token 或访问口令明文。
@@ -54,7 +60,7 @@ ssh -i ~/.ssh/vehicle_koubei_tencent ubuntu@129.211.223.252
 https://github.com/sh3rlockC/carFeedbackv101.git
 ```
 
-最近关键提交：
+历史关键提交：
 
 ```text
 79efeff Add OpenClaw device auth for worker gateway calls
