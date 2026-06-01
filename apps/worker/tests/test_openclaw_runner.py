@@ -133,6 +133,317 @@ def test_openclaw_settings_routes_both_collectors_by_default(monkeypatch: pytest
     assert settings.stages == ("collecting_autohome", "collecting_dcd")
 
 
+def test_openclaw_settings_reads_analysis_stage_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_AGENT_IDS", "analysis-1,analysis-2")
+    monkeypatch.setenv("OPENCLAW_KEYWORD_SUMMARY_SKILL", "sh3rlockC/koubei-keyword-summary-skill")
+    monkeypatch.setenv("OPENCLAW_WORDCLOUD_SKILL", "sh3rlockC/koubei-wordcloud")
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_PYTHON", "/opt/codexwork/koubei-host-venv/bin/python")
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_ENV_FILE", "/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env")
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_WORKER_ROOT_HOST", "/opt/codexwork/carFeedback/apps/worker")
+    monkeypatch.setenv("OPENCLAW_WORKSPACE_HOST", "/opt/codexwork/openclaw-koubei-runtime/workspace")
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_AGENT_LEASE_DIR", "/tmp/openclaw-analysis-leases")
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.analysis_agent_ids == ("analysis-1", "analysis-2")
+    assert settings.agent_id_for_stage("generating_hermes_outputs") == "analysis-1"
+    assert settings.keyword_summary_skill == "sh3rlockC/koubei-keyword-summary-skill"
+    assert settings.wordcloud_skill == "sh3rlockC/koubei-wordcloud"
+    assert settings.analysis_python == "/opt/codexwork/koubei-host-venv/bin/python"
+    assert settings.analysis_env_file == "/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env"
+    assert settings.analysis_worker_root_host == "/opt/codexwork/carFeedback/apps/worker"
+    assert settings.openclaw_workspace_host == "/opt/codexwork/openclaw-koubei-runtime/workspace"
+    assert settings.keyword_summary_script == (
+        "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/"
+        "koubei-keyword-summary-skill/scripts/summarize_koubei_excel.py"
+    )
+    assert settings.wordcloud_script == (
+        "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/"
+        "koubei-wordcloud/scripts/generate_wordcloud.py"
+    )
+    assert settings.analysis_agent_lease_dir == "/tmp/openclaw-analysis-leases"
+
+
+def test_openclaw_analysis_message_rewrites_container_paths_to_host_paths(tmp_path: Path) -> None:
+    container_root = tmp_path / "container-jobs"
+    host_root = tmp_path / "host-jobs"
+    summary = container_root / "job_openclaw" / "outputs" / "summary" / "测试车_双平台口碑摘要.xlsx"
+    validation = summary.with_suffix(".validation.json")
+    progress = container_root / "job_openclaw" / "progress" / "generating_hermes_outputs.progress.json"
+    final_report = container_root / "job_openclaw" / "outputs" / "ai" / "final_report.json"
+    qa_chunks = container_root / "job_openclaw" / "outputs" / "ai" / "qa_chunks.json"
+    terms = container_root / "job_openclaw" / "outputs" / "wordcloud" / "测试车_词云词项清单.xlsx"
+    stage = StageCommand(
+        name="generating_hermes_outputs",
+        dependency_name="hermes-agent",
+        command=[
+            "/usr/local/bin/python",
+            "/app/worker_app/hermes_outputs.py",
+            "--summary-output",
+            str(summary),
+            "--terms-output",
+            str(terms),
+            "--final-report-output",
+            str(final_report),
+            "--qa-chunks-output",
+            str(qa_chunks),
+            "--progress-file",
+            str(progress),
+            "--summary-script",
+            "/workspace/data/repos/koubei-keyword-summary-skill/skill/scripts/summarize_koubei_excel.py",
+            "--wordcloud-script",
+            "/workspace/koubei-wordcloud/scripts/generate_wordcloud.py",
+        ],
+        cwd=Path("/app/worker_app"),
+        expected_artifacts=(str(summary), str(validation), str(progress), str(terms), str(final_report), str(qa_chunks)),
+        progress_file=str(progress),
+        parse_json_stdout=True,
+    )
+    settings = OpenClawSettings(
+        enabled=True,
+        stages=("generating_hermes_outputs",),
+        analysis_worker_root_host="/opt/codexwork/carFeedback/apps/worker",
+        openclaw_workspace_host="/opt/codexwork/openclaw-koubei-runtime/workspace",
+        keyword_summary_script=(
+            "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/"
+            "koubei-keyword-summary-skill/scripts/summarize_koubei_excel.py"
+        ),
+        wordcloud_script=(
+            "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/"
+            "koubei-wordcloud/scripts/generate_wordcloud.py"
+        ),
+        artifact_root_container=str(container_root),
+        artifact_root_host=str(host_root),
+    )
+
+    message = openclaw_runner._build_ai_outputs_message(stage, settings)
+
+    assert "cwd=/opt/codexwork/carFeedback/apps/worker/worker_app" in message
+    assert "/opt/codexwork/carFeedback/apps/worker/worker_app/hermes_outputs.py" in message
+    assert str(host_root / "job_openclaw" / "outputs" / "ai" / "final_report.json") in message
+    assert "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/koubei-keyword-summary-skill/scripts/summarize_koubei_excel.py" in message
+    assert "/opt/codexwork/openclaw-koubei-runtime/workspace/skills/koubei-wordcloud/scripts/generate_wordcloud.py" in message
+    assert "/app/worker_app/hermes_outputs.py" not in message
+    assert "/workspace/data/repos/koubei-keyword-summary-skill" not in message
+
+
+def test_build_stage_runner_routes_analysis_stage_through_openclaw_without_leaking_secrets(tmp_path: Path) -> None:
+    summary = tmp_path / "jobs" / "job_openclaw" / "outputs" / "summary" / "测试车_双平台口碑摘要.xlsx"
+    validation = summary.with_suffix(".validation.json")
+    progress = tmp_path / "jobs" / "job_openclaw" / "progress" / "generating_hermes_outputs.progress.json"
+    final_report = tmp_path / "jobs" / "job_openclaw" / "outputs" / "ai" / "final_report.json"
+    qa_chunks = tmp_path / "jobs" / "job_openclaw" / "outputs" / "ai" / "qa_chunks.json"
+    terms = tmp_path / "jobs" / "job_openclaw" / "outputs" / "wordcloud" / "测试车_词云词项清单.xlsx"
+    stage = StageCommand(
+        name="generating_hermes_outputs",
+        dependency_name="hermes-agent",
+        command=[
+            "python",
+            "hermes_outputs.py",
+            "--summary-output",
+            str(summary),
+            "--terms-output",
+            str(terms),
+            "--final-report-output",
+            str(final_report),
+            "--qa-chunks-output",
+            str(qa_chunks),
+            "--progress-file",
+            str(progress),
+        ],
+        cwd=tmp_path,
+        expected_artifacts=(str(summary), str(validation), str(progress), str(terms), str(final_report), str(qa_chunks)),
+        progress_file=str(progress),
+        parse_json_stdout=True,
+    )
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    captured: dict[str, object] = {}
+
+    class CapturingGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            captured["message"] = message
+            captured["agent_id"] = agent_id
+            for artifact in stage.expected_artifacts:
+                path = Path(artifact)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.suffix == ".json":
+                    path.write_text('{"ok": true, "source": "openclaw-hermes"}', encoding="utf-8")
+                else:
+                    path.write_text("artifact", encoding="utf-8")
+            return {"taskId": "task-analysis", "status": "completed"}
+
+    def direct_runner(_command, _job_paths, _progress_sink):
+        raise AssertionError("analysis stage should not run through direct runner when configured for OpenClaw")
+
+    settings = OpenClawSettings(
+        enabled=True,
+        stages=("generating_hermes_outputs",),
+        analysis_agent_ids=("analysis-1", "analysis-2"),
+        keyword_summary_skill="sh3rlockC/koubei-keyword-summary-skill",
+        wordcloud_skill="sh3rlockC/koubei-wordcloud",
+        analysis_env_file="/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env",
+    )
+    runner = build_stage_runner(settings=settings, direct_runner=direct_runner, gateway_client=CapturingGatewayClient())
+
+    result = runner(stage, job_paths, progress_sink)
+
+    message = str(captured["message"])
+    assert captured["agent_id"] == "analysis-1"
+    assert "sh3rlockC/koubei-keyword-summary-skill" in message
+    assert "sh3rlockC/koubei-wordcloud" in message
+    assert "/opt/codexwork/koubei-host-venv/bin/python" in message
+    assert "--skill-first" in message
+    assert "只执行 command_json 一次" in message
+    assert "不要在 command_json 之前重复运行两个 skill 脚本" in message
+    assert "openclaw-hermes" in message
+    assert "/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env" in message
+    assert "LLM_API_KEY=" not in message
+    assert "gateway-token" not in message
+    assert set(result.artifact_paths) == set(stage.expected_artifacts)
+    assert result.output_metadata["openclaw_agent_id"] == "analysis-1"
+    assert result.output_metadata["openclaw_skill"] == "sh3rlockC/koubei-keyword-summary-skill,sh3rlockC/koubei-wordcloud"
+
+
+def test_openclaw_analysis_stage_falls_back_to_local_command_with_fallback_source(tmp_path: Path) -> None:
+    artifacts = [
+        tmp_path / "summary.xlsx",
+        tmp_path / "summary.validation.json",
+        tmp_path / "progress.json",
+        tmp_path / "terms.xlsx",
+        tmp_path / "final_report.json",
+        tmp_path / "qa_chunks.json",
+    ]
+    script = (
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "assert '--source-label' in sys.argv\n"
+        "assert sys.argv[sys.argv.index('--source-label') + 1] == 'openclaw-hermes-local-fallback'\n"
+        "for raw in sys.argv[1:7]:\n"
+        "    path = Path(raw); path.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    path.write_text(json.dumps({'source': 'openclaw-hermes-local-fallback'}), encoding='utf-8')\n"
+        "print(json.dumps({'source': 'openclaw-hermes-local-fallback'}))\n"
+    )
+    stage = StageCommand(
+        name="generating_hermes_outputs",
+        dependency_name="hermes-agent",
+        command=[sys.executable, "-c", script, *[str(path) for path in artifacts]],
+        cwd=tmp_path,
+        expected_artifacts=tuple(str(path) for path in artifacts),
+        progress_file=str(artifacts[2]),
+        parse_json_stdout=True,
+    )
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+
+    class FailingGatewayClient:
+        def call_agent(self, *_args, **_kwargs) -> dict:
+            raise StageExecutionError(stage=stage.name, error_code="OPENCLAW_TASK_FAILED", message="analysis agent failed")
+
+    result = run_collector_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(enabled=True, stages=("generating_hermes_outputs",), analysis_agent_ids=("analysis-1",)),
+        gateway_client=FailingGatewayClient(),
+    )
+
+    assert result.status == "degraded"
+    assert set(result.artifact_paths) == set(stage.expected_artifacts)
+    assert result.output_metadata["openclaw_fallback"] is True
+    assert result.output_metadata["openclaw_error_code"] == "OPENCLAW_TASK_FAILED"
+    assert result.output_metadata["stdout_json"]["source"] == "openclaw-hermes-local-fallback"
+
+
+def test_openclaw_analysis_agent_lease_skips_busy_agent_and_releases_acquired(tmp_path: Path) -> None:
+    stage = StageCommand(
+        name="generating_hermes_outputs",
+        dependency_name="hermes-agent",
+        command=[sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        expected_artifacts=(str(tmp_path / "final_report.json"),),
+    )
+    lease_dir = tmp_path / "leases"
+    lease_dir.mkdir()
+    (lease_dir / "analysis-1.lock").write_text("busy", encoding="utf-8")
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    captured_agent_ids: list[str | None] = []
+
+    class CapturingGatewayClient:
+        def call_agent(self, _message: str, *, agent_id: str | None = None, **_kwargs) -> dict:
+            captured_agent_ids.append(agent_id)
+            Path(stage.expected_artifacts[0]).write_text('{"source":"openclaw-hermes"}', encoding="utf-8")
+            return {"status": "completed"}
+
+    result = run_collector_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(
+            enabled=True,
+            stages=("generating_hermes_outputs",),
+            analysis_agent_ids=("analysis-1", "analysis-2"),
+            analysis_agent_lease_dir=str(lease_dir),
+            artifact_poll_interval_seconds=0.01,
+            timeout_seconds=1,
+        ),
+        gateway_client=CapturingGatewayClient(),
+    )
+
+    assert result.status == "success"
+    assert captured_agent_ids == ["analysis-2"]
+    assert (lease_dir / "analysis-1.lock").exists()
+    assert not (lease_dir / "analysis-2.lock").exists()
+
+
+def test_openclaw_ai_stage_prepares_host_writable_log_directory(tmp_path: Path) -> None:
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    job_paths.logs.chmod(0o755)
+    final_report = job_paths.outputs.ai / "final_report.json"
+    progress_file = job_paths.progress / "generating_hermes_outputs.progress.json"
+    stage = StageCommand(
+        name="generating_hermes_outputs",
+        dependency_name="hermes-agent",
+        command=[sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        expected_artifacts=(str(final_report), str(progress_file)),
+        optional_artifacts=(str(job_paths.outputs.ai / "llm_metrics.json"),),
+        progress_file=str(progress_file),
+    )
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+
+    class CapturingGatewayClient:
+        def call_agent(self, _message: str, **_kwargs) -> dict:
+            assert (job_paths.logs.stat().st_mode & 0o777) == 0o777
+            hermes_log_dir = job_paths.logs / "hermes"
+            assert hermes_log_dir.exists()
+            assert (hermes_log_dir.stat().st_mode & 0o777) == 0o777
+            (hermes_log_dir / "aggregate.attempt_1.stdout.txt").write_text("{}", encoding="utf-8")
+            final_report.write_text('{"source":"openclaw-hermes"}', encoding="utf-8")
+            progress_file.write_text('{"percent":100}', encoding="utf-8")
+            return {"status": "completed"}
+
+    result = run_collector_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(enabled=True, stages=("generating_hermes_outputs",), artifact_poll_interval_seconds=0.01),
+        gateway_client=CapturingGatewayClient(),
+    )
+
+    assert result.status == "success"
+    assert (job_paths.logs / "hermes" / "aggregate.attempt_1.stdout.txt").exists()
+
+
 def test_openclaw_gateway_connect_sends_device_identity_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

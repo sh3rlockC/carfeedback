@@ -68,12 +68,12 @@
 - 前端已完成“车型口碑情报舱”重设计，包含全局任务指挥条、5 步流程导航、双采集 lane、紧凑结果封面、ZIP 交付条和全宽 QA 区。
 - API/worker 已有任务、产物、问答索引和结果读取基础结构。
 - Docker 容器可访问项目专用 OpenClaw gateway。
-- Worker 已有 OpenClaw Gateway adapter：定位为采集阶段执行层，当前本机已启用 `collecting_autohome,collecting_dcd`，并继续由 worker 校验 Excel、validation JSON 和 progress JSON 产物。
+- Worker 已有 OpenClaw Gateway adapter：定位为采集与批处理 AI 产物执行层，当前可启用 `collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs`，并继续由 worker 校验 Excel、validation JSON、progress JSON 和 AI JSON 产物。
 - Worker 已支持阶段级 OpenClaw agent 路由：`collecting_autohome -> agent_id=autohome`，`collecting_dcd -> agent_id=dongchedi`；两边各写自己的 Excel、validation JSON 和 progress JSON，worker 继续统一校验。
 - 六个口碑 skill 已安装到 `koubei` OpenClaw workspace，并被 OpenClaw 识别为 `Ready`：`vehicle-id-finder`、`auto-koubei-collector`、`dcd-koubei-collector`、`koubei-postprocess`、`koubei-keyword-summary`、`koubei-wordcloud`。
 - OpenClaw 装上后的流程已整理在 `docs/openclaw-skill-flow.md`。
-- API 已有 LLM client：OpenAI-compatible 和 Anthropic-compatible messages 均支持；当前本机一页纸报告和智能问答配置为 DeepSeek V4 Flash，走 OpenAI-compatible `/chat/completions`；一页纸对 DeepSeek 启用 JSON response format，失败或返回不合法时保留确定性模板降级。
-- `koubei` OpenClaw profile 默认模型已切回 `minimax-portal/MiniMax-M2.7`，Docker worker 到 gateway 的 WebSocket 握手已验证通过。
+- API 已有 LLM client：OpenAI-compatible 和 Anthropic-compatible messages 均支持；当前批处理 AI 产物使用 DeepSeek V4 Flash，一页纸报告和智能问答保持 DeepSeek V4 Pro，走 OpenAI-compatible `/chat/completions`；一页纸对 DeepSeek 启用 JSON response format，失败或返回不合法时保留确定性模板降级。
+- `koubei` Hermes/OpenClaw profile 默认执行 agent 模型为 `deepseek/deepseek-v4-flash`，Docker worker 到 gateway 的 WebSocket 握手已验证通过。
 - Nginx 已对 `/api/jobs/<job_id>/progress` 进度轮询端点豁免通用 API 限流，其它 `/api/` 仍保留限流。
 - Worker 写入 Postgres `degraded` Boolean 字段时已改为原生 bool 参数，避免 `smallint -> boolean` 类型错误。
 - Worker 词云阶段已显式传入 `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`，新验证任务已生成优点/槽点词云 PNG 和词项 Excel。
@@ -81,13 +81,13 @@
 ## 执行路由原则
 
 - Worker 是总编排层：负责队列、阶段顺序、数据库状态、降级策略、日志、进度和产物校验。
-- OpenClaw 是采集阶段的可插拔执行层：只执行 `OPENCLAW_ADAPTER_STAGES` 中显式列出的采集阶段。
+- OpenClaw 是采集与批处理 AI 产物的可插拔执行层：只执行 `OPENCLAW_ADAPTER_STAGES` 中显式列出的阶段。
 - 未列入 `OPENCLAW_ADAPTER_STAGES` 的阶段继续走原 worker runner，不与 OpenClaw 抢控制权。
-- 当前本机配置已启用 `collecting_autohome,collecting_dcd`；两个采集阶段走 OpenClaw。
+- 当前目标配置启用 `collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs`；实时结果页 QA 仍走 API。
 - 两个采集阶段分别投递到不同 OpenClaw agent；如果未配置阶段级 agent ID，则回落到 `OPENCLAW_AGENT_ID`。
 - OpenClaw 长任务采用“提交后轮询产物”模式：Gateway 接单后，worker 等待 expected artifacts，不再同步等待 Gateway 最终响应。
 - Worker 已增加 OpenClaw task DB 状态检查：如果后台 task 已经 `failed/timed_out/cancelled/lost`，不再等满产物超时。
-- 摘要、词云和后处理也已安装在 OpenClaw workspace，但当前流程暂不通过 OpenClaw 执行，继续走 worker。
+- 摘要、词云在批处理 AI 产物阶段由 OpenClaw analysis agent 调用；后处理仍在 worker。
 
 ## 未完成 / 阻塞点
 

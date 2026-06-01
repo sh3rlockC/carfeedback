@@ -10,7 +10,7 @@ import subprocess
 import time
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -21,6 +21,14 @@ from worker_app.runner import _classify_error, _collect_existing_artifacts, _wri
 from worker_app.stages import StageCommand, StageExecutionError
 
 
+COLLECTOR_STAGES = {"collecting_autohome", "collecting_dcd"}
+AI_OUTPUT_STAGES = {
+    "generating_hermes_outputs",
+    "generating_time_report_outputs",
+    "generating_comparison_outputs",
+}
+
+
 @dataclass(frozen=True)
 class OpenClawSettings:
     enabled: bool = False
@@ -29,8 +37,20 @@ class OpenClawSettings:
     agent_id: str = "main"
     autohome_agent_id: str | None = None
     dcd_agent_id: str | None = None
+    analysis_agent_ids: tuple[str, ...] = ()
     collector_skill: str = "sh3rlockC/auto-koubei-collector"
     dcd_collector_skill: str = "sh3rlockC/dcd-koubei-collector"
+    keyword_summary_skill: str = "sh3rlockC/koubei-keyword-summary-skill"
+    wordcloud_skill: str = "sh3rlockC/koubei-wordcloud"
+    analysis_python: str = "/opt/codexwork/koubei-host-venv/bin/python"
+    analysis_env_file: str = "/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env"
+    analysis_worker_root_container: str = "/app"
+    analysis_worker_root_host: str | None = None
+    openclaw_workspace_host: str | None = None
+    keyword_summary_script: str | None = None
+    wordcloud_script: str | None = None
+    analysis_agent_lease_dir: str = "/tmp/openclaw-analysis-agent-leases"
+    analysis_agent_lease_ttl_seconds: int = 7200
     timeout_seconds: int = 1800
     artifact_poll_interval_seconds: float = 5.0
     stages: tuple[str, ...] = ("collecting_autohome", "collecting_dcd")
@@ -41,6 +61,7 @@ class OpenClawSettings:
 
     @classmethod
     def from_env(cls) -> "OpenClawSettings":
+        openclaw_workspace_host = os.getenv("OPENCLAW_WORKSPACE_HOST") or None
         return cls(
             enabled=_env_bool("OPENCLAW_ADAPTER_ENABLED") or _env_bool("OPENCLAW_AUTOHOME_ENABLED"),
             gateway_url=os.getenv("OPENCLAW_GATEWAY_URL", cls.gateway_url),
@@ -48,8 +69,26 @@ class OpenClawSettings:
             agent_id=os.getenv("OPENCLAW_AGENT_ID", cls.agent_id),
             autohome_agent_id=os.getenv("OPENCLAW_AUTOHOME_AGENT_ID") or None,
             dcd_agent_id=os.getenv("OPENCLAW_DCD_AGENT_ID") or None,
+            analysis_agent_ids=_env_list("OPENCLAW_ANALYSIS_AGENT_IDS", cls.analysis_agent_ids),
             collector_skill=os.getenv("OPENCLAW_AUTOHOME_COLLECTOR_SKILL", os.getenv("OPENCLAW_COLLECTOR_SKILL", cls.collector_skill)),
             dcd_collector_skill=os.getenv("OPENCLAW_DCD_COLLECTOR_SKILL", cls.dcd_collector_skill),
+            keyword_summary_skill=os.getenv("OPENCLAW_KEYWORD_SUMMARY_SKILL", cls.keyword_summary_skill),
+            wordcloud_skill=os.getenv("OPENCLAW_WORDCLOUD_SKILL", cls.wordcloud_skill),
+            analysis_python=os.getenv("OPENCLAW_ANALYSIS_PYTHON", cls.analysis_python),
+            analysis_env_file=os.getenv("OPENCLAW_ANALYSIS_ENV_FILE", cls.analysis_env_file),
+            analysis_worker_root_container=os.getenv("OPENCLAW_ANALYSIS_WORKER_ROOT_CONTAINER", cls.analysis_worker_root_container),
+            analysis_worker_root_host=os.getenv("OPENCLAW_ANALYSIS_WORKER_ROOT_HOST") or None,
+            openclaw_workspace_host=openclaw_workspace_host,
+            keyword_summary_script=(
+                os.getenv("OPENCLAW_KEYWORD_SUMMARY_SCRIPT")
+                or _default_openclaw_skill_script(openclaw_workspace_host, "koubei-keyword-summary-skill", "scripts/summarize_koubei_excel.py")
+            ),
+            wordcloud_script=(
+                os.getenv("OPENCLAW_WORDCLOUD_SCRIPT")
+                or _default_openclaw_skill_script(openclaw_workspace_host, "koubei-wordcloud", "scripts/generate_wordcloud.py")
+            ),
+            analysis_agent_lease_dir=os.getenv("OPENCLAW_ANALYSIS_AGENT_LEASE_DIR", cls.analysis_agent_lease_dir),
+            analysis_agent_lease_ttl_seconds=int(os.getenv("OPENCLAW_ANALYSIS_AGENT_LEASE_TTL_SECONDS", str(cls.analysis_agent_lease_ttl_seconds))),
             timeout_seconds=int(os.getenv("OPENCLAW_TIMEOUT_SECONDS", os.getenv("OPENCLAW_AGENT_TIMEOUT_SECONDS", str(cls.timeout_seconds)))),
             artifact_poll_interval_seconds=float(os.getenv("OPENCLAW_ARTIFACT_POLL_INTERVAL_SECONDS", str(cls.artifact_poll_interval_seconds))),
             stages=_env_list("OPENCLAW_ADAPTER_STAGES", cls.stages),
@@ -64,6 +103,8 @@ class OpenClawSettings:
             return self.autohome_agent_id or self.agent_id
         if stage_name == "collecting_dcd":
             return self.dcd_agent_id or self.agent_id
+        if stage_name in AI_OUTPUT_STAGES and self.analysis_agent_ids:
+            return self.analysis_agent_ids[0]
         return self.agent_id
 
     def read_token(self) -> str | None:
@@ -72,6 +113,12 @@ class OpenClawSettings:
             return None
         token = token_path.read_text(encoding="utf-8").strip()
         return token or None
+
+
+@dataclass(frozen=True)
+class _OpenClawAgentLease:
+    agent_id: str
+    path: Path
 
 
 class OpenClawGatewayClientProtocol(Protocol):
@@ -99,6 +146,12 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         return default
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or default
+
+
+def _default_openclaw_skill_script(openclaw_workspace_host: str | None, skill_dir: str, script_relative_path: str) -> str | None:
+    if not openclaw_workspace_host:
+        return None
+    return str(Path(openclaw_workspace_host) / "skills" / skill_dir / script_relative_path)
 
 
 def _base64url(data: bytes) -> str:
@@ -215,18 +268,175 @@ def _is_full_refresh_command(command: StageCommand) -> bool:
     return _optional_command_arg(command, "--known-links-file") is None
 
 
-def _host_path(path: str, settings: OpenClawSettings) -> str:
-    if not settings.artifact_root_host:
-        return path
-
-    source_root = Path(settings.artifact_root_container).resolve()
-    target_root = Path(settings.artifact_root_host).expanduser().resolve()
-    candidate = Path(path).resolve()
+def _map_host_path_prefix(path: str, *, source_root: str | None, target_root: str | None) -> str | None:
+    if not source_root or not target_root:
+        return None
+    candidate_path = Path(path)
+    if not candidate_path.is_absolute():
+        return None
+    source = Path(source_root).expanduser().resolve()
+    target = Path(target_root).expanduser().resolve()
+    candidate = candidate_path.expanduser().resolve()
     try:
-        relative = candidate.relative_to(source_root)
+        relative = candidate.relative_to(source)
     except ValueError:
-        return path
-    return str(target_root / relative)
+        return None
+    return str(target / relative)
+
+
+def _host_path(path: str, settings: OpenClawSettings) -> str:
+    for source_root, target_root in (
+        (settings.artifact_root_container, settings.artifact_root_host),
+        (settings.analysis_worker_root_container, settings.analysis_worker_root_host),
+    ):
+        mapped = _map_host_path_prefix(path, source_root=source_root, target_root=target_root)
+        if mapped:
+            return mapped
+    return path
+
+
+def _looks_like_python_executable(value: str) -> bool:
+    name = Path(value).name.lower()
+    return name == "python" or name.startswith("python") or name in {"python3", "python.exe"}
+
+
+def _set_command_option(args: list[str], option: str, value: str | None = None) -> list[str]:
+    updated = list(args)
+    if option in updated:
+        index = updated.index(option)
+        if value is not None:
+            if index + 1 < len(updated):
+                updated[index + 1] = value
+            else:
+                updated.append(value)
+        return updated
+    updated.append(option)
+    if value is not None:
+        updated.append(value)
+    return updated
+
+
+def _analysis_command_for_openclaw(command: StageCommand, settings: OpenClawSettings) -> list[str]:
+    args = list(command.command)
+    if args and _looks_like_python_executable(args[0]):
+        args[0] = settings.analysis_python
+    args = [_host_path(arg, settings) for arg in args]
+    if command.name in {"generating_hermes_outputs", "generating_time_report_outputs"}:
+        args = _set_command_option(args, "--skill-first")
+        if settings.keyword_summary_script:
+            args = _set_command_option(args, "--summary-script", settings.keyword_summary_script)
+        if settings.wordcloud_script:
+            args = _set_command_option(args, "--wordcloud-script", settings.wordcloud_script)
+    if command.name in AI_OUTPUT_STAGES:
+        args = _set_command_option(args, "--source-label", "openclaw-hermes")
+    return args
+
+
+def _analysis_local_fallback_command(command: StageCommand) -> StageCommand:
+    args = list(command.command)
+    if command.name in AI_OUTPUT_STAGES:
+        args = _set_command_option(args, "--source-label", "openclaw-hermes-local-fallback")
+    return replace(command, command=args)
+
+
+def _ensure_host_writable_directory(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o777)
+    except OSError:
+        return
+
+
+def _prepare_ai_output_directories_for_openclaw(command: StageCommand, job_paths: JobPaths) -> None:
+    # OpenClaw runs the analysis scripts on the host as the gateway user, while
+    # the worker container may have created root-owned artifact directories.
+    directories = {job_paths.logs, job_paths.logs / "hermes", job_paths.progress}
+    for artifact in (*command.expected_artifacts, *command.optional_artifacts):
+        if artifact:
+            directories.add(Path(artifact).parent)
+    if command.progress_file:
+        directories.add(Path(command.progress_file).parent)
+    for directory in directories:
+        _ensure_host_writable_directory(directory)
+
+
+def _lease_file_for_agent(settings: OpenClawSettings, agent_id: str) -> Path:
+    safe_agent_id = "".join(char if char.isalnum() or char in {"-", "_", "."} else "_" for char in agent_id)
+    return Path(settings.analysis_agent_lease_dir) / f"{safe_agent_id}.lock"
+
+
+def _remove_stale_lease(path: Path, *, ttl_seconds: int) -> None:
+    if ttl_seconds <= 0 or not path.exists():
+        return
+    try:
+        age_seconds = time.time() - path.stat().st_mtime
+    except OSError:
+        return
+    if age_seconds > ttl_seconds:
+        path.unlink(missing_ok=True)
+
+
+def _try_acquire_agent_lease(
+    *,
+    settings: OpenClawSettings,
+    agent_id: str,
+    stage_name: str,
+    session_id: str,
+) -> _OpenClawAgentLease | None:
+    lease_dir = Path(settings.analysis_agent_lease_dir)
+    lease_dir.mkdir(parents=True, exist_ok=True)
+    lease_path = _lease_file_for_agent(settings, agent_id)
+    _remove_stale_lease(lease_path, ttl_seconds=settings.analysis_agent_lease_ttl_seconds)
+    payload = json.dumps(
+        {
+            "agent_id": agent_id,
+            "stage": stage_name,
+            "session_id": session_id,
+            "pid": os.getpid(),
+            "acquired_at": int(time.time()),
+        },
+        ensure_ascii=False,
+    )
+    try:
+        descriptor = os.open(str(lease_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+    return _OpenClawAgentLease(agent_id=agent_id, path=lease_path)
+
+
+def _acquire_analysis_agent_lease(
+    *,
+    settings: OpenClawSettings,
+    stage_name: str,
+    session_id: str,
+) -> _OpenClawAgentLease:
+    deadline = time.monotonic() + max(1.0, min(float(settings.timeout_seconds), 30.0))
+    while True:
+        for agent_id in settings.analysis_agent_ids:
+            lease = _try_acquire_agent_lease(
+                settings=settings,
+                agent_id=agent_id,
+                stage_name=stage_name,
+                session_id=session_id,
+            )
+            if lease is not None:
+                return lease
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StageExecutionError(
+                stage=stage_name,
+                error_code="OPENCLAW_ANALYSIS_AGENT_BUSY",
+                message="No OpenClaw analysis agent lease is currently available.",
+            )
+        time.sleep(min(settings.artifact_poll_interval_seconds, remaining))
+
+
+def _release_agent_lease(lease: _OpenClawAgentLease | None) -> None:
+    if lease is None:
+        return
+    lease.path.unlink(missing_ok=True)
 
 
 def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -353,11 +563,75 @@ def _build_collector_message(command: StageCommand, settings: OpenClawSettings) 
     )
 
 
-def _collector_skill_for_stage(command: StageCommand, settings: OpenClawSettings) -> str:
+def _build_ai_outputs_message(command: StageCommand, settings: OpenClawSettings) -> str:
+    cwd = str(command.cwd)
+    host_cwd = _host_path(cwd, settings)
+    command_json = json.dumps(_analysis_command_for_openclaw(command, settings), ensure_ascii=False)
+    expected_artifacts = [_host_path(path, settings) for path in command.expected_artifacts]
+    optional_artifacts = [_host_path(path, settings) for path in command.optional_artifacts]
+    progress_file = _host_path(command.progress_file, settings) if command.progress_file else ""
+
+    lines = [
+        "请在 Hermes/OpenClaw analysis agent 内执行批处理 AI 产物阶段，并严格按以下 contract 输出。",
+        f"stage={command.name}",
+        f"analysis_python={settings.analysis_python}",
+        f"analysis_env_file={settings.analysis_env_file}",
+        f"cwd={host_cwd}",
+        f"command_json={command_json}",
+    ]
+    if command.name != "generating_comparison_outputs":
+        lines.extend(
+            [
+                f"keyword_summary_skill={settings.keyword_summary_skill}",
+                f"wordcloud_skill={settings.wordcloud_skill}",
+            ]
+        )
+    if progress_file:
+        lines.append(f"progress_file={progress_file}")
+    if expected_artifacts:
+        lines.append("expected_artifacts=" + json.dumps(expected_artifacts, ensure_ascii=False))
+    if optional_artifacts:
+        lines.append("optional_artifacts=" + json.dumps(optional_artifacts, ensure_ascii=False))
+    lines.extend(
+        [
+            "要求：",
+            "1. 不要创建子代理、不要另起新对话；在当前 analysis agent 中同步执行并等待完成。",
+            (
+                "2. command_json 已包含 --skill-first 和两个 skill 脚本路径；只执行 command_json 一次，它会生成摘要、词云并继续 DeepSeek 分析。不要在 command_json 之前重复运行两个 skill 脚本。"
+                if command.name != "generating_comparison_outputs"
+                else "2. 多车型对比阶段只执行 comparison aggregate 分析；子任务已复用单车型摘要、词云和 facts。"
+            ),
+            "3. DeepSeek/API 分析必须通过 analysis_env_file 注入的受控环境变量完成；只引用 env 文件路径，不要打印或回传任何密钥值。",
+            "4. source analysis_env_file 后执行 command_json 指定的项目内分析命令，保留对外文件名、artifact 类型和 JSON schema。",
+            "5. 启动后必须立即创建 progress_file；每完成一个阶段都必须刷新进度。",
+            "6. 只有 expected_artifacts 全部存在后才报告完成；如果失败，明确返回失败原因。",
+            "7. 日志、响应、产物 contract 中不得包含 LLM_API_KEY、gateway token 或其它本地凭据。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_openclaw_message(command: StageCommand, settings: OpenClawSettings) -> str:
+    if command.name in COLLECTOR_STAGES:
+        return _build_collector_message(command, settings)
+    if command.name in AI_OUTPUT_STAGES:
+        return _build_ai_outputs_message(command, settings)
+    raise StageExecutionError(
+        stage=command.name,
+        error_code="CONFIG_ERROR",
+        message=f"OpenClaw adapter does not support stage: {command.name}",
+    )
+
+
+def _openclaw_skill_for_stage(command: StageCommand, settings: OpenClawSettings) -> str:
     if command.name == "collecting_autohome":
         return settings.collector_skill
     if command.name == "collecting_dcd":
         return settings.dcd_collector_skill
+    if command.name == "generating_comparison_outputs":
+        return "deepseek-analysis"
+    if command.name in AI_OUTPUT_STAGES:
+        return f"{settings.keyword_summary_skill},{settings.wordcloud_skill}"
     return ""
 
 
@@ -722,51 +996,107 @@ def run_collector_via_openclaw(
     gateway_client: OpenClawGatewayClientProtocol | None = None,
     assigned_agent_id: str | None = None,
 ) -> StageResult:
-    if command.name not in {"collecting_autohome", "collecting_dcd"}:
+    if command.name not in COLLECTOR_STAGES | AI_OUTPUT_STAGES:
         return run_stage_command(command, job_paths, progress_sink)
 
     stdout_log = job_paths.logs / f"{command.name}.openclaw.stdout.log"
     stderr_log = job_paths.logs / f"{command.name}.openclaw.stderr.log"
     client = gateway_client or OpenClawGatewayClient()
     session_id = f"vehicle-koubei-{job_paths.root.name}-{command.name}"
-    agent_id = assigned_agent_id or settings.agent_id_for_stage(command.name)
+    lease: _OpenClawAgentLease | None = None
+    if command.name in AI_OUTPUT_STAGES and assigned_agent_id is None and settings.analysis_agent_ids:
+        lease = _acquire_analysis_agent_lease(settings=settings, stage_name=command.name, session_id=session_id)
+        agent_id = lease.agent_id
+    else:
+        agent_id = assigned_agent_id or settings.agent_id_for_stage(command.name)
     try:
+        if command.name in AI_OUTPUT_STAGES:
+            _prepare_ai_output_directories_for_openclaw(command, job_paths)
         response = client.call_agent(
-            _build_collector_message(command, settings),
+            _build_openclaw_message(command, settings),
             settings=settings,
             session_id=session_id,
             stage_name=command.name,
             agent_id=agent_id,
         )
-    except StageExecutionError:
+        _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
+        _write_stage_log(stderr_log, "")
+
+        _wait_for_expected_artifacts(command, settings, response=response)
+        if command.name in COLLECTOR_STAGES:
+            _validate_collector_output_contract(command)
+    except StageExecutionError as exc:
+        if command.name in AI_OUTPUT_STAGES:
+            return _run_ai_outputs_local_fallback(
+                command,
+                job_paths,
+                progress_sink,
+                settings=settings,
+                agent_id=agent_id,
+                exc=exc,
+            )
         raise
     except Exception as exc:
-        raise StageExecutionError(
+        stage_exc = StageExecutionError(
             stage=command.name,
             error_code=_classify_error(command, str(exc), ""),
             message=str(exc) or "OpenClaw collection failed",
-        ) from exc
+        )
+        if command.name in AI_OUTPUT_STAGES:
+            return _run_ai_outputs_local_fallback(
+                command,
+                job_paths,
+                progress_sink,
+                settings=settings,
+                agent_id=agent_id,
+                exc=stage_exc,
+            )
+        raise stage_exc from exc
+    finally:
+        _release_agent_lease(lease)
 
-    _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
-    _write_stage_log(stderr_log, "")
-
-    _wait_for_expected_artifacts(command, settings, response=response)
-    _validate_collector_output_contract(command)
-
-    artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
+    artifact_paths, output_metadata = _collect_existing_artifacts(
+        command,
+        json.dumps(response, ensure_ascii=False) if command.parse_json_stdout else "",
+    )
     output_metadata.update(
         {
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
             "openclaw_gateway_url": settings.gateway_url,
             "openclaw_agent_id": agent_id,
-            "openclaw_skill": _collector_skill_for_stage(command, settings),
+            "openclaw_skill": _openclaw_skill_for_stage(command, settings),
         }
     )
     if command.progress_file and Path(command.progress_file).exists():
         output_metadata["progress_file"] = command.progress_file
 
     return StageResult(status="success", artifact_paths=artifact_paths, output_metadata=output_metadata)
+
+
+def _run_ai_outputs_local_fallback(
+    command: StageCommand,
+    job_paths: JobPaths,
+    progress_sink: ProgressSink,
+    *,
+    settings: OpenClawSettings,
+    agent_id: str | None,
+    exc: StageExecutionError,
+) -> StageResult:
+    fallback_command = _analysis_local_fallback_command(command)
+    result = run_stage_command(fallback_command, job_paths, progress_sink)
+    output_metadata = dict(result.output_metadata)
+    output_metadata.update(
+        {
+            "openclaw_gateway_url": settings.gateway_url,
+            "openclaw_agent_id": agent_id,
+            "openclaw_skill": _openclaw_skill_for_stage(command, settings),
+            "openclaw_fallback": True,
+            "openclaw_error_code": exc.error_code,
+            "openclaw_error_message": exc.message,
+        }
+    )
+    return StageResult(status="degraded", artifact_paths=result.artifact_paths, output_metadata=output_metadata)
 
 
 def run_autohome_via_openclaw(
@@ -853,6 +1183,7 @@ def build_stage_runner(
     settings: OpenClawSettings | None = None,
     direct_runner: StageRunnerCallable = run_stage_command,
     assigned_agent_id: str | None = None,
+    gateway_client: OpenClawGatewayClientProtocol | None = None,
 ) -> StageRunnerCallable:
     settings = settings or OpenClawSettings.from_env()
     enabled_stages = set(settings.stages)
@@ -861,13 +1192,18 @@ def build_stage_runner(
         # OpenClaw is a per-stage adapter. The worker remains the pipeline owner
         # and keeps local execution for every stage not explicitly routed here.
         if settings.enabled and command.name in enabled_stages:
-            if command.name in {"collecting_autohome", "collecting_dcd"}:
+            if command.name in COLLECTOR_STAGES | AI_OUTPUT_STAGES:
+                runner_kwargs: dict[str, Any] = {
+                    "settings": settings,
+                    "assigned_agent_id": assigned_agent_id,
+                }
+                if gateway_client is not None:
+                    runner_kwargs["gateway_client"] = gateway_client
                 return run_collector_via_openclaw(
                     command,
                     job_paths,
                     progress_sink,
-                    settings=settings,
-                    assigned_agent_id=assigned_agent_id,
+                    **runner_kwargs,
                 )
         return direct_runner(command, job_paths, progress_sink)
 

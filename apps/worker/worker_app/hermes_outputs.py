@@ -959,9 +959,22 @@ def _fit_aggregate_payloads_to_command_limit(compacted_payloads: list[dict[str, 
     return fitted or reduced[:1]
 
 
-def _build_aggregate_prompt(*, model_name: str, comments: list[dict[str, str]], batch_payloads: list[dict[str, Any]]) -> str:
+def _build_aggregate_prompt(
+    *,
+    model_name: str,
+    comments: list[dict[str, str]],
+    batch_payloads: list[dict[str, Any]],
+    skill_context: dict[str, Any] | None = None,
+) -> str:
     sample_counts = Counter(comment["platform"] for comment in comments)
     compacted_payloads = _fit_aggregate_payloads_to_command_limit(_compact_batch_payloads(batch_payloads))
+    skill_context_section = ""
+    if skill_context:
+        skill_context_section = (
+            "skill_context 如下；摘要 Excel 和词项表来自已安装 skill，是摘要和词云的权威产物，最终 JSON 需参考但不要覆盖这些文件：\n"
+            + json.dumps({"skill_context": skill_context}, ensure_ascii=False, default=_json_default)
+            + "\n"
+        )
     return (
         "你是汽车口碑分析Agent。请归并各批分析结果，生成最终结果。只返回严格JSON，不要Markdown。\n"
         "JSON 字符串内部不要使用英文双引号，引用短语请用中文引号「」。\n"
@@ -976,7 +989,8 @@ def _build_aggregate_prompt(*, model_name: str, comments: list[dict[str, str]], 
         "\"compare_rows\":[{\"方向\":\"...\",\"汽车之家_优势提及\":\"0\",\"汽车之家_槽点提及\":\"0\",\"懂车帝_优势提及\":\"0\",\"懂车帝_槽点提及\":\"0\"}],"
         "\"opportunity_rows\":[{\"类型\":\"改进\",\"方向\":\"...\",\"建议\":\"...\"}]}。\n"
         f"车型：{model_name}；样本数：汽车之家 {sample_counts.get(PLATFORM_AUTOHOME, 0)} 条，懂车帝 {sample_counts.get(PLATFORM_DCD, 0)} 条。\n"
-        "批次结果如下：\n"
+        + skill_context_section
+        + "批次结果如下：\n"
         + json.dumps(compacted_payloads, ensure_ascii=False, default=_json_default)
     )
 
@@ -1894,15 +1908,13 @@ def _report_from_summary(summary_path: Path, *, model_name: str) -> tuple[dict[s
     return report, chunks
 
 
-def _run_rule_fallback(
+def _run_summary_and_wordcloud(
     *,
     autohome_input: Path,
     dcd_input: Path | None,
     summary_output: Path,
     terms_output: Path,
     wordcloud_output_dir: Path,
-    final_report_output: Path,
-    qa_chunks_output: Path,
     model_name: str,
     progress_file: Path,
     summary_script: Path,
@@ -1953,26 +1965,162 @@ def _run_rule_fallback(
         terms_output.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(produced_terms, terms_output)
 
+    return {
+        "summary_path": str(summary_output),
+        "terms_path": str(terms_output),
+        "image_paths": payload.get("image_paths", []) if isinstance(payload, dict) else [],
+    }
+
+
+def _run_rule_fallback(
+    *,
+    autohome_input: Path,
+    dcd_input: Path | None,
+    summary_output: Path,
+    terms_output: Path,
+    wordcloud_output_dir: Path,
+    final_report_output: Path,
+    qa_chunks_output: Path,
+    model_name: str,
+    progress_file: Path,
+    summary_script: Path,
+    wordcloud_script: Path,
+    single_platform: bool,
+    font_path: str | None,
+    validation_source: str = "rule-fallback",
+    skill_artifacts: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    artifacts = skill_artifacts or _run_summary_and_wordcloud(
+        autohome_input=autohome_input,
+        dcd_input=dcd_input,
+        summary_output=summary_output,
+        terms_output=terms_output,
+        wordcloud_output_dir=wordcloud_output_dir,
+        model_name=model_name,
+        progress_file=progress_file,
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        single_platform=single_platform,
+        font_path=font_path,
+    )
     report, chunks = _report_from_summary(summary_output, model_name=model_name)
+    report["source"] = validation_source
     _write_report_json(final_report_output, report)
     _write_qa_chunks(qa_chunks_output, chunks)
-    _write_validation(summary_output.with_suffix(".validation.json"), source="rule-fallback", degraded=True)
+    _write_validation(summary_output.with_suffix(".validation.json"), source=validation_source, degraded=True)
     return {
         "summary_path": str(summary_output),
         "terms_path": str(terms_output),
         "final_report_path": str(final_report_output),
         "qa_chunks_path": str(qa_chunks_output),
-        "image_paths": payload.get("image_paths", []) if isinstance(payload, dict) else [],
+        "image_paths": artifacts.get("image_paths", []),
     }
 
 
-def _source_name(env: dict[str, str], *, batch_fallbacks: list[dict[str, Any]], aggregate_local: bool = False) -> str:
+def _source_name(
+    env: dict[str, str],
+    *,
+    batch_fallbacks: list[dict[str, Any]],
+    aggregate_local: bool = False,
+    source_label: str | None = None,
+) -> str:
+    if source_label:
+        return source_label
     prefix = "hermes-deepseek-api" if _hermes_llm_mode(env) == "api" else "hermes"
     if aggregate_local:
         return f"{prefix}-local-aggregate"
     if batch_fallbacks:
         return f"{prefix}-partial-local-batch"
     return prefix
+
+
+def _fallback_source_name(source_label: str | None) -> str:
+    if source_label:
+        if source_label.endswith("-local-fallback"):
+            return source_label
+        return f"{source_label}-local-fallback"
+    return "rule-fallback"
+
+
+def _read_workbook_context(path: Path, *, max_sheets: int = 6, max_rows_per_sheet: int = 8) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheets: dict[str, list[dict[str, str]]] = {}
+        for worksheet in workbook.worksheets[:max_sheets]:
+            rows = list(worksheet.iter_rows(values_only=True))
+            if not rows:
+                continue
+            header = [_clean_text(cell, limit=60) for cell in rows[0]]
+            sheet_rows: list[dict[str, str]] = []
+            for raw_row in rows[1 : max_rows_per_sheet + 1]:
+                item = {
+                    header[index]: _clean_text(raw_row[index], limit=160)
+                    for index in range(min(len(header), len(raw_row)))
+                    if header[index] and _clean_text(raw_row[index], limit=160)
+                }
+                if item:
+                    sheet_rows.append(item)
+            if sheet_rows:
+                sheets[worksheet.title] = sheet_rows
+    finally:
+        workbook.close()
+    return {"path": str(path), "sheets": sheets} if sheets else {}
+
+
+def _build_skill_context(summary_path: Path, terms_path: Path) -> dict[str, Any] | None:
+    summary_context = _read_workbook_context(summary_path)
+    terms_context = _read_workbook_context(terms_path, max_sheets=4, max_rows_per_sheet=20)
+    if not summary_context and not terms_context:
+        return None
+    return {
+        "summary_workbook": summary_context,
+        "terms_workbook": terms_context,
+    }
+
+
+def _write_rows_workbook(path: Path, *, title: str, header: list[str], rows: list[list[str]]) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = title
+    worksheet.append(header)
+    for row in rows:
+        worksheet.append(row)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(path)
+
+
+def _write_filtered_raw_excels(output_dir: Path, *, model_name: str, comments: list[dict[str, Any]]) -> tuple[Path, Path]:
+    raw_dir = output_dir / "filtered_raw"
+    autohome_path = raw_dir / f"ZJ{model_name}时间范围原始口碑.xlsx"
+    dcd_path = raw_dir / f"DCD口碑_{model_name}_时间范围.xlsx"
+    autohome_rows: list[list[str]] = []
+    dcd_rows: list[list[str]] = []
+    for comment in comments:
+        platform = _clean_text(comment.get("platform"), limit=80)
+        date_value = _clean_text(comment.get("date"), limit=80)
+        positive = _clean_text(comment.get("positive_text"), limit=900)
+        negative = _clean_text(comment.get("negative_text"), limit=900)
+        full_text = _clean_text(comment.get("full_text"), limit=1600)
+        if platform == PLATFORM_AUTOHOME:
+            autohome_rows.append([date_value, positive, negative, full_text])
+        elif platform == PLATFORM_DCD:
+            dcd_rows.append([date_value, full_text])
+
+    _write_rows_workbook(
+        autohome_path,
+        title="购车口碑",
+        header=["发表日期", "最满意", "最不满意", "评价详情"],
+        rows=autohome_rows,
+    )
+    _write_rows_workbook(
+        dcd_path,
+        title="口碑明细",
+        header=["发布时间", "评价全文"],
+        rows=dcd_rows,
+    )
+    return autohome_path, dcd_path
 
 
 def _comments_by_id(comments: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -2108,6 +2256,8 @@ def generate_outputs(
     single_platform: bool = False,
     font_path: str | None = None,
     env: dict[str, str] | None = None,
+    skill_first: bool = False,
+    source_label: str | None = None,
 ) -> dict[str, Any]:
     active_env = dict(env or os.environ)
     autohome_path = Path(autohome_input)
@@ -2129,6 +2279,24 @@ def generate_outputs(
     analysis_facts = _build_analysis_facts(comments)
     _write_analysis_facts_jsonl(analysis_facts_path, analysis_facts)
     _write_progress(progress_path, percent=10, message=f"读取脱敏原评论 {len(comments)} 条")
+    skill_artifacts: dict[str, Any] | None = None
+    skill_context: dict[str, Any] | None = None
+    if skill_first:
+        _write_progress(progress_path, percent=18, message="运行 OpenClaw skill 生成摘要和词云")
+        skill_artifacts = _run_summary_and_wordcloud(
+            autohome_input=autohome_path,
+            dcd_input=dcd_path,
+            summary_output=summary_path,
+            terms_output=terms_path,
+            wordcloud_output_dir=wordcloud_dir,
+            model_name=model_name,
+            progress_file=progress_path,
+            summary_script=Path(summary_script),
+            wordcloud_script=Path(wordcloud_script),
+            single_platform=single_platform,
+            font_path=font_path,
+        )
+        skill_context = _build_skill_context(summary_path, terms_path)
     batch_model, aggregate_model = _runtime_models(active_env)
     llm_metrics = _new_llm_metrics(
         mode=_hermes_llm_mode(active_env),
@@ -2159,13 +2327,18 @@ def generate_outputs(
             )
 
             _write_progress(progress_path, percent=70, message="Hermes 汇总批次结果")
-            aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks)
+            aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, source_label=source_label)
             aggregate_fallback_reason = ""
             aggregate_env = dict(active_env)
             aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
             if aggregate_timeout:
                 aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
-            aggregate_prompt = _build_aggregate_prompt(model_name=model_name, comments=comments, batch_payloads=batch_payloads)
+            aggregate_prompt = _build_aggregate_prompt(
+                model_name=model_name,
+                comments=comments,
+                batch_payloads=batch_payloads,
+                skill_context=skill_context,
+            )
             try:
                 aggregate_payload = _call_aggregate_llm_json(
                     aggregate_prompt,
@@ -2181,15 +2354,28 @@ def generate_outputs(
                     raise ValueError("hermes_invalid_json:aggregate payload is not object")
             except Exception as exc:
                 aggregate_fallback_reason = str(exc)
-                aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, aggregate_local=True)
+                aggregate_source = _source_name(
+                    active_env,
+                    batch_fallbacks=batch_fallbacks,
+                    aggregate_local=True,
+                    source_label=source_label,
+                )
                 llm_metrics["fallbacks"]["aggregate"] = aggregate_fallback_reason
                 _write_progress(progress_path, percent=82, message="Hermes 汇总超时，使用批次结果本地归并")
                 aggregate_payload = _local_aggregate_payload(model_name=model_name, comments=comments, batch_payloads=batch_payloads)
 
             normalized = _normalize_hermes_payload(aggregate_payload, model_name=model_name, comments=comments, batch_payloads=batch_payloads)
-            _write_summary_workbook(summary_path, model_name=model_name, comments=comments, result=normalized)
-            _write_terms_workbook(terms_path, normalized.keyword_rankings)
-            image_paths = _write_wordclouds(wordcloud_dir, model_name=model_name, rankings=normalized.keyword_rankings, font_path=font_path)
+            normalized.report["source"] = aggregate_source
+            if skill_first and skill_artifacts is not None:
+                image_paths = [
+                    str(path)
+                    for path in skill_artifacts.get("image_paths", [])
+                    if isinstance(path, str) and Path(path).exists()
+                ]
+            else:
+                _write_summary_workbook(summary_path, model_name=model_name, comments=comments, result=normalized)
+                _write_terms_workbook(terms_path, normalized.keyword_rankings)
+                image_paths = _write_wordclouds(wordcloud_dir, model_name=model_name, rankings=normalized.keyword_rankings, font_path=font_path)
             _write_report_json(final_report_path, normalized.report)
             _write_qa_chunks(qa_chunks_path, normalized.qa_chunks)
             _write_validation(summary_path.with_suffix(".validation.json"), source=aggregate_source, degraded=False)
@@ -2221,7 +2407,8 @@ def generate_outputs(
             fallback_reason = str(exc)
 
     _write_progress(progress_path, percent=75, message="Hermes 不可用，切换到规则兜底", degraded=True)
-    llm_metrics["source"] = "rule-fallback"
+    fallback_source = _fallback_source_name(source_label)
+    llm_metrics["source"] = fallback_source
     llm_metrics["fallback_reason"] = fallback_reason
     llm_metrics["durations_ms"]["total"] = int((time.monotonic() - metrics_started_at) * 1000)
     _set_llm_wall_duration(llm_metrics, "total", metrics_started_at)
@@ -2240,12 +2427,14 @@ def generate_outputs(
         wordcloud_script=Path(wordcloud_script),
         single_platform=single_platform,
         font_path=font_path,
+        validation_source=fallback_source,
+        skill_artifacts=skill_artifacts,
     )
     _write_progress(progress_path, percent=100, message="规则兜底输出已生成", degraded=True)
     return {
         "status": "degraded",
         "degraded": True,
-        "source": "rule-fallback",
+        "source": fallback_source,
         "fallback_reason": fallback_reason,
         "normalized_comments_path": str(normalized_comments_path),
         "analysis_facts_path": str(analysis_facts_path),
@@ -2262,10 +2451,14 @@ def generate_time_report_outputs(
     model_name: str,
     start_date: str,
     end_date: str,
+    summary_script: str | Path | None = None,
+    wordcloud_script: str | Path | None = None,
     hermes_command: str = "hermes",
     font_path: str | None = None,
     env: dict[str, str] | None = None,
     progress_file: str | Path | None = None,
+    skill_first: bool = False,
+    source_label: str | None = None,
 ) -> dict[str, Any]:
     active_env = dict(env or os.environ)
     output_path = Path(output_dir)
@@ -2295,6 +2488,33 @@ def generate_time_report_outputs(
     _write_normalized_comments_jsonl(normalized_comments_path, selected_comments)
     analysis_facts = _build_analysis_facts(selected_comments)
     _write_analysis_facts_jsonl(analysis_facts_path, analysis_facts)
+    skill_artifacts: dict[str, Any] | None = None
+    skill_context: dict[str, Any] | None = None
+    if skill_first:
+        if not summary_script or not wordcloud_script:
+            raise RuntimeError("skill_first_requires_summary_and_wordcloud_scripts")
+        filtered_autohome_path, filtered_dcd_path = _write_filtered_raw_excels(output_path, model_name=model_name, comments=selected_comments)
+        skill_autohome_path = filtered_autohome_path
+        skill_dcd_path: Path | None = filtered_dcd_path
+        if len(platform_counts) == 1:
+            if PLATFORM_DCD in platform_counts:
+                skill_autohome_path = filtered_dcd_path
+            skill_dcd_path = None
+        _write_progress(progress_path, percent=18, message="运行时间范围 OpenClaw skill 生成摘要和词云")
+        skill_artifacts = _run_summary_and_wordcloud(
+            autohome_input=skill_autohome_path,
+            dcd_input=skill_dcd_path,
+            summary_output=summary_path,
+            terms_output=terms_path,
+            wordcloud_output_dir=output_path,
+            model_name=model_name,
+            progress_file=progress_path,
+            summary_script=Path(summary_script),
+            wordcloud_script=Path(wordcloud_script),
+            single_platform=len(platform_counts) == 1,
+            font_path=font_path,
+        )
+        skill_context = _build_skill_context(summary_path, terms_path)
     batch_model, aggregate_model = _runtime_models(active_env)
     llm_metrics = _new_llm_metrics(
         mode=_hermes_llm_mode(active_env),
@@ -2322,13 +2542,18 @@ def generate_time_report_outputs(
     )
 
     _write_progress(progress_path, percent=70, message="Hermes 汇总时间范围批次结果")
-    aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks)
+    aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, source_label=source_label)
     aggregate_fallback_reason = ""
     aggregate_env = dict(active_env)
     aggregate_timeout = (active_env.get("HERMES_AGGREGATE_TIMEOUT_SECONDS") or "").strip()
     if aggregate_timeout:
         aggregate_env["HERMES_TIMEOUT_SECONDS"] = aggregate_timeout
-    aggregate_prompt = _build_aggregate_prompt(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads)
+    aggregate_prompt = _build_aggregate_prompt(
+        model_name=model_name,
+        comments=selected_comments,
+        batch_payloads=batch_payloads,
+        skill_context=skill_context,
+    )
     try:
         aggregate_payload = _call_aggregate_llm_json(
             aggregate_prompt,
@@ -2344,7 +2569,12 @@ def generate_time_report_outputs(
             raise ValueError("hermes_invalid_json:aggregate payload is not object")
     except Exception as exc:
         aggregate_fallback_reason = str(exc)
-        aggregate_source = _source_name(active_env, batch_fallbacks=batch_fallbacks, aggregate_local=True)
+        aggregate_source = _source_name(
+            active_env,
+            batch_fallbacks=batch_fallbacks,
+            aggregate_local=True,
+            source_label=source_label,
+        )
         llm_metrics["fallbacks"]["aggregate"] = aggregate_fallback_reason
         _write_progress(progress_path, percent=82, message="Hermes 汇总超时，使用时间范围批次结果本地归并")
         aggregate_payload = _local_aggregate_payload(model_name=model_name, comments=selected_comments, batch_payloads=batch_payloads)
@@ -2354,10 +2584,18 @@ def generate_time_report_outputs(
     normalized.report["time_range"] = {"start_date": start_date, "end_date": end_date}
     normalized.report["sample_count"] = len(selected_comments)
     normalized.report["platform_counts"] = platform_counts
+    normalized.report["source"] = aggregate_source
 
-    _write_summary_workbook(summary_path, model_name=model_name, comments=selected_comments, result=normalized)
-    _write_terms_workbook(terms_path, normalized.keyword_rankings)
-    image_paths = _write_wordclouds(output_path, model_name=model_name, rankings=normalized.keyword_rankings, font_path=font_path)
+    if skill_first and skill_artifacts is not None:
+        image_paths = [
+            str(path)
+            for path in skill_artifacts.get("image_paths", [])
+            if isinstance(path, str) and Path(path).exists()
+        ]
+    else:
+        _write_summary_workbook(summary_path, model_name=model_name, comments=selected_comments, result=normalized)
+        _write_terms_workbook(terms_path, normalized.keyword_rankings)
+        image_paths = _write_wordclouds(output_path, model_name=model_name, rankings=normalized.keyword_rankings, font_path=font_path)
     _write_report_json(final_report_path, normalized.report)
     _write_qa_chunks(qa_chunks_path, normalized.qa_chunks)
     _write_validation(validation_path, source=aggregate_source, degraded=False)
@@ -2420,6 +2658,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--hermes-command", default=os.getenv("HERMES_COMMAND", "hermes"))
     parser.add_argument("--font-path")
     parser.add_argument("--single-platform", action="store_true")
+    parser.add_argument("--skill-first", action="store_true")
+    parser.add_argument("--source-label")
     return parser.parse_args(argv)
 
 
@@ -2441,6 +2681,8 @@ def main(argv: list[str] | None = None) -> int:
         hermes_command=args.hermes_command,
         single_platform=args.single_platform,
         font_path=args.font_path,
+        skill_first=args.skill_first,
+        source_label=args.source_label,
     )
     print(json.dumps(result, ensure_ascii=False))
     return 0

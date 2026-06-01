@@ -136,9 +136,9 @@ OpenClaw 服务：
 运行原则：
 
 - Worker 是唯一总编排层。
-- OpenClaw 只作为采集阶段执行层。
-- 当前 OpenClaw 阶段：`collecting_autohome,collecting_dcd`。
-- 摘要、词云、AI 一页纸、问答仍在 worker/API 内执行。
+- OpenClaw 作为采集与批处理 AI 产物执行层。
+- 当前 OpenClaw 阶段：`collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs`。
+- 摘要、词云在批处理 AI 产物阶段由 OpenClaw analysis agent 调用；实时结果页问答仍在 API 内执行。
 
 ## 5. 当前云端状态
 
@@ -174,21 +174,26 @@ TAVILY_API_KEY=...
 
 LLM_PROVIDER=deepseek
 LLM_BASE_URL=https://api.deepseek.com
-LLM_MODEL_REPORT=deepseek-v4-flash
-LLM_MODEL_QA=deepseek-v4-flash
+LLM_MODEL_BATCH=deepseek-v4-flash
+LLM_MODEL_REPORT=deepseek-v4-pro
+LLM_MODEL_QA=deepseek-v4-pro
 
 OPENCLAW_ADAPTER_ENABLED=true
-OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
+OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs
 OPENCLAW_GATEWAY_URL=ws://host.docker.internal:18790
 OPENCLAW_GATEWAY_TOKEN_FILE=/run/secrets/openclaw_gateway_token
 OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2,autohome-3,autohome-4
 OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4
+OPENCLAW_ANALYSIS_AGENT_IDS=analysis-1,analysis-2
+OPENCLAW_KEYWORD_SUMMARY_SKILL=sh3rlockC/koubei-keyword-summary-skill
+OPENCLAW_WORDCLOUD_SKILL=sh3rlockC/koubei-wordcloud
+OPENCLAW_ANALYSIS_ENV_FILE=/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env
 OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedback/storage/jobs
 OPENCLAW_TASK_DB_PATH=/openclaw-state/tasks/runs.sqlite
 OPENCLAW_DEVICE_IDENTITY_FILE=/openclaw-state/identity/device.json
 ```
 
-OpenClaw agent 模型和 API Key 不在 Web Demo `.env` 中管理，位于 OpenClaw profile/agent 状态目录中。
+Hermes/OpenClaw 执行 agent 模型和 API Key 不在 Web Demo `.env` 中管理，位于 OpenClaw profile/agent 状态目录中；当前 agent 默认模型为 `deepseek/deepseek-v4-flash`。云端 profile 需要保持 `discovery.mdns.mode=off`，worker 固定连接 gateway，不依赖 mDNS/Bonjour 发现。
 
 ## 7. 当前已完成能力
 

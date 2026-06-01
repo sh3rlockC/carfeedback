@@ -1020,6 +1020,89 @@ print(json.dumps({
     assert not stale_log.exists()
 
 
+def test_generate_outputs_skill_first_preserves_skill_artifacts_and_marks_openclaw_source(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_input_workbooks(tmp_path)
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    fake_hermes = tmp_path / "hermes"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+    fake_hermes.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+prompt = sys.argv[-1]
+if "请归并各批分析结果" in prompt:
+    assert '"skill_context"' in prompt
+    assert "Hermes 失败后规则兜底" in prompt
+    assert "空间" in prompt
+    assert "车机" in prompt
+    print(json.dumps({
+        "headline": "测试车最终 JSON 由 DeepSeek 生成。",
+        "executive_summary": "基于原评论 facts、skill 摘要和词项表生成。",
+        "strength_blocks": [{"title": "核心好评", "summary": "空间表现突出", "evidence_ids": ["autohome_0001"]}],
+        "weakness_blocks": [{"title": "核心槽点", "summary": "车机偶发卡顿", "evidence_ids": ["dcd_0001"]}],
+        "platform_difference_blocks": [],
+        "action_blocks": [{"title": "车机优化", "summary": "提升稳定性", "evidence_ids": ["dcd_0001"]}],
+        "boss_brief": ["保留 skill 产出的摘要 Excel 和词云"],
+        "keyword_rankings": {
+            "positive": [{"term": "空间", "count": 2}],
+            "negative": [{"term": "车机", "count": 1}]
+        },
+        "qa_chunks": [],
+        "compare_rows": [],
+        "opportunity_rows": []
+    }, ensure_ascii=False))
+else:
+    print(json.dumps({
+        "themes": [
+            {"direction": "positive", "term": "空间", "count": 2, "summary": "空间大", "evidence_ids": ["autohome_0001"]},
+            {"direction": "negative", "term": "车机", "count": 1, "summary": "车机卡顿", "evidence_ids": ["dcd_0001"]}
+        ],
+        "suggestions": [],
+        "platform_notes": [],
+        "boss_brief": ["空间好评突出"]
+    }, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_hermes.chmod(0o755)
+
+    result = generate_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        postprocess_input=tmp_path / "dual.xlsx",
+        summary_output=tmp_path / "summary" / "测试车_双平台口碑摘要.xlsx",
+        terms_output=tmp_path / "wordcloud" / "测试车_词云词项清单.xlsx",
+        wordcloud_output_dir=tmp_path / "wordcloud",
+        final_report_output=tmp_path / "ai" / "final_report.json",
+        qa_chunks_output=tmp_path / "ai" / "qa_chunks.json",
+        model_name="测试车",
+        progress_file=tmp_path / "progress" / "generating_hermes_outputs.progress.json",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(fake_hermes),
+        skill_first=True,
+        source_label="openclaw-hermes",
+        env=_cli_env(),
+    )
+
+    assert result["status"] == "success"
+    assert result["source"] == "openclaw-hermes"
+    validation = json.loads(Path(result["summary_path"]).with_suffix(".validation.json").read_text(encoding="utf-8"))
+    assert validation == {"ok": True, "source": "openclaw-hermes", "degraded": False}
+    workbook = load_workbook(result["summary_path"], data_only=True)
+    try:
+        overview = {row[0].value: row[1].value for row in workbook["总览摘要"].iter_rows(min_row=2, max_col=2)}
+    finally:
+        workbook.close()
+    assert overview["综合一句话"] == "Hermes 失败后规则兜底"
+    metrics = json.loads(Path(result["llm_metrics_path"]).read_text(encoding="utf-8"))
+    assert metrics["source"] == "openclaw-hermes"
+    assert json.loads(Path(result["final_report_path"]).read_text(encoding="utf-8"))["source"] == "openclaw-hermes"
+
+
 def test_generate_time_report_outputs_filters_comments_by_inclusive_date_range(tmp_path: Path) -> None:
     zj_path, dcd_path = _write_time_range_workbooks(tmp_path)
     fake_hermes = tmp_path / "hermes"
@@ -1088,6 +1171,87 @@ else:
     assert len(result["image_paths"]) == 2
     report = json.loads(Path(result["final_report_path"]).read_text(encoding="utf-8"))
     assert "2026-03-02 至 2026-03-03" in report["headline"]
+
+
+def test_generate_time_report_outputs_skill_first_uses_filtered_raw_excels(tmp_path: Path) -> None:
+    zj_path, dcd_path = _write_time_range_workbooks(tmp_path)
+    summary_script = tmp_path / "summary.py"
+    wordcloud_script = tmp_path / "wordcloud.py"
+    fake_hermes = tmp_path / "hermes"
+    _write_fake_summary_script(summary_script)
+    _write_fake_wordcloud_script(wordcloud_script)
+    fake_hermes.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+prompt = sys.argv[-1]
+assert "2026-03-01" not in prompt
+assert "2026-03-04" not in prompt
+assert "无日期评论" not in prompt
+if "请归并各批分析结果" in prompt:
+    assert '"skill_context"' in prompt
+    print(json.dumps({
+        "headline": "测试车时间范围报告由 DeepSeek 生成。",
+        "executive_summary": "使用过滤 raw Excel 的 skill 产物。",
+        "strength_blocks": [{"title": "核心好评", "summary": "动力和底盘", "evidence_ids": ["dcd_0001", "autohome_0002"]}],
+        "weakness_blocks": [{"title": "核心槽点", "summary": "车机和胎噪", "evidence_ids": ["dcd_0001", "autohome_0002"]}],
+        "platform_difference_blocks": [],
+        "action_blocks": [],
+        "boss_brief": ["时间范围内样本已过滤"],
+        "keyword_rankings": {
+            "positive": [{"term": "动力", "count": 1}],
+            "negative": [{"term": "车机", "count": 1}]
+        },
+        "qa_chunks": [],
+        "compare_rows": [],
+        "opportunity_rows": []
+    }, ensure_ascii=False))
+else:
+    print(json.dumps({
+        "themes": [
+            {"direction": "positive", "term": "动力", "count": 1, "summary": "动力顺", "evidence_ids": ["dcd_0001"]},
+            {"direction": "negative", "term": "胎噪", "count": 1, "summary": "胎噪大", "evidence_ids": ["autohome_0002"]}
+        ],
+        "suggestions": [],
+        "platform_notes": [],
+        "boss_brief": []
+    }, ensure_ascii=False))
+""",
+        encoding="utf-8",
+    )
+    fake_hermes.chmod(0o755)
+
+    result = generate_time_report_outputs(
+        autohome_input=zj_path,
+        dcd_input=dcd_path,
+        output_dir=tmp_path / "time_report",
+        model_name="测试车",
+        start_date="2026-03-02",
+        end_date="2026-03-03",
+        summary_script=summary_script,
+        wordcloud_script=wordcloud_script,
+        hermes_command=str(fake_hermes),
+        skill_first=True,
+        source_label="openclaw-hermes",
+        env=_cli_env(HERMES_BATCH_TARGET_BYTES="900", HERMES_BATCH_CONCURRENCY="1"),
+    )
+
+    assert result["source"] == "openclaw-hermes"
+    summary_args = json.loads(Path(result["summary_path"]).with_suffix(".args.json").read_text(encoding="utf-8"))
+    assert summary_args["autohome_input"] != str(zj_path)
+    assert summary_args["dcd_input"] != str(dcd_path)
+    assert "/filtered_raw/" in summary_args["autohome_input"]
+    assert "/filtered_raw/" in summary_args["dcd_input"]
+
+    autohome_workbook = load_workbook(summary_args["autohome_input"], data_only=True)
+    dcd_workbook = load_workbook(summary_args["dcd_input"], data_only=True)
+    try:
+        assert [row[0] for row in autohome_workbook.active.iter_rows(min_row=2, values_only=True)] == ["2026-03-03"]
+        assert [row[0] for row in dcd_workbook.active.iter_rows(min_row=2, values_only=True)] == ["2026-03-02"]
+    finally:
+        autohome_workbook.close()
+        dcd_workbook.close()
 
 
 def test_generate_time_report_outputs_rejects_empty_date_range(tmp_path: Path) -> None:

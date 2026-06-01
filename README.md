@@ -14,6 +14,7 @@
 - OpenClaw Agent 池：
   - 汽车之家：`autohome-1`、`autohome-2`、`autohome-3`、`autohome-4`
   - 懂车帝：`dongchedi-1`、`dongchedi-2`、`dongchedi-3`、`dongchedi-4`
+  - 批处理 AI 产物：`analysis-1`、`analysis-2`
   - `main` 仅作 fallback
 
 ## 必要工作流
@@ -23,9 +24,11 @@ Web UI
   -> FastAPI 创建任务
   -> Temporal workflow 编排任务
   -> autohome-collector / dongchedi-collector
-  -> OpenClaw 8 Agent 池执行双平台采集
+  -> OpenClaw 平台 Agent 池执行双平台采集
   -> raw Excel + progress JSON + validation JSON
-  -> Worker 后处理、摘要、词云、AI 一页纸、QA 语料、ZIP
+  -> Worker 后处理
+  -> OpenClaw analysis Agent 池执行摘要、词云、批处理 AI 一页纸和 QA 语料生成
+  -> ZIP 和结果页交付；实时结果页 QA 仍由 API 执行
   -> 任务中心 / 任务详情页交付结果
 ```
 
@@ -52,6 +55,7 @@ Docker Compose 内部组件：
 外部运行层：
 
 - `openclaw-koubei.service`：OpenClaw gateway 和 Agent 状态。
+- `/opt/codexwork/koubei-host-venv`：Hermes/OpenClaw analysis agent 调用 skill 和 DeepSeek 分析脚本的宿主机 Python 环境。
 - 依赖仓库目录：`/opt/codexwork/data/repos/*` 和 `/opt/codexwork/koubei-wordcloud`。
 
 ## 依赖仓库
@@ -109,7 +113,7 @@ AUTOHOME_COLLECTOR_SERVICE_URL=http://autohome-collector:8100
 DCD_COLLECTOR_SERVICE_URL=http://dongchedi-collector:8100
 
 OPENCLAW_ADAPTER_ENABLED=true
-OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
+OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs
 OPENCLAW_GATEWAY_URL=ws://host.docker.internal:18790
 OPENCLAW_GATEWAY_TOKEN_FILE=/run/secrets/openclaw_gateway_token
 OPENCLAW_GATEWAY_TOKEN_FILE_HOST=/opt/codexwork/carFeedback/.runtime/secrets/openclaw_gateway_token
@@ -119,6 +123,14 @@ OPENCLAW_DEVICE_IDENTITY_FILE=/openclaw-state/identity/device.json
 OPENCLAW_AGENT_ID=main
 OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2,autohome-3,autohome-4
 OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4
+OPENCLAW_ANALYSIS_AGENT_IDS=analysis-1,analysis-2
+OPENCLAW_ANALYSIS_AGENT_LEASE_DIR=/tmp/openclaw-analysis-agent-leases
+OPENCLAW_KEYWORD_SUMMARY_SKILL=sh3rlockC/koubei-keyword-summary-skill
+OPENCLAW_WORDCLOUD_SKILL=sh3rlockC/koubei-wordcloud
+OPENCLAW_ANALYSIS_PYTHON=/opt/codexwork/koubei-host-venv/bin/python
+OPENCLAW_ANALYSIS_ENV_FILE=/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env
+OPENCLAW_ANALYSIS_WORKER_ROOT_HOST=/opt/codexwork/carFeedback/apps/worker
+OPENCLAW_WORKSPACE_HOST=/opt/codexwork/openclaw-koubei-runtime/workspace
 OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedback/storage/jobs
 
 TAVILY_API_KEY=请替换
@@ -128,11 +140,17 @@ LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL_BATCH=deepseek-v4-flash
 LLM_MODEL_REPORT=deepseek-v4-pro
 LLM_MODEL_QA=deepseek-v4-pro
+HERMES_LLM_MODE=api
 
 WORDCLOUD_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 ```
 
 服务器的 `.runtime` 目录只在服务器维护，不能从本地覆盖。
+
+模型配置分两层：
+
+- Web/API 与批处理 DeepSeek 分析由 `.env` 和 `OPENCLAW_ANALYSIS_ENV_FILE` 控制：批处理使用 `deepseek-v4-flash`，一页纸报告和实时 QA 保持 `deepseek-v4-pro`。
+- Hermes/OpenClaw 执行 agent 的默认模型在 `koubei` profile 中管理，不在 Web Demo `.env` 中；生产期望值为 `deepseek/deepseek-v4-flash`，云端 profile 还需要保持 `discovery.mdns.mode=off`。
 
 ## 部署与验证
 

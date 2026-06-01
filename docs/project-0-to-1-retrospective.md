@@ -151,7 +151,7 @@ AI 不是只挂一个聊天框，而是拆成多个可解释环节：
 主要产出：
 
 - API LLM client。
-- DeepSeek V4 Flash 作为 Web Demo 的 AI 一页纸和问答模型。
+- DeepSeek V4 Flash 作为批处理 AI 产物模型；AI 一页纸和问答保持 DeepSeek V4 Pro。
 - AI 一页纸支持 JSON response format。
 - 问答变为“检索当前结果 -> LLM 生成 -> 规则兜底”。
 - 问答响应增加审计字段：
@@ -173,7 +173,7 @@ AI 不是只挂一个聊天框，而是拆成多个可解释环节：
 - 独立 OpenClaw workspace。
 - 安装 6 个 skill。
 - 配置 `main`、`autohome`、`dongchedi` 三个 agent。
-- OpenClaw agent 模型切到 MiniMax Token Plan。
+- OpenClaw agent 模型后续切到 DeepSeek V4 Flash，和业务分析模型统一走 DeepSeek API。
 - Worker 增加 OpenClaw Gateway adapter。
 - 采集阶段路由：
   - `collecting_autohome -> autohome`
@@ -408,8 +408,8 @@ Agent 可能“成功回复”，但业务没有完成。最终判断应基于�
 
 本项目有两套模型：
 
-- Web Demo API 的 LLM：DeepSeek V4 Flash，用于 AI 一页纸和问答。
-- OpenClaw agent 模型：MiniMax M2.7，用于采集 skill 执行。
+- Web Demo API 的 LLM：批处理使用 DeepSeek V4 Flash，一页纸和问答保持 DeepSeek V4 Pro。
+- Hermes/OpenClaw agent 模型：DeepSeek V4 Flash，用于采集和批处理 AI 产物 skill 执行。
 
 两者不应混在一个配置里，否则排障会混乱。
 
@@ -478,4 +478,3 @@ Agent 可能“成功回复”，但业务没有完成。最终判断应基于�
 - 支持多人并发和权限分组。
 - 将车型识别也可选接入 OpenClaw。
 - 视需求开发微信小程序壳。
-
