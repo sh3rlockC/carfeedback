@@ -1,4 +1,4 @@
-# carFeedback V3 Production Rebuild Design
+# carfeedback V3 Production Rebuild Design
 
 Date: 2026-05-31
 
@@ -16,7 +16,7 @@ The new service must run in parallel on port `18080` and must not disturb the cu
 /car-user-feedback
 ```
 
-This rebuild uses the current local codebase at `/Users/xyc/Documents/codexwork/carFeedbackv101` as the development baseline and follows `allWorkflow-20260531-3.md` as the target workflow.
+This rebuild uses the current local codebase at `/Users/xyc/Documents/codexwork/carfeedback` as the development baseline and follows `allWorkflow-20260531-3.md` as the target workflow.
 
 ## Scope
 

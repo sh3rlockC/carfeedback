@@ -3,12 +3,12 @@
 > 2026-06-01 最新接手入口：
 >
 > - `docs/session-2026-06-01-carfeedback-v3-rebuild.md`
-> - 本地 worktree：`/Users/xyc/Documents/codexwork/carFeedbackv101-worktrees/carfeedback-v3-rebuild`
+> - 本地 worktree：`/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild`
 > - 服务器新目录：`/opt/codexwork/carFeedback`
 > - 新并行服务：Compose project `carfeedback-v3`，端口 `18080`，base path `/car-user-feedback`
 > - 旧 80 服务：`koubei-20260527`，2026-06-01 验证时仍在运行，未停止。
 >
-> 下方 2026-04-27 内容是早期历史上下文，涉及 `/opt/codexwork/carFeedbackv101`、80 端口单服务、单体 `autohome` / `dongchedi` agent 的描述不能作为 V3 重建现状使用。
+> 下方 2026-04-27 内容是早期历史上下文，涉及 `/opt/codexwork/carFeedback`、80 端口单服务、单体 `autohome` / `dongchedi` agent 的描述不能作为 V3 重建现状使用。
 
 > 2026-04-28 后续接手请优先阅读：
 >
@@ -23,9 +23,9 @@
 ## 当前可用状态
 
 - 分支：`main`
-- remote：`origin https://github.com/sh3rlockC/carFeedbackv101.git`
-- 主工作树：`/Users/xyc/Documents/codexwork/carFeedbackv101`
-- 功能 worktree 根目录：`/Users/xyc/Documents/codexwork/carFeedbackv101-worktrees`
+- remote：`origin https://github.com/sh3rlockC/carfeedback.git`
+- 主工作树：`/Users/xyc/Documents/codexwork/carfeedback`
+- 功能 worktree 根目录：`/Users/xyc/Documents/codexwork/carfeedback-worktrees`
 - 历史关键提交：
   - `1dafe31 Initial vehicle koubei demo`
 - 本地 Web Demo 已通过 Docker Compose 运行：
@@ -116,7 +116,7 @@
 ## 常用命令
 
 ```bash
-cd /Users/xyc/Documents/codexwork/carFeedbackv101
+cd /Users/xyc/Documents/codexwork/carfeedback
 docker compose ps
 docker compose exec nginx nginx -t
 docker compose logs --tail=200 worker

@@ -33,7 +33,7 @@ koubei-20260527
 当前新建的归档目录：
 
 ```text
-/opt/codexwork/carFeedbackv101
+/opt/codexwork/carFeedback
 ```
 
 归档目录只保存文档和后续规划，不承载当前运行服务。
@@ -542,7 +542,7 @@ GET 结果接口只读取已有 artifact 和数据库结果，不应同步生成
 | 降级操作 | 后端明确开放“生成降级结果”动作 |
 | 重试/暂停 | `pause-retry`、失败后手动重试 |
 | 平台完整度 | 结果页展示实时成功/历史未查/失败 |
-| 运行目录迁移 | 如需改到 `/opt/codexwork/carFeedbackv101`，需迁移 volumes 和 Compose |
+| 运行目录迁移 | 如需改到 `/opt/codexwork/carFeedback`，需迁移 volumes 和 Compose |
 
 ### 11.3 前端实施顺序
 

@@ -10,7 +10,7 @@
    scripts/sandbox/sync-server-env.sh
    ```
 
-   默认读取 `/opt/codexwork/carFeedbackv101/.env`。如服务器 env 在其他路径，可设置 `SERVER_ENV_SOURCE`；如果需要 SSH，可使用 `SERVER_ENV_SOURCE=user@host:/opt/codexwork/carFeedbackv101/.env`。脚本只复制允许列表字段：`TAVILY_API_KEY`、`LLM_PROVIDER`、`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL_BATCH`、`LLM_MODEL_REPORT`、`LLM_MODEL_QA`。
+   默认读取 `/opt/codexwork/carFeedback/.env`。如服务器 env 在其他路径，可设置 `SERVER_ENV_SOURCE`；如果需要 SSH，可使用 `SERVER_ENV_SOURCE=user@host:/opt/codexwork/carFeedback/.env`。脚本只复制允许列表字段：`TAVILY_API_KEY`、`LLM_PROVIDER`、`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL_BATCH`、`LLM_MODEL_REPORT`、`LLM_MODEL_QA`。
 
 2. 启动沙箱：
 

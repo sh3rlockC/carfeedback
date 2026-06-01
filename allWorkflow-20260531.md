@@ -7,13 +7,13 @@
 
 ## 1. 关键结论
 
-- 服务器上当前实际运行的不是 `/opt/codexwork/carFeedbackv101`。
+- 服务器上当前实际运行的不是 `/opt/codexwork/carFeedback`。
 - 当前运行中的 Docker Compose project 只有一个：`koubei-20260527`。
 - 当前运行代码目录是：`/opt/codexwork-20260527/vehicle-koubei-web-demo`。
 - 当前 Compose 工作目录是：`/opt/codexwork-20260527/vehicle-koubei-web-demo/ops/test`。
 - `/opt/codexwork` 作为只读 workspace 挂入容器内 `/workspace`，用于访问采集依赖仓库和 OpenClaw runtime 相关文件。
 - OpenClaw gateway 不在 Docker Compose 内运行，而是宿主机 systemd 服务 `openclaw-koubei.service`。
-- 本次创建的 `/opt/codexwork/carFeedbackv101` 作为后续文档归档目录，不是当前线上服务执行目录。
+- 本次创建的 `/opt/codexwork/carFeedback` 作为后续文档归档目录，不是当前线上服务执行目录。
 
 ## 2. 当前运行目录与配置文件
 
@@ -39,7 +39,7 @@
 | `/opt/codexwork/vehicle-koubei-web-demo` | 另一个项目 checkout | 存在，但不是当前 Compose 工作目录 |
 | `/opt/codexwork/openclaw-koubei-runtime/workspace` | OpenClaw gateway 工作目录 | systemd 服务工作目录 |
 | `/home/ubuntu/.openclaw-koubei` | OpenClaw profile/state | 只读挂载到 worker/collector 容器 `/openclaw-state` |
-| `/opt/codexwork/carFeedbackv101` | 本文档要求创建的归档目录 | 本次创建，用于保存本文件 |
+| `/opt/codexwork/carFeedback` | 本文档要求创建的归档目录 | 本次创建，用于保存本文件 |
 
 ## 3. 当前服务清单
 
@@ -486,8 +486,8 @@ sudo docker exec koubei-20260527-temporal-1 \
 
 ## 12. 后续维护建议
 
-1. 明确当前线上执行目录仍是 `/opt/codexwork-20260527/vehicle-koubei-web-demo`，不要误以为 `/opt/codexwork/carFeedbackv101` 已承载运行服务。
-2. 如果要把运行目录迁移到 `/opt/codexwork/carFeedbackv101`，需要重新构建 Compose project、迁移 storage/jobs、storage/corpus、Postgres/Redis volumes，并同步 systemd/OpenClaw 路径。
+1. 明确当前线上执行目录仍是 `/opt/codexwork-20260527/vehicle-koubei-web-demo`，不要误以为 `/opt/codexwork/carFeedback` 已承载运行服务。
+2. 如果要把运行目录迁移到 `/opt/codexwork/carFeedback`，需要重新构建 Compose project、迁移 storage/jobs、storage/corpus、Postgres/Redis volumes，并同步 systemd/OpenClaw 路径。
 3. 修复汽车之家 `collector_missing_result` 时，优先查看对应 task 的：
    - `logs/collecting_autohome.openclaw.stdout.log`
    - `logs/collecting_autohome.openclaw.stderr.log`

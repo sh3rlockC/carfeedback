@@ -1,10 +1,10 @@
-# 2026-06-01 carFeedback V3 重建会话交接
+# 2026-06-01 carfeedback V3 重建会话交接
 
 本文记录 2026-06-01 在 `codex/carfeedback-v3-rebuild` 分支完成的服务器并行重建、OpenClaw 8 Agent 池接入、全量采集修复与小米 SU7 验证结果。本文不保存任何 API Key、OpenClaw token、数据库密码或访问 token 明文。
 
 ## 1. 部署状态
 
-- 本地 worktree：`/Users/xyc/Documents/codexwork/carFeedbackv101-worktrees/carfeedback-v3-rebuild`
+- 本地 worktree：`/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild`
 - 服务器新目录：`/opt/codexwork/carFeedback`
 - Docker Compose project：`carfeedback-v3`
 - 新服务端口：`18080`
@@ -128,7 +128,7 @@ manual collector 测试中出现过任务目录 root ownership 导致的进度�
 本地验证：
 
 ```bash
-APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' /Users/xyc/Documents/codexwork/carFeedbackv101/.venv/bin/python -m pytest apps/api/tests apps/worker/tests apps/collector_service/tests -q
+APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' /Users/xyc/Documents/codexwork/carfeedback/.venv/bin/python -m pytest apps/api/tests apps/worker/tests apps/collector_service/tests -q
 npm --prefix apps/web run typecheck
 docker compose config --quiet
 ```
@@ -144,7 +144,7 @@ sudo docker ps --filter 'name=koubei-20260527-nginx-1' --format '{{.Names}}\t{{.
 ## 6. 后续建议
 
 - 用浏览器检查 `/car-user-feedback/tasks/new` 的“增量 / 全量”控件在桌面和移动端是否符合预期。
-- 把 `docs/cloud-deployment.md` 中的旧路径 `/opt/codexwork/carFeedbackv101`、旧 80 单服务描述，在切换主服务前统一改为 V3 并行部署说明。
+- 把 `docs/cloud-deployment.md` 中的旧路径 `/opt/codexwork/carFeedback`、旧 80 单服务描述，在切换主服务前统一改为 V3 并行部署说明。
 - 修复汽车之家 OpenClaw progress 百分比运行中可能超过 100 的显示问题。
 - 如果确认不再需要旧单体 agent，再执行旧 agent 删除；2026-06-01 会话未删除旧两个 agent。
 - 若准备替换 80 端口，先用 18080 的小米 SU7 和风云 T11 结果作为验收基线，再切 Nginx/Compose 入口。

@@ -8,7 +8,7 @@
 
 更新时间：2026-04-28
 
-本文用于新模型、新对话或新工程师快速接手 `carFeedbackv101`，重点覆盖当前状态、架构、排查入口、已知问题和后续优化方向。本文不保存任何 API Key、数据库密码、OpenClaw token 或访问口令明文。
+本文用于新模型、新对话或新工程师快速接手 `carfeedback`，重点覆盖当前状态、架构、排查入口、已知问题和后续优化方向。本文不保存任何 API Key、数据库密码、OpenClaw token 或访问口令明文。
 
 ## 1. 项目定位
 
@@ -39,13 +39,13 @@
 本地项目：
 
 ```text
-/Users/xyc/Documents/codexwork/carFeedbackv101
+/Users/xyc/Documents/codexwork/carfeedback
 ```
 
 云端项目：
 
 ```text
-/opt/codexwork/carFeedbackv101
+/opt/codexwork/carFeedback
 ```
 
 云端 SSH：
@@ -57,7 +57,7 @@ ssh -i ~/.ssh/vehicle_koubei_tencent ubuntu@129.211.223.252
 远端仓库：
 
 ```text
-https://github.com/sh3rlockC/carFeedbackv101.git
+https://github.com/sh3rlockC/carfeedback.git
 ```
 
 历史关键提交：
@@ -78,7 +78,7 @@ Docker Compose 会把项目父目录挂载到容器 `/workspace`，因此依赖�
 
 ```text
 /opt/codexwork/
-  carFeedbackv101/
+  carfeedback/
   data/repos/
     vehicle-id-finder/
     auto-koubei-collector/
@@ -167,7 +167,7 @@ OPENCLAW_GATEWAY_URL=ws://host.docker.internal:18790
 OPENCLAW_GATEWAY_TOKEN_FILE=/run/secrets/openclaw_gateway_token
 OPENCLAW_AUTOHOME_AGENT_ID=autohome
 OPENCLAW_DCD_AGENT_ID=dongchedi
-OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedbackv101/storage/jobs
+OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedback/storage/jobs
 OPENCLAW_TASK_DB_PATH=/openclaw-state/tasks/runs.sqlite
 OPENCLAW_DEVICE_IDENTITY_FILE=/openclaw-state/identity/device.json
 ```
@@ -296,7 +296,7 @@ ERROR: 未能从摘要 Excel 中识别到可用词项
 1. 先确认服务状态：
 
 ```bash
-cd /opt/codexwork/carFeedbackv101
+cd /opt/codexwork/carFeedback
 sudo docker compose ps
 systemctl is-active openclaw-koubei.service
 curl -fsS http://127.0.0.1/healthz
@@ -354,7 +354,7 @@ find /home/ubuntu/.openclaw-koubei/agents/autohome/sessions -maxdepth 1 -type f 
 ## 10. 常用本地命令
 
 ```bash
-cd /Users/xyc/Documents/codexwork/carFeedbackv101
+cd /Users/xyc/Documents/codexwork/carfeedback
 docker compose ps
 docker compose logs --tail=200 worker
 docker compose logs --tail=200 api

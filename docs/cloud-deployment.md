@@ -1,6 +1,6 @@
 # 云服务器部署清单与上线步骤
 
-本文面向准备租用云服务器上线 `carFeedbackv101` 的用户。当前项目是单机 Docker Compose 部署：Nginx 对外提供 Web 入口，后端 API、worker、Postgres、Redis 在同一台服务器内运行。
+本文面向准备租用云服务器上线 `carfeedback` 的用户。当前项目是单机 Docker Compose 部署：Nginx 对外提供 Web 入口，后端 API、worker、Postgres、Redis 在同一台服务器内运行。
 
 ## 推荐服务器配置
 
@@ -69,11 +69,11 @@ volumes:
   - ..:/workspace:ro
 ```
 
-因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传 `carFeedbackv101` 目录。推荐放置方式：
+因此服务器上的目录结构应保持为一个完整 workspace，而不是只上传 `carfeedback` 目录。推荐放置方式：
 
 ```text
 /opt/codexwork/
-  carFeedbackv101/
+  carfeedback/
   data/
     repos/
       vehicle-id-finder/
@@ -87,7 +87,7 @@ volumes:
 运行目录是：
 
 ```bash
-cd /opt/codexwork/carFeedbackv101
+cd /opt/codexwork/carFeedback
 ```
 
 容器内会通过 `WORKSPACE_ROOT=/workspace` 访问这些依赖目录：
@@ -204,11 +204,11 @@ Temporal 部署由环境变量控制。单机 sandbox 可以使用 Compose 内�
 
 1. 准备服务器并安装 Docker、Docker Compose v2、Git。
 2. 将完整 workspace 放到服务器，例如 `/opt/codexwork`。
-3. 确认 `carFeedbackv101` 与外部依赖目录位于同一个 workspace 下。
+3. 确认 `carfeedback` 与外部依赖目录位于同一个 workspace 下。
 4. 进入项目目录：
 
 ```bash
-cd /opt/codexwork/carFeedbackv101
+cd /opt/codexwork/carFeedback
 ```
 
 5. 创建并编辑 `.env`：
@@ -441,7 +441,7 @@ docker compose exec worker sh -lc 'ls -la /workspace/data/repos /workspace/koube
 - 域名已解析到服务器公网 IP。
 - 云厂商安全组已放行 TCP `80`，如接入 HTTPS 也已放行 TCP `443`。
 - Docker Engine、Docker Compose v2、Git 已安装。
-- 完整 workspace 已放置到服务器，且 `carFeedbackv101` 与外部依赖目录保持相对位置。
+- 完整 workspace 已放置到服务器，且 `carfeedback` 与外部依赖目录保持相对位置。
 - `.env` 已从 `.env.example` 复制并完成修改。
 - `APP_ENV=production`。
 - `BASE_URL` 已改成线上域名。

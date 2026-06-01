@@ -1,6 +1,6 @@
-# carFeedbackv101 服务流程与扩展接口
+# carfeedback 服务流程与扩展接口
 
-本文用于维护 `carFeedbackv101` 的线上服务，记录本次修复后的运行策略、数据流、Temporal 边界和后续扩展入口。
+本文用于维护 `carfeedback` 的线上服务，记录本次修复后的运行策略、数据流、Temporal 边界和后续扩展入口。
 
 ## 当前策略
 
@@ -160,7 +160,7 @@ API result 读取规则：
 重命名后的运行目录：
 
 ```bash
-cd /Users/xyc/Documents/codexwork/carFeedbackv101
+cd /Users/xyc/Documents/codexwork/carfeedback
 ```
 
 上线前检查：

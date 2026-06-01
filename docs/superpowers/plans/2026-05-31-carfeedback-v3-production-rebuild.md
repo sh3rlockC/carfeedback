@@ -1,4 +1,4 @@
-# carFeedback V3 Production Rebuild Implementation Plan
+# carfeedback V3 Production Rebuild Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -960,7 +960,7 @@ Expected: exits `0`.
 
 - [ ] **Step 2: Sync code without local dependency/cache directories**
 
-Run from `/Users/xyc/Documents/codexwork/carFeedbackv101`:
+Run from `/Users/xyc/Documents/codexwork/carfeedback`:
 
 ```bash
 rsync -az --delete \
@@ -1206,7 +1206,7 @@ Expected: child single tasks are created and collection runs use the 8-agent poo
 Add a short note to `docs/maintenance/service-flow-and-extension.md` or a new dated maintenance note with:
 
 ```markdown
-## 2026-05-31 carFeedback v3 parallel deployment
+## 2026-05-31 carfeedback v3 parallel deployment
 
 - Directory: `/opt/codexwork/carFeedback`
 - Compose project: `carfeedback-v3`
@@ -1220,7 +1220,7 @@ Commit the note:
 
 ```bash
 git add docs/maintenance/service-flow-and-extension.md
-git commit -m "Document carFeedback v3 parallel deployment"
+git commit -m "Document carfeedback v3 parallel deployment"
 ```
 
 ## Final Verification
