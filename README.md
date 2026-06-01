@@ -1,113 +1,183 @@
 # 车型口碑情报舱
 
-面向汽车产品、营销和用户洞察团队的口碑分析 Web Demo。用户输入车型后，系统完成车系确认、汽车之家/懂车帝双平台采集、后处理、Hermes + DeepSeek 输出分析、AI 一页纸、词云、问答和 ZIP 交付物下载。
+`carfeedback` 是一个汽车垂媒用户口碑分析服务。用户输入车型后，系统完成车系确认、汽车之家/懂车帝双平台采集、后处理、摘要、词云、AI 一页纸、问答和 ZIP 交付。
 
-## 当前能力
+本文只保留运行该服务所需的工作流、环境和验证命令。详细交接见 [docs/session-2026-06-01-carfeedback-v3-rebuild.md](docs/session-2026-06-01-carfeedback-v3-rebuild.md)。
 
-- 车型候选确认：识别汽车之家、懂车帝车系 ID，并复用历史确认结果。
-- 双平台采集：`collecting_autohome` 和 `collecting_dcd` 通过 OpenClaw 分别调用采集 Agent。
-- Hermes 输出阶段：`postprocessing` 后由 Worker 统一生成最终摘要、词云词项、AI 一页纸、QA 语料和兼容旧结果页的产物。
-- DeepSeek 直连：批次分析默认使用 `deepseek-v4-flash`，最终聚合默认使用 `deepseek-v4-pro`，结构化输出启用 JSON mode。
-- 标准原评论 JSON 层：保留完整脱敏 `normalized_comments.jsonl`，并生成压缩后的 `analysis_facts.jsonl` 供 LLM 批次分析，降低 token 消耗。
-- 时间范围一页纸：结果页可按日期预览脱敏评论，并为指定时间范围生成独立的一页纸版本和 ZIP。
-- 多车型竞品对比：支持 2-5 个车型对比，复用 72 小时内完整历史结果，并生成 LLM 对比结论、多维度优劣提及数矩阵和胜者列。
-- 结果口径：摘要字段统一为 `核心好评`、`核心槽点`、`最满意TOP` 和 `最不满意TOP`。
-- 降级策略：批次失败只回退该批本地规则；聚合超时回退本地归并；缺少 LLM key 时走规则兜底并标记降级。
-- 交付物下载：ZIP 面向业务交付，仅包含 Excel、词云 PNG、词项清单和关键词榜图片；内部 JSON/JSONL/metrics 保留用于页面展示、复用判断和问答，不进入下载包。
+## 当前生产状态
 
-## 主流程
+- 服务器目录：`/opt/codexwork/carFeedback`
+- Compose project：`carfeedback-v3`
+- 当前入口：`http://服务器/car-user-feedback`
+- 当前端口：`80`
+- OpenClaw gateway：宿主机 `127.0.0.1:18790`
+- OpenClaw Agent 池：
+  - 汽车之家：`autohome-1`、`autohome-2`、`autohome-3`、`autohome-4`
+  - 懂车帝：`dongchedi-1`、`dongchedi-2`、`dongchedi-3`、`dongchedi-4`
+  - `main` 仅作 fallback
+
+## 必要工作流
 
 ```text
 Web UI
-  -> FastAPI
-  -> Redis / RQ Worker
-  -> OpenClaw 双平台采集
-  -> postprocessing
-  -> Hermes + DeepSeek 输出分析
-  -> 结果页 / QA / 时间范围一页纸 / 竞品对比 / ZIP
+  -> FastAPI 创建任务
+  -> Temporal workflow 编排任务
+  -> autohome-collector / dongchedi-collector
+  -> OpenClaw 8 Agent 池执行双平台采集
+  -> raw Excel + progress JSON + validation JSON
+  -> Worker 后处理、摘要、词云、AI 一页纸、QA 语料、ZIP
+  -> 任务中心 / 任务详情页交付结果
 ```
 
-## 数据与隐私
+任务创建支持两种采集模式：
 
-LLM 输入只使用分析必要字段：
+- `incremental`：优先复用已有语料，适合日常任务。
+- `full_refresh`：强制全量采集，适合验收、排查和基线刷新。
 
-- 平台
-- 日期
-- 车型
-- 最满意
-- 最不满意
-- 评价全文
+## 运行组件
 
-用户名、来源链接、购车地、精确地点等非必要字段不会进入 LLM prompt。完整脱敏评论保存在 `normalized_comments.jsonl`，LLM 批次输入使用规则压缩后的 `analysis_facts.jsonl`。
+Docker Compose 内部组件：
 
-## 主要 API
+- `nginx`：对外入口，转发 Web/API 和 artifact 下载。
+- `web`：Next.js 前端，base path 为 `/car-user-feedback`。
+- `api`：FastAPI 后端，负责任务创建、车型识别、结果读取和问答接口。
+- `temporal`：工作流服务。
+- `temporal-worker`：主任务编排执行器。
+- `worker`：兼容旧队列和后台处理。
+- `autohome-collector`：汽车之家采集入口。
+- `dongchedi-collector`：懂车帝采集入口。
+- `postgres`：任务、产物和语料索引。
+- `redis`：队列和后台任务依赖。
 
-- `GET /api/jobs/{job_id}/result`：读取主结果页数据。
-- `GET /api/jobs/{job_id}/download`：下载主任务 ZIP。
-- `POST /api/jobs/{job_id}/qa`：基于当前任务结果问答。
-- `GET /api/jobs/{job_id}/comments/summary`：读取评论日期分布。
-- `GET /api/jobs/{job_id}/comments`：分页预览指定时间范围的脱敏评论。
-- `POST /api/jobs/{job_id}/time-reports`：创建时间范围一页纸任务。
-- `GET /api/jobs/{job_id}/time-reports`：读取时间范围一页纸历史。
-- `GET /api/jobs/{job_id}/time-reports/{report_id}/artifacts.zip`：下载时间范围一页纸 ZIP。
-- `POST /api/comparisons/options`：解析多车型候选并返回可复用的历史结果。
-- `POST /api/comparisons`：创建多车型竞品对比任务。
-- `GET /api/comparisons/{comparison_id}`：读取对比结果 JSON，用于网页展示 LLM 结论和维度矩阵。
-- `GET /api/comparisons/{comparison_id}/progress`：读取对比任务总进度、车型进度和 ETA。
-- `GET /api/comparisons/{comparison_id}/artifacts.zip`：下载对比 ZIP，内容只包含 Excel/PNG 业务产物。
+外部运行层：
 
-## 技术栈
+- `openclaw-koubei.service`：OpenClaw gateway 和 Agent 状态。
+- 依赖仓库目录：`/opt/codexwork/data/repos/*` 和 `/opt/codexwork/koubei-wordcloud`。
 
-- Web：Next.js、React、TypeScript
-- API：FastAPI、SQLAlchemy
-- Worker：Python、RQ、Redis
-- 数据库：PostgreSQL
-- 部署：Docker Compose、Nginx
-- Agent 执行层：OpenClaw
-- LLM：DeepSeek OpenAI-compatible Chat Completions
+## 依赖仓库
 
-## 关键配置
+生产 workspace 需要保持这些目录相对位置：
 
-不要把密钥写入镜像或提交到仓库。生产环境通过 `.env` 注入：
+```text
+/opt/codexwork/
+  carFeedback/
+  data/repos/
+    vehicle-id-finder/
+    auto-koubei-collector/
+    dcd-koubei-collector/
+    koubei-postprocess/
+    koubei-keyword-summary-skill/
+  koubei-wordcloud/
+```
+
+当前服务直接依赖：
+
+- `vehicle-id-finder`
+- `auto-koubei-collector`
+- `dcd-koubei-collector`
+- `koubei-postprocess`
+- `koubei-keyword-summary-skill`
+- `koubei-wordcloud`
+
+## 必要环境
+
+生产环境使用 `.env` 注入配置，不要提交真实密钥。
 
 ```env
+APP_ENV=production
+BASE_URL=http://服务器或域名/car-user-feedback
+HTTP_PORT=80
+NEXT_PUBLIC_BASE_PATH=/car-user-feedback
+BACKEND_ORIGIN=http://api:8000
+
+POSTGRES_DB=koubei
+POSTGRES_USER=koubei
+POSTGRES_PASSWORD=请替换
+DATABASE_URL=postgresql+psycopg://koubei:请替换@postgres:5432/koubei
+REDIS_URL=redis://redis:6379/0
+
+ARTIFACT_ROOT=/srv/koubei/jobs
+JOB_ARTIFACTS_HOST_PATH=/opt/codexwork/carFeedback/storage/jobs
+CORPUS_ROOT=/srv/koubei/corpus
+CORPUS_HOST_PATH=/opt/codexwork/carFeedback/storage/corpus
+WORKSPACE_ROOT=/workspace
+
+TEMPORAL_ADDRESS=temporal:7233
+TEMPORAL_NAMESPACE=default
+TEMPORAL_TASK_QUEUE=vehicle-koubei-temporal
+AUTOHOME_COLLECTOR_SERVICE_URL=http://autohome-collector:8100
+DCD_COLLECTOR_SERVICE_URL=http://dongchedi-collector:8100
+
 OPENCLAW_ADAPTER_ENABLED=true
 OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
+OPENCLAW_GATEWAY_URL=ws://host.docker.internal:18790
+OPENCLAW_GATEWAY_TOKEN_FILE=/run/secrets/openclaw_gateway_token
+OPENCLAW_GATEWAY_TOKEN_FILE_HOST=/opt/codexwork/carFeedback/.runtime/secrets/openclaw_gateway_token
+OPENCLAW_STATE_HOST_PATH=/home/ubuntu/.openclaw-koubei
+OPENCLAW_TASK_DB_PATH=/openclaw-state/tasks/runs.sqlite
+OPENCLAW_DEVICE_IDENTITY_FILE=/openclaw-state/identity/device.json
+OPENCLAW_AGENT_ID=main
+OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2,autohome-3,autohome-4
+OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4
+OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedback/storage/jobs
 
+TAVILY_API_KEY=请替换
 LLM_PROVIDER=deepseek
+LLM_API_KEY=请替换
 LLM_BASE_URL=https://api.deepseek.com
-LLM_API_KEY=...
 LLM_MODEL_BATCH=deepseek-v4-flash
 LLM_MODEL_REPORT=deepseek-v4-pro
 LLM_MODEL_QA=deepseek-v4-pro
 
-HERMES_LLM_MODE=api
-HERMES_BATCH_CONCURRENCY=3
-HERMES_BATCH_TARGET_BYTES=45000
-HERMES_TIMEOUT_SECONDS=180
-HERMES_AGGREGATE_TIMEOUT_SECONDS=180
-HERMES_JSON_RETRIES=1
+WORDCLOUD_FONT_PATH=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
 ```
 
-完整部署说明见 [docs/cloud-deployment.md](docs/cloud-deployment.md)，OpenClaw 流程说明见 [docs/openclaw-skill-flow.md](docs/openclaw-skill-flow.md)。
+服务器的 `.runtime` 目录只在服务器维护，不能从本地覆盖。
+
+## 部署与验证
+
+构建并启动：
+
+```bash
+cd /opt/codexwork/carFeedback
+sudo docker compose -p carfeedback-v3 up -d --build --scale temporal-worker=2
+```
+
+检查服务：
+
+```bash
+curl -fsS http://127.0.0.1/healthz
+curl -fsS http://服务器或域名/car-user-feedback/tasks
+curl -fsS 'http://服务器或域名/car-user-feedback/api/tasks?limit=1'
+sudo docker compose -p carfeedback-v3 ps
+systemctl is-active openclaw-koubei.service
+curl -fsS http://127.0.0.1:18790/healthz
+```
+
+同步代码到服务器时必须排除运行时和产物目录：
+
+```bash
+rsync -az --delete \
+  --exclude '.env' \
+  --exclude '.runtime' \
+  --exclude 'storage' \
+  --exclude 'node_modules' \
+  --exclude '.next' \
+  --exclude '.venv' \
+  ./ ubuntu@服务器:/opt/codexwork/carFeedback/
+```
 
 ## 本地验证
 
 ```bash
-APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' .venv/bin/pytest apps/api/tests apps/worker/tests -q
+APP_ENV=test DATABASE_URL='sqlite+pysqlite:////tmp/vehicle-koubei-pytest.db' .venv/bin/python -m pytest apps/api/tests apps/worker/tests apps/collector_service/tests -q
 npm --prefix apps/web run typecheck
-npm --prefix apps/web run build
 docker compose config --quiet
 ```
 
-## 目录结构
+## 安全边界
 
-```text
-apps/web      # Next.js 前端
-apps/api      # FastAPI 服务
-apps/worker   # RQ Worker、采集编排、Hermes 输出
-config        # 流程配置
-docs          # 部署、OpenClaw、交接文档
-ops           # Docker、Nginx、启动脚本
-storage       # 本地产物目录，不提交真实任务结果
-```
+- 不提交 `.env`、`.runtime`、OpenClaw token、API key、数据库密码、任务产物或日志。
+- 不直接复制服务器 `.runtime` 到本地。
+- 不用 OpenClaw task 状态单独判断采集成功，必须同时校验 Excel、progress JSON 和 validation JSON。
+- 切换部署前先备份 `.env`，确认 `HTTP_PORT`、`BASE_URL` 和 `NEXT_PUBLIC_BASE_PATH` 一致。
