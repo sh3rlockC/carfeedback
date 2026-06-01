@@ -144,3 +144,31 @@ def test_generate_comparison_outputs_writes_dimension_matrix_excel(tmp_path: Pat
     assert matrix.cell(row=9, column=2).value == "车型A"
     conclusion = workbook["结论"]
     assert conclusion.cell(row=1, column=1).value == "LLM 多车型对比结论"
+
+
+def test_generate_comparison_outputs_accepts_openclaw_source_label(tmp_path: Path) -> None:
+    snapshots = [
+        write_snapshot(
+            tmp_path,
+            "车型A",
+            [{"comment_id": "a1", "date": "2026-03-01", "section_facts": {"positive": "空间宽敞", "negative": "车机卡顿"}}],
+        ),
+        write_snapshot(
+            tmp_path,
+            "车型B",
+            [{"comment_id": "b1", "date": "2026-03-01", "section_facts": {"positive": "动力顺", "negative": "胎噪大"}}],
+        ),
+    ]
+
+    result = generate_comparison_outputs(
+        snapshots=snapshots,
+        output_dir=tmp_path / "comparison",
+        env={},
+        source_label="openclaw-hermes",
+    )
+
+    report = json.loads((tmp_path / "comparison" / "final_comparison.json").read_text(encoding="utf-8"))
+    metrics = json.loads((tmp_path / "comparison" / "llm_metrics.json").read_text(encoding="utf-8"))
+    assert result["report_json"]["source"] == "openclaw-hermes"
+    assert report["source"] == "openclaw-hermes"
+    assert metrics["source"] == "openclaw-hermes"

@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 
 from worker_app.artifacts import ensure_job_dirs
 from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
@@ -22,8 +23,12 @@ from worker_app.corpus import (
 from worker_app.hermes_outputs import generate_time_report_outputs
 from worker_app.job_store import ComparisonVehicleInputs, DatabaseJobStore
 from worker_app.jobs import JobContext, run_pipeline
-from worker_app.openclaw_runner import build_stage_runner
-from worker_app.stages import build_stage_commands
+from worker_app.openclaw_runner import OpenClawSettings, build_stage_runner
+from worker_app.progress import ProgressSink
+from worker_app.stages import StageCommand, StageExecutionError, build_stage_commands, load_dependencies
+
+
+AI_OUTPUTS_CLI = Path(__file__).resolve().parent / "worker_app" / "ai_outputs_cli.py"
 
 
 def _optional_existing_path(value: str | None) -> str | None:
@@ -120,6 +125,214 @@ def _copy_vehicle_downloadable_artifacts(
             shutil.copy2(source, target)
         copied.append(str(target))
     return copied
+
+
+def _analysis_dependency_scripts() -> tuple[str, str]:
+    dependency_map = load_dependencies()
+    return (
+        str(dependency_map["koubei-keyword-summary-skill"]["entrypoint"]),
+        str(dependency_map["koubei-wordcloud"]["entrypoint"]),
+    )
+
+
+def _openclaw_settings_for_stage(stage_name: str) -> OpenClawSettings | None:
+    settings = OpenClawSettings.from_env()
+    if settings.enabled and stage_name in settings.stages:
+        return settings
+    return None
+
+
+def _openclaw_only_direct_runner(command: StageCommand, _job_paths, _progress_sink):
+    raise StageExecutionError(
+        stage=command.name,
+        error_code="OPENCLAW_NOT_ROUTED",
+        message=f"OpenClaw adapter did not route configured stage: {command.name}",
+    )
+
+
+def _run_configured_openclaw_stage(*, stage: StageCommand, job_paths, settings: OpenClawSettings):
+    progress_sink = ProgressSink(
+        job_id=job_paths.root.name,
+        progress_path=job_paths.progress / "progress.json",
+        stages=[stage.name],
+    )
+    runner = build_stage_runner(settings=settings, direct_runner=_openclaw_only_direct_runner)
+    return runner(stage, job_paths, progress_sink)
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _time_report_result_from_stage(
+    *,
+    stage: StageCommand,
+    output_dir: Path,
+    stage_result,
+) -> dict:
+    report_json = _read_json_file(output_dir / "final_report.json")
+    metrics_json = _read_json_file(output_dir / "llm_metrics.json")
+    source = str(report_json.get("source") or metrics_json.get("source") or "openclaw-hermes")
+    return {
+        "status": "completed_degraded" if stage_result.status == "degraded" else "completed",
+        "degraded": stage_result.status == "degraded",
+        "source": source,
+        "sample_count": int(report_json.get("sample_count") or 0),
+        "platform_counts": report_json.get("platform_counts") or {},
+        "report_json": report_json,
+        "artifact_paths": list(stage_result.artifact_paths) or [artifact for artifact in stage.expected_artifacts if Path(artifact).exists()],
+        "output_metadata": dict(stage_result.output_metadata),
+    }
+
+
+def _build_time_report_stage_command(
+    *,
+    report_inputs,
+    autohome_input: Path,
+    dcd_input: Path,
+    output_dir: Path,
+    progress_file: Path,
+    summary_script: str,
+    wordcloud_script: str,
+) -> StageCommand:
+    date_label = f"{report_inputs.start_date}_{report_inputs.end_date}"
+    summary_path = output_dir / f"{report_inputs.model_name}_{date_label}_时间范围口碑摘要.xlsx"
+    terms_path = output_dir / f"{report_inputs.model_name}_{date_label}_词云词项清单.xlsx"
+    final_report = output_dir / "final_report.json"
+    qa_chunks = output_dir / "qa_chunks.json"
+    normalized_comments = output_dir / "normalized_comments.jsonl"
+    analysis_facts = output_dir / "analysis_facts.jsonl"
+    llm_metrics = output_dir / "llm_metrics.json"
+    command = [
+        sys.executable,
+        str(AI_OUTPUTS_CLI),
+        "time-report",
+        "--autohome-input",
+        str(autohome_input),
+        "--dcd-input",
+        str(dcd_input),
+        "--output-dir",
+        str(output_dir),
+        "--model-name",
+        report_inputs.model_name,
+        "--start-date",
+        report_inputs.start_date,
+        "--end-date",
+        report_inputs.end_date,
+        "--progress-file",
+        str(progress_file),
+        "--summary-script",
+        summary_script,
+        "--wordcloud-script",
+        wordcloud_script,
+        "--hermes-command",
+        os.getenv("HERMES_COMMAND", "hermes"),
+        "--skill-first",
+        "--source-label",
+        "openclaw-hermes",
+    ]
+    font_path = _optional_existing_path(os.getenv("WORDCLOUD_FONT_PATH"))
+    if font_path:
+        command.extend(["--font-path", font_path])
+    return StageCommand(
+        name="generating_time_report_outputs",
+        dependency_name="hermes-agent",
+        command=command,
+        cwd=AI_OUTPUTS_CLI.parent,
+        expected_artifacts=(
+            str(final_report),
+            str(normalized_comments),
+            str(analysis_facts),
+            str(llm_metrics),
+            str(summary_path),
+            str(summary_path.with_suffix(".validation.json")),
+            str(terms_path),
+            str(qa_chunks),
+            str(progress_file),
+        ),
+        optional_artifacts=(
+            str(output_dir / f"{report_inputs.model_name}_优点词云.png"),
+            str(output_dir / f"{report_inputs.model_name}_槽点词云.png"),
+        ),
+        progress_file=str(progress_file),
+        parse_json_stdout=True,
+    )
+
+
+def _write_comparison_snapshots_json(path: Path, snapshots: list[VehicleSnapshot]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "model_name": snapshot.model_name,
+                        "source_job_id": snapshot.source_job_id,
+                        "final_report_path": str(snapshot.final_report_path),
+                        "analysis_facts_path": str(snapshot.analysis_facts_path),
+                        "llm_metrics_path": str(snapshot.llm_metrics_path) if snapshot.llm_metrics_path else None,
+                    }
+                    for snapshot in snapshots
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _build_comparison_stage_command(
+    *,
+    comparison_inputs,
+    snapshots: list[VehicleSnapshot],
+    comparison_dir: Path,
+) -> StageCommand:
+    snapshots_json = comparison_dir / "comparison_snapshots.json"
+    _write_comparison_snapshots_json(snapshots_json, snapshots)
+    command = [
+        sys.executable,
+        str(AI_OUTPUTS_CLI),
+        "comparison",
+        "--snapshots-json",
+        str(snapshots_json),
+        "--output-dir",
+        str(comparison_dir),
+        "--source-label",
+        "openclaw-hermes",
+    ]
+    if comparison_inputs.start_date:
+        command.extend(["--start-date", comparison_inputs.start_date])
+    if comparison_inputs.end_date:
+        command.extend(["--end-date", comparison_inputs.end_date])
+    return StageCommand(
+        name="generating_comparison_outputs",
+        dependency_name="hermes-agent",
+        command=command,
+        cwd=AI_OUTPUTS_CLI.parent,
+        expected_artifacts=(
+            str(comparison_dir / "final_comparison.json"),
+            str(comparison_dir / "comparison_summary.xlsx"),
+            str(comparison_dir / "comparison_dimension_matrix.xlsx"),
+            str(comparison_dir / "llm_metrics.json"),
+        ),
+        optional_artifacts=(str(snapshots_json),),
+        parse_json_stdout=True,
+    )
+
+
+def _comparison_result_from_stage(*, stage: StageCommand, comparison_dir: Path, stage_result) -> dict:
+    report_json = _read_json_file(comparison_dir / "final_comparison.json")
+    return {
+        "report_json": report_json,
+        "artifact_paths": list(stage_result.artifact_paths) or [artifact for artifact in stage.expected_artifacts if Path(artifact).exists()],
+        "degraded": stage_result.status == "degraded",
+        "output_metadata": dict(stage_result.output_metadata),
+    }
 
 
 def _collection_summary_template(mode: str, existing_count: int) -> dict:
@@ -369,20 +582,60 @@ def run_time_report(
     dcd_input = job_paths.outputs.raw / f"DCD口碑_{report_inputs.model_name}.xlsx"
     output_dir = job_paths.root / "outputs" / "time_reports" / report_inputs.report_id
     progress_file = job_paths.progress / f"{report_inputs.report_id}.progress.json"
+    summary_script, wordcloud_script = _analysis_dependency_scripts()
 
     try:
-        result = generate_time_report_outputs(
-            autohome_input=autohome_input,
-            dcd_input=dcd_input,
-            output_dir=output_dir,
-            model_name=report_inputs.model_name,
-            start_date=report_inputs.start_date,
-            end_date=report_inputs.end_date,
-            hermes_command=os.getenv("HERMES_COMMAND", "hermes"),
-            font_path=_optional_existing_path(os.getenv("WORDCLOUD_FONT_PATH")),
-            env=dict(os.environ),
-            progress_file=progress_file,
-        )
+        openclaw_settings = _openclaw_settings_for_stage("generating_time_report_outputs")
+        if openclaw_settings:
+            stage = _build_time_report_stage_command(
+                report_inputs=report_inputs,
+                autohome_input=autohome_input,
+                dcd_input=dcd_input,
+                output_dir=output_dir,
+                progress_file=progress_file,
+                summary_script=summary_script,
+                wordcloud_script=wordcloud_script,
+            )
+            try:
+                stage_result = _run_configured_openclaw_stage(
+                    stage=stage,
+                    job_paths=job_paths,
+                    settings=openclaw_settings,
+                )
+            except StageExecutionError:
+                result = generate_time_report_outputs(
+                    autohome_input=autohome_input,
+                    dcd_input=dcd_input,
+                    output_dir=output_dir,
+                    model_name=report_inputs.model_name,
+                    start_date=report_inputs.start_date,
+                    end_date=report_inputs.end_date,
+                    summary_script=summary_script,
+                    wordcloud_script=wordcloud_script,
+                    hermes_command=os.getenv("HERMES_COMMAND", "hermes"),
+                    font_path=_optional_existing_path(os.getenv("WORDCLOUD_FONT_PATH")),
+                    env=dict(os.environ),
+                    progress_file=progress_file,
+                    source_label="openclaw-hermes-local-fallback",
+                )
+                result["degraded"] = True
+            else:
+                result = _time_report_result_from_stage(stage=stage, output_dir=output_dir, stage_result=stage_result)
+        else:
+            result = generate_time_report_outputs(
+                autohome_input=autohome_input,
+                dcd_input=dcd_input,
+                output_dir=output_dir,
+                model_name=report_inputs.model_name,
+                start_date=report_inputs.start_date,
+                end_date=report_inputs.end_date,
+                summary_script=summary_script,
+                wordcloud_script=wordcloud_script,
+                hermes_command=os.getenv("HERMES_COMMAND", "hermes"),
+                font_path=_optional_existing_path(os.getenv("WORDCLOUD_FONT_PATH")),
+                env=dict(os.environ),
+                progress_file=progress_file,
+            )
     except Exception as exc:
         error_message = str(exc) or exc.__class__.__name__
         error_code = _error_code_from_exception(exc)
@@ -483,13 +736,39 @@ def run_comparison_job(
         }
 
     store.mark_comparison_comparing(comparison_id)
-    result = generate_comparison_outputs(
-        snapshots=snapshots,
-        output_dir=comparison_dir,
-        start_date=comparison_inputs.start_date,
-        end_date=comparison_inputs.end_date,
-        env=dict(os.environ),
-    )
+    openclaw_settings = _openclaw_settings_for_stage("generating_comparison_outputs")
+    if openclaw_settings:
+        stage = _build_comparison_stage_command(
+            comparison_inputs=comparison_inputs,
+            snapshots=snapshots,
+            comparison_dir=comparison_dir,
+        )
+        try:
+            stage_result = _run_configured_openclaw_stage(
+                stage=stage,
+                job_paths=ensure_job_dirs(artifact_root, comparison_id),
+                settings=openclaw_settings,
+            )
+        except StageExecutionError:
+            result = generate_comparison_outputs(
+                snapshots=snapshots,
+                output_dir=comparison_dir,
+                start_date=comparison_inputs.start_date,
+                end_date=comparison_inputs.end_date,
+                env=dict(os.environ),
+                source_label="openclaw-hermes-local-fallback",
+            )
+            result["degraded"] = True
+        else:
+            result = _comparison_result_from_stage(stage=stage, comparison_dir=comparison_dir, stage_result=stage_result)
+    else:
+        result = generate_comparison_outputs(
+            snapshots=snapshots,
+            output_dir=comparison_dir,
+            start_date=comparison_inputs.start_date,
+            end_date=comparison_inputs.end_date,
+            env=dict(os.environ),
+        )
     artifact_paths.extend(result["artifact_paths"])
     degraded = bool(excluded) or bool(result.get("degraded"))
     report_json = dict(result["report_json"])

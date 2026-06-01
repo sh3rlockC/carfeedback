@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,8 +19,11 @@ from worker_app.collector_client import CollectorClient, should_auto_retry_failu
 from worker_app.collector_models import CollectorRunRequest, CollectorRunStatus
 from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
 from worker_app.job_store import ComparisonVehicleInputs, DatabaseJobStore
+from worker_app.stages import StageCommand
 from worker_app.task_store import CollectionRunRecord, TaskRecord, TaskStore, TaskVehicleRecord
 
+
+AI_OUTPUTS_CLI = Path(__file__).resolve().with_name("ai_outputs_cli.py")
 
 PLATFORM_SERIES_FIELDS = {
     "autohome": "autohome_series_id",
@@ -122,6 +126,90 @@ def _safe_filename_part(value: str) -> str:
 def _comparison_output_dir(comparison_id: str) -> Path:
     artifact_root = os.getenv("ARTIFACT_ROOT", "/srv/koubei/jobs")
     return Path(artifact_root).expanduser().resolve() / comparison_id / "comparisons"
+
+
+def _openclaw_stage_enabled(stage_name: str) -> bool:
+    if not _env_bool("OPENCLAW_ADAPTER_ENABLED") and not _env_bool("OPENCLAW_AUTOHOME_ENABLED"):
+        return False
+    stages = tuple(item.strip() for item in os.getenv("OPENCLAW_ADAPTER_STAGES", "").split(",") if item.strip())
+    return stage_name in stages
+
+
+def _write_comparison_snapshots_json(path: Path, snapshots: list[VehicleSnapshot]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "model_name": snapshot.model_name,
+                        "source_job_id": snapshot.source_job_id,
+                        "final_report_path": str(snapshot.final_report_path),
+                        "analysis_facts_path": str(snapshot.analysis_facts_path),
+                        "llm_metrics_path": str(snapshot.llm_metrics_path) if snapshot.llm_metrics_path else None,
+                    }
+                    for snapshot in snapshots
+                ]
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _build_comparison_stage_command(
+    *,
+    comparison_id: str,
+    snapshots: list[VehicleSnapshot],
+    start_date: str | None,
+    end_date: str | None,
+) -> StageCommand:
+    comparison_dir = _comparison_output_dir(comparison_id)
+    snapshots_json = comparison_dir / "comparison_snapshots.json"
+    _write_comparison_snapshots_json(snapshots_json, snapshots)
+    command = [
+        sys.executable,
+        str(AI_OUTPUTS_CLI),
+        "comparison",
+        "--snapshots-json",
+        str(snapshots_json),
+        "--output-dir",
+        str(comparison_dir),
+        "--source-label",
+        "openclaw-hermes",
+    ]
+    if start_date:
+        command.extend(["--start-date", start_date])
+    if end_date:
+        command.extend(["--end-date", end_date])
+    return StageCommand(
+        name="generating_comparison_outputs",
+        dependency_name="hermes-agent",
+        command=command,
+        cwd=AI_OUTPUTS_CLI.parent,
+        expected_artifacts=(
+            str(comparison_dir / "final_comparison.json"),
+            str(comparison_dir / "comparison_summary.xlsx"),
+            str(comparison_dir / "comparison_dimension_matrix.xlsx"),
+            str(comparison_dir / "llm_metrics.json"),
+        ),
+        optional_artifacts=(str(snapshots_json),),
+        parse_json_stdout=True,
+    )
+
+
+def _comparison_result_from_stage(comparison_id: str, stage_result: dict[str, Any]) -> dict[str, Any]:
+    comparison_dir = _comparison_output_dir(comparison_id)
+    try:
+        report_json = json.loads((comparison_dir / "final_comparison.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        report_json = {}
+    return {
+        "report_json": report_json if isinstance(report_json, dict) else {},
+        "artifact_paths": list(stage_result.get("artifact_paths") or []),
+        "degraded": stage_result.get("status") == "degraded",
+    }
 
 
 def _task_output_dir(task_id: str) -> Path:
@@ -1428,13 +1516,36 @@ class TaskActivities:
             }
 
         snapshots = [_snapshot_from_dict(dict(vehicle["snapshot"])) for vehicle in vehicles if isinstance(vehicle.get("snapshot"), dict)]
-        result = generate_comparison_outputs(
-            snapshots=snapshots,
-            output_dir=_comparison_output_dir(comparison_id),
-            start_date=task.get("start_date"),
-            end_date=task.get("end_date"),
-            env=dict(os.environ),
-        )
+        start_date = task.get("start_date")
+        end_date = task.get("end_date")
+        if _openclaw_stage_enabled("generating_comparison_outputs"):
+            stage = _build_comparison_stage_command(
+                comparison_id=comparison_id,
+                snapshots=snapshots,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            try:
+                stage_result = await self._run_stage_command_async(task_id=comparison_id, stage_command=stage)
+                result = _comparison_result_from_stage(comparison_id, stage_result)
+            except Exception:
+                result = generate_comparison_outputs(
+                    snapshots=snapshots,
+                    output_dir=_comparison_output_dir(comparison_id),
+                    start_date=start_date,
+                    end_date=end_date,
+                    env=dict(os.environ),
+                    source_label="openclaw-hermes-local-fallback",
+                )
+                result["degraded"] = True
+        else:
+            result = generate_comparison_outputs(
+                snapshots=snapshots,
+                output_dir=_comparison_output_dir(comparison_id),
+                start_date=start_date,
+                end_date=end_date,
+                env=dict(os.environ),
+            )
         artifact_paths = [*sum((list(vehicle.get("artifact_paths") or []) for vehicle in vehicles), []), *list(result["artifact_paths"])]
         report_json = dict(result["report_json"])
         if excluded:

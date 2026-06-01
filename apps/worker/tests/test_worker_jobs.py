@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import worker_jobs
 import worker_app.stages as stages_module
 from worker_app.artifacts import ensure_job_dirs
 from worker_app.corpus import upsert_platform_rows
-from worker_app.jobs import PipelineResult
+from worker_app.jobs import PipelineResult, StageResult
 from worker_app.stages import build_stage_commands, StageCommand
 
 
@@ -63,7 +64,7 @@ def test_run_job_uses_configured_stage_runner(monkeypatch, tmp_path: Path) -> No
     assert captured["builder_called"] is True
     assert captured["runner"] == "runner-sentinel"
     assert captured["stage_commands"] == [stage]
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
 
 
 def test_run_job_marks_failed_when_pipeline_raises(monkeypatch, tmp_path: Path) -> None:
@@ -178,7 +179,77 @@ def test_run_time_report_invokes_generator_and_persists_completion(monkeypatch, 
     assert kwargs["dcd_input"] == tmp_path / "job_worker" / "outputs" / "raw" / "DCD口碑_测试车.xlsx"
     assert captured["calls"][0] == ("running", "time_report_worker")
     assert captured["calls"][1][0:2] == ("completed", "time_report_worker")
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
+
+
+def test_run_time_report_routes_configured_openclaw_stage(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {"calls": []}
+
+    class FakeStore:
+        def __init__(self, _database_url: str):
+            pass
+
+        def fetch_time_report_inputs(self, report_id: str):
+            return SimpleNamespace(
+                report_id=report_id,
+                job_id="job_worker",
+                model_name="测试车",
+                start_date="2026-03-01",
+                end_date="2026-03-31",
+            )
+
+        def mark_time_report_running(self, report_id: str) -> None:
+            captured["calls"].append(("running", report_id))
+
+        def mark_time_report_completed(self, report_id: str, result: dict) -> None:
+            captured["completed_result"] = result
+            captured["calls"].append(("completed", report_id, result))
+
+        def mark_time_report_failed(self, report_id: str, error_code: str, error_message: str) -> None:
+            captured["calls"].append(("failed", report_id, error_code, error_message))
+
+    def fake_generate_time_report_outputs(**_kwargs):
+        raise AssertionError("configured OpenClaw time report stage should run before local generator")
+
+    def fake_build_stage_runner(**kwargs):
+        captured["runner_kwargs"] = kwargs
+
+        def runner(stage: StageCommand, _job_paths, _progress_sink):
+            captured["stage"] = stage
+            assert stage.name == "generating_time_report_outputs"
+            assert "--skill-first" in stage.command
+            assert stage.command[stage.command.index("--source-label") + 1] == "openclaw-hermes"
+            for artifact in stage.expected_artifacts:
+                path = Path(artifact)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if path.name == "final_report.json":
+                    path.write_text(json.dumps({"sample_count": 2, "source": "openclaw-hermes", "headline": "时间范围报告"}), encoding="utf-8")
+                elif path.suffix == ".json":
+                    path.write_text(json.dumps({"source": "openclaw-hermes"}), encoding="utf-8")
+                else:
+                    path.write_text("artifact", encoding="utf-8")
+            return StageResult(status="success", artifact_paths=list(stage.expected_artifacts), output_metadata={"openclaw_agent_id": "analysis-1"})
+
+        return runner
+
+    monkeypatch.setattr(worker_jobs, "DatabaseJobStore", FakeStore)
+    monkeypatch.setattr(worker_jobs, "generate_time_report_outputs", fake_generate_time_report_outputs)
+    monkeypatch.setattr(worker_jobs, "build_stage_runner", fake_build_stage_runner)
+    monkeypatch.setenv("OPENCLAW_ADAPTER_ENABLED", "true")
+    monkeypatch.setenv("OPENCLAW_ADAPTER_STAGES", "generating_time_report_outputs")
+    monkeypatch.setenv("OPENCLAW_ANALYSIS_AGENT_IDS", "analysis-1,analysis-2")
+
+    result = worker_jobs.run_time_report(
+        report_id="time_report_worker",
+        database_url="sqlite://",
+        artifact_root=str(tmp_path),
+    )
+
+    stage = captured["stage"]
+    assert result["status"] == "completed", result
+    assert result["source"] == "openclaw-hermes"
+    assert captured["completed_result"]["report_json"]["headline"] == "时间范围报告"
+    assert Path(stage.expected_artifacts[0]).name == "final_report.json"
 
 
 def test_run_time_report_marks_failed_without_raising(monkeypatch, tmp_path: Path) -> None:

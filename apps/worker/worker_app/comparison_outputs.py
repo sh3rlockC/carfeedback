@@ -368,9 +368,11 @@ def generate_comparison_outputs(
     start_date: str | None = None,
     end_date: str | None = None,
     env: dict[str, str] | None = None,
+    source_label: str | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     active_env = env or {}
+    source = source_label or "hermes_comparison"
     vehicles = [_vehicle_summary(snapshot, start_date=start_date, end_date=end_date) for snapshot in snapshots]
     dimensions = _dimension_matrix(snapshots, start_date=start_date, end_date=end_date)
     conclusion, conclusion_fallback_reason = _comparison_conclusion(
@@ -384,7 +386,7 @@ def generate_comparison_outputs(
     report_json = {
         "headline": "竞品口碑对比",
         "generated_at": generated_at,
-        "source": "hermes_comparison",
+        "source": source,
         "date_range": date_range,
         "vehicle_count": len(vehicles),
         "vehicles": vehicles,
@@ -406,7 +408,7 @@ def generate_comparison_outputs(
     metrics_json.write_text(
         json.dumps(
             {
-                "source": "hermes_comparison",
+                "source": source,
                 "generated_at": generated_at,
                 "provider": active_env.get("LLM_PROVIDER"),
                 "model_report": active_env.get("LLM_MODEL_REPORT"),

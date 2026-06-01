@@ -113,6 +113,24 @@ services:
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
       OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
       OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_ANALYSIS_AGENT_IDS: ${OPENCLAW_ANALYSIS_AGENT_IDS:-analysis-1,analysis-2}
+      OPENCLAW_ANALYSIS_AGENT_LEASE_DIR: ${OPENCLAW_ANALYSIS_AGENT_LEASE_DIR:-/tmp/openclaw-analysis-agent-leases}
+      OPENCLAW_KEYWORD_SUMMARY_SKILL: ${OPENCLAW_KEYWORD_SUMMARY_SKILL:-sh3rlockC/koubei-keyword-summary-skill}
+      OPENCLAW_WORDCLOUD_SKILL: ${OPENCLAW_WORDCLOUD_SKILL:-sh3rlockC/koubei-wordcloud}
+      OPENCLAW_ANALYSIS_PYTHON: ${OPENCLAW_ANALYSIS_PYTHON:-/opt/codexwork/koubei-host-venv/bin/python}
+      OPENCLAW_ANALYSIS_ENV_FILE: ${OPENCLAW_ANALYSIS_ENV_FILE:-/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env}
+      OPENCLAW_ANALYSIS_WORKER_ROOT_HOST: ${OPENCLAW_ANALYSIS_WORKER_ROOT_HOST:-/opt/codexwork/carFeedback/apps/worker}
+      OPENCLAW_WORKSPACE_HOST: ${OPENCLAW_WORKSPACE_HOST:-/opt/codexwork/openclaw-koubei-runtime/workspace}
+      OPENCLAW_KEYWORD_SUMMARY_SCRIPT: ${OPENCLAW_KEYWORD_SUMMARY_SCRIPT:-}
+      OPENCLAW_WORDCLOUD_SCRIPT: ${OPENCLAW_WORDCLOUD_SCRIPT:-}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${OPENCLAW_ARTIFACT_ROOT_HOST:-}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/device.json}
       OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
       OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
@@ -122,8 +140,11 @@ services:
     volumes:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ..:/workspace:ro
+      - ${OPENCLAW_STATE_HOST_PATH:-./ops/openclaw-state-placeholder}:/openclaw-state:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    secrets:
+      - openclaw_gateway_token
     depends_on:
       postgres:
         condition: service_healthy
@@ -156,6 +177,24 @@ services:
       DCD_COLLECTOR_SERVICE_URL: ${DCD_COLLECTOR_SERVICE_URL:-http://dongchedi-collector:8100}
       OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
       OPENCLAW_DCD_AGENT_IDS: ${OPENCLAW_DCD_AGENT_IDS:-dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4}
+      OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
+      OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
+      OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
+      OPENCLAW_ANALYSIS_AGENT_IDS: ${OPENCLAW_ANALYSIS_AGENT_IDS:-analysis-1,analysis-2}
+      OPENCLAW_ANALYSIS_AGENT_LEASE_DIR: ${OPENCLAW_ANALYSIS_AGENT_LEASE_DIR:-/tmp/openclaw-analysis-agent-leases}
+      OPENCLAW_KEYWORD_SUMMARY_SKILL: ${OPENCLAW_KEYWORD_SUMMARY_SKILL:-sh3rlockC/koubei-keyword-summary-skill}
+      OPENCLAW_WORDCLOUD_SKILL: ${OPENCLAW_WORDCLOUD_SKILL:-sh3rlockC/koubei-wordcloud}
+      OPENCLAW_ANALYSIS_PYTHON: ${OPENCLAW_ANALYSIS_PYTHON:-/opt/codexwork/koubei-host-venv/bin/python}
+      OPENCLAW_ANALYSIS_ENV_FILE: ${OPENCLAW_ANALYSIS_ENV_FILE:-/opt/codexwork/carFeedback/.runtime/secrets/openclaw-llm.env}
+      OPENCLAW_ANALYSIS_WORKER_ROOT_HOST: ${OPENCLAW_ANALYSIS_WORKER_ROOT_HOST:-/opt/codexwork/carFeedback/apps/worker}
+      OPENCLAW_WORKSPACE_HOST: ${OPENCLAW_WORKSPACE_HOST:-/opt/codexwork/openclaw-koubei-runtime/workspace}
+      OPENCLAW_KEYWORD_SUMMARY_SCRIPT: ${OPENCLAW_KEYWORD_SUMMARY_SCRIPT:-}
+      OPENCLAW_WORDCLOUD_SCRIPT: ${OPENCLAW_WORDCLOUD_SCRIPT:-}
+      OPENCLAW_ARTIFACT_ROOT_HOST: ${OPENCLAW_ARTIFACT_ROOT_HOST:-}
+      OPENCLAW_TASK_DB_PATH: ${OPENCLAW_TASK_DB_PATH:-/openclaw-state/tasks/runs.sqlite}
+      OPENCLAW_DEVICE_IDENTITY_FILE: ${OPENCLAW_DEVICE_IDENTITY_FILE:-/openclaw-state/identity/device.json}
       OPENCLAW_AGENT_LEASE_SECONDS: ${OPENCLAW_AGENT_LEASE_SECONDS:-2400}
       OPENCLAW_AGENT_POOL_WAIT_SECONDS: ${OPENCLAW_AGENT_POOL_WAIT_SECONDS:-1800}
       SINGLE_TASK_PRIORITY_WEIGHT: ${SINGLE_TASK_PRIORITY_WEIGHT:-0.1}
@@ -181,6 +220,11 @@ services:
       - ${JOB_ARTIFACTS_HOST_PATH:-./storage/jobs}:/srv/koubei/jobs
       - ${CORPUS_HOST_PATH:-./storage/corpus}:/srv/koubei/corpus
       - ..:/workspace:ro
+      - ${OPENCLAW_STATE_HOST_PATH:-./ops/openclaw-state-placeholder}:/openclaw-state:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    secrets:
+      - openclaw_gateway_token
     depends_on:
       postgres:
         condition: service_healthy
@@ -211,7 +255,7 @@ services:
       KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
       OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
-      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs}
       OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
       OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
       OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
@@ -256,7 +300,7 @@ services:
       KOUBEI_CORPUS_ROOT: ${CORPUS_ROOT:-/srv/koubei/corpus}
       WORKSPACE_ROOT: ${WORKSPACE_ROOT:-/workspace}
       OPENCLAW_ADAPTER_ENABLED: ${OPENCLAW_ADAPTER_ENABLED:-true}
-      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd}
+      OPENCLAW_ADAPTER_STAGES: ${OPENCLAW_ADAPTER_STAGES:-collecting_autohome,collecting_dcd,generating_hermes_outputs,generating_time_report_outputs,generating_comparison_outputs}
       OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-ws://host.docker.internal:18790}
       OPENCLAW_GATEWAY_TOKEN_FILE: ${OPENCLAW_GATEWAY_TOKEN_FILE:-/run/secrets/openclaw_gateway_token}
       OPENCLAW_AGENT_ID: ${OPENCLAW_AGENT_ID:-main}
