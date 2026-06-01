@@ -5,7 +5,7 @@ import json
 from app.config import Settings
 
 
-PROGRESS_FILE_STAGES = {"collecting_autohome", "collecting_dcd", "generating_hermes_outputs"}
+PROGRESS_FILE_STAGES = {"checking_incremental", "collecting_autohome", "collecting_dcd", "generating_hermes_outputs"}
 
 
 def clamp_percent(value: object) -> int | None:

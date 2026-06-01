@@ -1,120 +1,160 @@
 "use client";
 
+import { LayoutDashboard, Rows3, Shrink, SquarePen, StretchHorizontal } from "lucide-react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import { getFlowState, type FlowState } from "@/lib/flow-state";
-import { StepRail, stepForPath } from "./ui";
+import { apiRequest } from "@/lib/api";
+import type { AdminRuntimeInfoResponse } from "@/lib/api-types";
+import { ACCESS_CONTROL_ENABLED_DEFAULT } from "@/lib/access-config";
 
-const stageLabels: Record<string, string> = {
-  queued: "排队中",
-  collecting_autohome: "汽车之家采集",
-  collecting_dcd: "懂车帝采集",
-  postprocessing: "汇总整理",
-  summarizing: "摘要生成",
-  rendering_wordcloud: "词云生成",
-  generating_ai_report: "AI 一页纸",
-  building_qa_corpus: "问答索引",
-  collecting_models: "补齐车型",
-  comparing: "竞品对比",
-  completed: "已完成",
-  completed_degraded: "降级完成",
-  failed: "失败",
-  cancelled: "已取消",
-  expired: "已过期",
-};
-
-const emptyFlowState: FlowState = {
-  accessVersion: null,
-  mode: null,
-  vehicleQuery: null,
-  vehicleResolve: null,
-  selectedCandidates: null,
-  jobId: null,
-  jobProgress: null,
-  comparisonId: null,
-  comparisonOptions: null,
-  comparisonVehicles: null,
-  comparisonProgress: null,
-};
-
-function shortJobId(jobId: string | null) {
-  if (!jobId) {
-    return "未创建";
-  }
-  return jobId.length > 12 ? `${jobId.slice(0, 8)}...${jobId.slice(-4)}` : jobId;
-}
-
-function currentStageLabel(state: FlowState) {
-  if (state.mode === "comparison") {
-    const comparisonStage = state.comparisonProgress?.current_stage;
-    if (!comparisonStage) {
-      return state.comparisonId ? "等待对比进度" : "未启动";
-    }
-    return stageLabels[comparisonStage] ?? comparisonStage;
-  }
-  const stage = state.jobProgress?.current_stage;
-  if (!stage) {
-    return state.jobId ? "等待进度" : "未启动";
-  }
-  return stageLabels[stage] ?? stage;
-}
-
-function activeTaskId(state: FlowState) {
-  return state.mode === "comparison" ? state.comparisonId : state.jobId;
-}
+type DensityMode = "comfortable" | "compact";
 
 export function AppChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const activeStep = stepForPath(pathname);
-  const [flowState, setLocalFlowState] = useState<FlowState>(emptyFlowState);
+  const [runtime, setRuntime] = useState<AdminRuntimeInfoResponse | null>(null);
+  const [density, setDensity] = useState<DensityMode>("comfortable");
 
   useEffect(() => {
-    const refresh = () => setLocalFlowState(getFlowState());
-    refresh();
-    window.addEventListener("focus", refresh);
-    window.addEventListener("storage", refresh);
-    const intervalId = window.setInterval(refresh, 1600);
+    const storedDensity = window.localStorage.getItem("koubei-density");
+    if (storedDensity === "compact" || storedDensity === "comfortable") {
+      setDensity(storedDensity);
+    }
+  }, []);
 
+  useEffect(() => {
+    document.documentElement.dataset.density = density;
+    window.localStorage.setItem("koubei-density", density);
+  }, [density]);
+
+  useEffect(() => {
+    if (runtime) {
+      return;
+    }
+    let cancelled = false;
+    apiRequest<AdminRuntimeInfoResponse>("/api/admin/runtime")
+      .then((payload) => {
+        if (!cancelled) {
+          setRuntime(payload);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRuntime(null);
+        }
+      });
     return () => {
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("storage", refresh);
-      window.clearInterval(intervalId);
+      cancelled = true;
     };
-  }, [pathname]);
+  }, [runtime]);
+
+  const accessControlEnabled = runtime?.access_control_enabled ?? ACCESS_CONTROL_ENABLED_DEFAULT;
+
+  const navItems = [
+    {
+      href: "/tasks",
+      label: "工作台",
+      copy: "运行状态、负载和历史任务",
+      icon: LayoutDashboard,
+      active: pathname === "/tasks" || pathname === "/",
+    },
+    {
+      href: "/tasks/new",
+      label: "新建任务",
+      copy: "车型搜索、seriesId 确认和创建",
+      icon: SquarePen,
+      active: pathname?.startsWith("/tasks/new") ?? false,
+    },
+    {
+      href: "/tasks",
+      label: "任务中心",
+      copy: "筛选任务并进入结果交付页",
+      icon: Rows3,
+      active: pathname?.startsWith("/tasks/") ?? false,
+    },
+  ];
 
   return (
-    <div className="app-shell">
-      <header className="command-bar">
-        <div className="brand-lockup">
-          <p className="eyebrow">VEHICLE KOUBEI INTEL</p>
-          <h1>车型口碑情报舱</h1>
-          <p className="topbar-copy">双平台采集、AI 一页纸、词云和智能问答的内部演示工作台。</p>
+    <div className="app-shell app-shell-workbench">
+      <aside className="sidebar-nav" aria-label="主导航">
+        <div className="sidebar-brand">
+          <p className="eyebrow">VEHICLE FEEDBACK WORKBENCH</p>
+          <h1>车型口碑工作台</h1>
+          <p>增量采集、双平台口碑抓取、seriesId 确认和结果交付统一在一个入口完成。</p>
         </div>
 
-        <div className="mission-status" aria-label="当前任务状态">
-          <div>
-            <span>车型</span>
-            <strong>{flowState.mode === "comparison" ? `${flowState.comparisonVehicles?.length ?? 0} 车对比` : flowState.vehicleQuery || "待输入"}</strong>
-          </div>
-          <div>
-            <span>任务</span>
-            <strong>{shortJobId(activeTaskId(flowState))}</strong>
-          </div>
-          <div>
-            <span>阶段</span>
-            <strong>{currentStageLabel(flowState)}</strong>
-          </div>
-          <div>
-            <span>访问</span>
-            <strong>{flowState.accessVersion ? "已授权" : "待口令"}</strong>
+        <nav className="sidebar-links">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            return (
+              <Link key={`${item.href}-${item.label}`} className={`sidebar-link ${item.active ? "active" : ""}`.trim()} href={item.href}>
+                <Icon size={17} />
+                <span>
+                  <strong>{item.label}</strong>
+                  <small>{item.copy}</small>
+                </span>
+              </Link>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar-controls">
+          <p className="sidebar-label">界面密度</p>
+          <div className="density-toggle" role="group" aria-label="界面密度">
+            <button className={density === "comfortable" ? "active" : ""} type="button" onClick={() => setDensity("comfortable")}>
+              <StretchHorizontal size={15} />
+              标准
+            </button>
+            <button className={density === "compact" ? "active" : ""} type="button" onClick={() => setDensity("compact")}>
+              <Shrink size={15} />
+              紧凑
+            </button>
           </div>
         </div>
-      </header>
 
-      <StepRail activeStep={activeStep} />
+        <div className="sidebar-runtime">
+          <span>环境</span>
+          <strong>{runtime?.app_env ?? "待同步"}</strong>
+          <span>访问方式</span>
+          <strong>{accessControlEnabled ? (runtime ? "周口令" : "待同步") : "免口令"}</strong>
+        </div>
+      </aside>
 
-      <div className="content-stage">{children}</div>
+      <div className="workbench-main">
+        <header className="status-bar">
+          <div className="status-bar-copy">
+            <p className="eyebrow">WORKBENCH STATUS</p>
+            <h2>{pathname?.startsWith("/tasks/new") ? "创建任务" : "任务调度面板"}</h2>
+            <p>任务查询、创建和结果交付都在当前工作台完成。</p>
+          </div>
+
+          <div className="mission-status" aria-label="当前任务状态">
+            <div>
+              <span>当前入口</span>
+              <strong>{pathname?.startsWith("/tasks/new") ? "新建任务" : "任务中心"}</strong>
+            </div>
+            <div>
+              <span>任务类型</span>
+              <strong>单车型 / 多车型</strong>
+            </div>
+            <div>
+              <span>结果交付</span>
+              <strong>任务详情页</strong>
+            </div>
+            <div>
+              <span>访问状态</span>
+              <strong>{accessControlEnabled ? "周口令" : "开放访问"}</strong>
+            </div>
+            <div>
+              <span>运行队列</span>
+              <strong>{runtime?.worker_queue_name ?? "待同步"}</strong>
+            </div>
+          </div>
+        </header>
+
+        <div className="content-stage">{children}</div>
+      </div>
     </div>
   );
 }

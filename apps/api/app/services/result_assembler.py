@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.models import Job, JobAIReport, JobArtifact, JobQAChunk
-from app.services.ai_report import ensure_ai_report
-from app.services.qa_service import ensure_qa_chunks
+from app.services.report_validator import validate_report_payload
 from app.services.result_reader import read_summary_workbook, read_wordcloud_terms_workbook_or_empty
 
 
@@ -42,6 +42,20 @@ def _artifact_type_label(path: str) -> str:
     return "file"
 
 
+def _read_ai_report_artifact(path: str | None) -> dict | None:
+    if not path:
+        return None
+    artifact_path = Path(path)
+    if not artifact_path.exists():
+        return None
+    try:
+        payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    ok, _errors = validate_report_payload(payload) if isinstance(payload, dict) else (False, ["invalid report"])
+    return payload if ok and isinstance(payload, dict) else None
+
+
 def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | None:
     job = db.get(Job, job_id)
     if job is None:
@@ -70,35 +84,21 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
     qa_chunks_artifact = next((item for item in artifact_items if item["type"] == "qa_chunks_json"), None)
     summary_data = read_summary_workbook(summary_artifact["path"]) if summary_artifact else None
     ai_report = (
-        ensure_ai_report(
-            db,
-            job_id=job.job_id,
-            summary_path=summary_artifact["path"],
-            model_name=job.model_name,
-            report_path=final_report_artifact["path"] if final_report_artifact else None,
-        )
-        if summary_artifact
-        else (
-            db.query(JobAIReport)
-            .filter(JobAIReport.job_id == job_id)
-            .order_by(JobAIReport.id.desc())
-            .first()
-        )
+        db.query(JobAIReport)
+        .filter(JobAIReport.job_id == job_id)
+        .order_by(JobAIReport.id.desc())
+        .first()
     )
-    if summary_artifact:
-        ensure_qa_chunks(
-            db,
-            job_id=job.job_id,
-            summary_path=summary_artifact["path"],
-            model_name=job.model_name,
-            hermes_chunks_path=qa_chunks_artifact["path"] if qa_chunks_artifact else None,
-        )
+    ai_report_payload = ai_report.report_json if ai_report else _read_ai_report_artifact(final_report_artifact["path"] if final_report_artifact else None)
 
     qa_available = (
         db.query(JobQAChunk.id)
         .filter(JobQAChunk.job_id == job_id)
         .first()
         is not None
+    ) or (
+        qa_chunks_artifact is not None
+        and Path(qa_chunks_artifact["path"]).exists()
     )
 
     positive_wordcloud = next((item for item in artifact_items if item["type"] == "wordcloud_positive"), None)
@@ -117,6 +117,7 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
         "model_name": job.model_name,
         "retention_days": settings.job_artifact_retention_days,
         "sample_summary": summary_data["sample_counts"] if summary_data else {"autohome_count": 0, "dcd_count": 0},
+        "collection_summary": job.collection_summary or {},
         "template_report": {
             "title": summary_data["one_pager_lines"][0] if summary_data and summary_data["one_pager_lines"] else "",
             "highlights": summary_data["one_pager_lines"][1:8] if summary_data else [],
@@ -134,7 +135,7 @@ def assemble_job_result(db: Session, settings: Settings, job_id: str) -> dict | 
             "keyword_rankings": keyword_rankings,
         },
         "artifacts": artifact_items,
-        "ai_report": ai_report.report_json if ai_report else None,
-        "ai_available": ai_report is not None,
+        "ai_report": ai_report_payload,
+        "ai_available": ai_report_payload is not None,
         "qa_available": qa_available,
     }

@@ -1,0 +1,19 @@
+services:
+  web:
+    build:
+      args:
+        NEXT_PUBLIC_ACCESS_CONTROL_ENABLED: "false"
+    environment:
+      NEXT_PUBLIC_ACCESS_CONTROL_ENABLED: "false"
+
+  api:
+    environment:
+      ACCESS_CONTROL_ENABLED: "false"
+
+  worker:
+    environment:
+      TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: "true"
+
+  temporal-worker:
+    environment:
+      TEMPORAL_REAL_SINGLE_TASK_PIPELINE_ENABLED: "true"

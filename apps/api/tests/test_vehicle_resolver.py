@@ -3,8 +3,10 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import os
 from pathlib import Path
 
+import requests
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -12,6 +14,8 @@ from sqlalchemy.orm import sessionmaker
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 
 from app.config import Settings
 from app.main import create_app
@@ -95,6 +99,57 @@ def test_vehicle_resolve_rejects_malformed_service_output(tmp_path: Path, monkey
 
     assert response.status_code == 502
     assert response.json()["detail"] == "bad resolver payload"
+
+
+class FakeSeriesResponse:
+    def __init__(self, text: str, status_code: int = 200) -> None:
+        self.text = text
+        self.status_code = status_code
+
+
+def test_validate_series_marks_title_match_as_cacheable(tmp_path: Path, monkeypatch) -> None:
+    client = make_client(tmp_path)
+    client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+
+    def fake_get(url: str, **_kwargs):
+        assert url == "https://k.autohome.com.cn/8089/"
+        return FakeSeriesResponse("<html><title>风云 X3 PLUS 口碑</title></html>")
+
+    monkeypatch.setattr("app.services.series_validator.requests.get", fake_get)
+
+    response = client.post(
+        "/api/vehicles/validate-series",
+        json={"query": "风云X3 PLUS", "platform": "autohome", "series_id": "8089"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "matched"
+    assert payload["cacheable"] is True
+    assert payload["requires_confirmation"] is False
+    assert payload["url"] == "https://k.autohome.com.cn/8089/"
+
+
+def test_validate_series_allows_network_failures_but_does_not_cache(tmp_path: Path, monkeypatch) -> None:
+    client = make_client(tmp_path)
+    client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+
+    def fake_get(url: str, **_kwargs):
+        raise requests.Timeout("blocked")
+
+    monkeypatch.setattr("app.services.series_validator.requests.get", fake_get)
+
+    response = client.post(
+        "/api/vehicles/validate-series",
+        json={"query": "零跑D19", "platform": "dongchedi", "series_id": "12345"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "unverified"
+    assert payload["cacheable"] is False
+    assert payload["requires_confirmation"] is True
+    assert payload["can_create"] is True
 
 
 def test_job_creation_fails_without_confirmed_platform_candidates(tmp_path: Path) -> None:

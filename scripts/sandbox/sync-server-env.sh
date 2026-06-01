@@ -24,6 +24,7 @@ trap cleanup EXIT
   printf '%s\n' 'APP_ENV=sandbox'
   printf '%s\n' 'HTTP_PORT=18080'
   printf '%s\n' 'BASE_URL=http://localhost:18080'
+  printf '%s\n' 'NEXT_PUBLIC_BASE_PATH=/car-user-feedback'
   printf '%s\n' 'POSTGRES_DB=koubei'
   printf '%s\n' 'POSTGRES_USER=koubei'
   printf '%s\n' 'POSTGRES_PASSWORD=koubei'

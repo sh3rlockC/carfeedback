@@ -130,10 +130,41 @@ class NormalizedHermesResult:
     opportunity_rows: list[dict[str, str]]
 
 
+OUTER_KEYWORD_WRAPPERS = (
+    ("「", "」"),
+    ("『", "』"),
+    ("“", "”"),
+    ("‘", "’"),
+    ("《", "》"),
+    ("〈", "〉"),
+    ("【", "】"),
+    ("（", "）"),
+    ("(", ")"),
+    ("[", "]"),
+    ('"', '"'),
+    ("'", "'"),
+)
+
+
 def _clean_text(value: object, *, limit: int = 900) -> str:
     text = "" if value is None else str(value)
     text = re.sub(r"\s+", " ", text).strip()
     return text[:limit]
+
+
+def _clean_keyword_term(value: object, *, limit: int = 80) -> str:
+    text = _clean_text(value, limit=limit)
+    text = re.sub(r"[\u200b-\u200f\ufeff]", "", text).strip()
+    while len(text) >= 2:
+        for left, right in OUTER_KEYWORD_WRAPPERS:
+            if text.startswith(left) and text.endswith(right):
+                inner = text[len(left) : len(text) - len(right)].strip()
+                if inner:
+                    text = inner
+                    break
+        else:
+            break
+    return text
 
 
 def _replace_legacy_labels(value: Any) -> Any:
@@ -1312,7 +1343,7 @@ def _rankings_from_themes(batch_payloads: list[dict[str, Any]]) -> dict[str, lis
             direction = theme.get("direction")
             if direction not in counters:
                 continue
-            term = _clean_text(theme.get("term"), limit=80)
+            term = _clean_keyword_term(theme.get("term"), limit=80)
             if not term:
                 continue
             count = int(theme.get("count") or 1)
@@ -1329,15 +1360,18 @@ def _normalize_rankings(payload: dict[str, Any], batch_payloads: list[dict[str, 
     normalized: dict[str, list[dict[str, Any]]] = {}
     for direction in ("positive", "negative"):
         values = _as_list(rankings.get(direction))
-        items: list[dict[str, Any]] = []
+        grouped: dict[str, dict[str, Any]] = {}
         for item in values:
             if not isinstance(item, dict):
                 continue
-            term = _clean_text(item.get("term"), limit=80)
+            term = _clean_keyword_term(item.get("term"), limit=80)
             if not term:
                 continue
-            items.append({"term": term, "count": int(item.get("count") or item.get("weight") or 1)})
-        normalized[direction] = items[:10] or derived[direction]
+            current = grouped.setdefault(term, {"term": term, "count": 0, "_index": len(grouped)})
+            current["count"] += max(int(item.get("count") or item.get("weight") or 1), 1)
+        items = sorted(grouped.values(), key=lambda item: (-int(item["count"]), int(item["_index"]), str(item["term"])))
+        ranked_items = [{"term": item["term"], "count": item["count"]} for item in items[:10]]
+        normalized[direction] = ranked_items or derived[direction]
     return normalized
 
 

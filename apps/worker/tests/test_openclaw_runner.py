@@ -257,6 +257,84 @@ def test_run_collectors_route_to_stage_specific_openclaw_agents(tmp_path: Path) 
     assert dcd_result.output_metadata["openclaw_agent_id"] == "dongchedi"
 
 
+def test_run_collector_via_openclaw_prefers_assigned_agent_id(tmp_path: Path) -> None:
+    container_root = tmp_path / "jobs"
+    job_paths = ensure_job_dirs(container_root, "job_openclaw")
+    stage = make_autohome_stage(tmp_path)
+    progress_sink = ProgressSink(
+        job_id="job_openclaw",
+        progress_path=job_paths.progress / "progress.json",
+        stages=[stage.name],
+    )
+    captured_agent_ids: list[str | None] = []
+
+    class CapturingGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            captured_agent_ids.append(agent_id)
+            for artifact in stage.expected_artifacts:
+                Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                Path(artifact).write_text("artifact", encoding="utf-8")
+            return {"status": "completed"}
+
+    result = run_collector_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(
+            enabled=True,
+            agent_id="main",
+            autohome_agent_id="autohome",
+            stages=("collecting_autohome",),
+            artifact_root_container=str(container_root),
+        ),
+        gateway_client=CapturingGatewayClient(),
+        assigned_agent_id="autohome-4",
+    )
+
+    assert captured_agent_ids == ["autohome-4"]
+    assert result.output_metadata["openclaw_agent_id"] == "autohome-4"
+
+
+def test_build_stage_runner_passes_assigned_agent_id_to_collector_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    captured: dict[str, str | None] = {}
+
+    def fake_run_collector_via_openclaw(
+        command,
+        job_paths,
+        progress_sink,
+        *,
+        settings,
+        assigned_agent_id=None,
+    ):
+        captured["agent_id"] = assigned_agent_id
+        return StageResult(status="success", artifact_paths=[])
+
+    monkeypatch.setattr(openclaw_runner, "run_collector_via_openclaw", fake_run_collector_via_openclaw)
+
+    runner = build_stage_runner(
+        settings=OpenClawSettings(enabled=True, stages=("collecting_autohome",)),
+        assigned_agent_id="autohome-2",
+    )
+    result = runner(stage, job_paths, progress_sink)
+
+    assert result.status == "success"
+    assert captured["agent_id"] == "autohome-2"
+
+
 def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tmp_path: Path) -> None:
     container_root = tmp_path / "jobs"
     host_root = tmp_path / "host-jobs"
@@ -314,6 +392,10 @@ def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tm
     assert "启动后必须立即创建 progress_file" in message
     assert "每完成一个页面或阶段都必须刷新 progress_file" in message
     assert "产物都存在后才报告完成" in message
+    assert "collection_mode=full_refresh" in message
+    assert "page_mode=auto_detect_all_pages" in message
+    assert "--auto-detect-pages" in message
+    assert "禁止添加 --end-page 10" in message
     assert "series_id=8089" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "ZJ测试车原始口碑.xlsx") in message
     assert str(host_root / "job_openclaw" / "progress" / "collecting_autohome.progress.json") in message
@@ -371,11 +453,66 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     assert "启动后必须立即创建 progress_file" in message
     assert "每完成一个页面或阶段都必须刷新 progress_file" in message
     assert "产物都存在后才报告完成" in message
+    assert "collection_mode=full_refresh" in message
+    assert "page_mode=auto_detect_all_pages" in message
+    assert "禁止添加 --end-page 10" in message
+    assert "end_page_auto_detected=true" in message
     assert "series_id=25545" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.xlsx") in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.failed-pages.json") in message
     assert set(result.artifact_paths) == set(stage.expected_artifacts + stage.optional_artifacts)
     assert result.output_metadata["openclaw_skill"] == "sh3rlockC/dcd-koubei-collector"
+
+
+def test_run_dcd_via_openclaw_rejects_full_refresh_with_manual_ten_page_cap(tmp_path: Path) -> None:
+    stage = make_dcd_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    validation_path = Path(stage.expected_artifacts[1])
+
+    class CappedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            for artifact in stage.expected_artifacts:
+                Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                Path(artifact).write_text("artifact", encoding="utf-8")
+            validation_path.write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "input": {
+                            "start_page": 1,
+                            "end_page": 10,
+                            "end_page_auto_detected": False,
+                            "target_pages": list(range(1, 11)),
+                        },
+                        "page_meta": [{"page": 10, "has_more": True, "total_count": 939}],
+                        "total_rows": 150,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            Path(stage.optional_artifacts[0]).write_text("[]", encoding="utf-8")
+            return {"status": "completed"}
+
+    with pytest.raises(StageExecutionError) as exc_info:
+        run_collector_via_openclaw(
+            stage,
+            job_paths,
+            progress_sink,
+            settings=OpenClawSettings(enabled=True),
+            gateway_client=CappedGatewayClient(),
+        )
+
+    assert exc_info.value.error_code == "OPENCLAW_PARTIAL_COLLECTION"
+    assert "end_page_auto_detected=false" in exc_info.value.message
 
 
 def test_run_autohome_via_openclaw_uses_job_scoped_session_id(tmp_path: Path) -> None:
@@ -441,6 +578,41 @@ def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_acceptance(tm
         progress_sink,
         settings=OpenClawSettings(enabled=True, timeout_seconds=2, artifact_poll_interval_seconds=0.01),
         gateway_client=AsyncGatewayClient(),
+    )
+
+    assert set(result.artifact_paths) == set(stage.expected_artifacts)
+
+
+def test_run_autohome_via_openclaw_waits_for_artifacts_after_agent_completion(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+
+    class CompletedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            def write_artifacts() -> None:
+                time.sleep(0.05)
+                for artifact in stage.expected_artifacts:
+                    Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                    Path(artifact).write_text("artifact", encoding="utf-8")
+
+            threading.Thread(target=write_artifacts, daemon=True).start()
+            return {"status": "completed", "taskId": "task-1"}
+
+    result = run_autohome_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(enabled=True, timeout_seconds=2, artifact_poll_interval_seconds=0.01),
+        gateway_client=CompletedGatewayClient(),
     )
 
     assert set(result.artifact_paths) == set(stage.expected_artifacts)
@@ -565,6 +737,75 @@ def test_run_autohome_via_openclaw_fails_when_related_child_task_fails(tmp_path:
 
     assert exc_info.value.error_code == "OPENCLAW_TASK_FAILED"
     assert "child command failed" in exc_info.value.message
+
+
+def test_run_autohome_via_openclaw_ignores_stale_related_child_failure(tmp_path: Path) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    task_db = tmp_path / "runs.sqlite"
+    with sqlite3.connect(task_db) as db:
+        db.execute(
+            """
+            CREATE TABLE task_runs (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                task TEXT,
+                created_at INTEGER,
+                ended_at INTEGER,
+                last_event_at INTEGER
+            )
+            """
+        )
+        db.execute(
+            "INSERT INTO task_runs (task_id, run_id, status, error, task, created_at, ended_at, last_event_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "old-child-task",
+                "old-child-run",
+                "failed",
+                "old rate limit",
+                f"执行命令：python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py --output {stage.expected_artifacts[0]}",
+                500,
+                600,
+                600,
+            ),
+        )
+
+    class AcceptedGatewayClient:
+        def call_agent(
+            self,
+            message: str,
+            *,
+            settings: OpenClawSettings,
+            session_id: str | None = None,
+            stage_name: str = "openclaw",
+            agent_id: str | None = None,
+        ) -> dict:
+            def write_artifacts() -> None:
+                time.sleep(0.05)
+                for artifact in stage.expected_artifacts:
+                    Path(artifact).parent.mkdir(parents=True, exist_ok=True)
+                    Path(artifact).write_text("ok", encoding="utf-8")
+
+            threading.Thread(target=write_artifacts, daemon=True).start()
+            return {"status": "accepted", "taskId": "new-parent-task", "runId": "new-parent-run", "acceptedAt": 1000}
+
+    result = run_autohome_via_openclaw(
+        stage,
+        job_paths,
+        progress_sink,
+        settings=OpenClawSettings(
+            enabled=True,
+            timeout_seconds=2,
+            artifact_poll_interval_seconds=0.01,
+            task_db_path=str(task_db),
+        ),
+        gateway_client=AcceptedGatewayClient(),
+    )
+
+    assert result.status == "success"
 
 
 def test_run_autohome_via_openclaw_fails_when_related_child_succeeds_without_artifacts(tmp_path: Path) -> None:

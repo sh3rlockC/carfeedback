@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 from app.config import Settings
 from app.db import get_session_local
 from app.main import create_app
-from app.models import Job, JobArtifact
+from app.models import Job, JobAIReport, JobArtifact, JobQAChunk
 from app.services.job_queue import get_job_queue
 from app.services.passphrase import hash_passphrase
 
@@ -153,10 +153,37 @@ def test_result_endpoint_assembles_summary_and_wordclouds(tmp_path: Path) -> Non
     assert rankings["negative"][0]["count"] == 59
     assert rankings["combined"][0] == {"term": "外观设计", "count": 186}
     assert payload["artifacts"][0]["type"] == "summary_excel"
-    assert payload["ai_available"] is True
-    assert payload["ai_report"]["headline"]
-    assert payload["qa_available"] is True
+    assert payload["ai_available"] is False
+    assert payload["ai_report"] is None
+    assert payload["qa_available"] is False
     assert payload["retention_days"] == 3
+
+
+def test_result_endpoint_does_not_generate_ai_or_qa_on_read(tmp_path: Path, monkeypatch) -> None:
+    client = make_client(tmp_path, raise_server_exceptions=False)
+    seed_result_job("job_read_only")
+
+    def fail_generate(*_args, **_kwargs):
+        raise AssertionError("result reads must not generate AI reports")
+
+    monkeypatch.setattr("app.services.ai_report.generate_report_payload", fail_generate)
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_read_only/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ai_available"] is False
+    assert payload["qa_available"] is False
+
+    session = get_session_local()()
+    try:
+        assert session.query(JobAIReport).filter(JobAIReport.job_id == "job_read_only").count() == 0
+        assert session.query(JobQAChunk).filter(JobQAChunk.job_id == "job_read_only").count() == 0
+    finally:
+        session.close()
 
 
 def test_result_endpoint_returns_expired_job_without_artifacts(tmp_path: Path) -> None:
@@ -176,6 +203,53 @@ def test_result_endpoint_returns_expired_job_without_artifacts(tmp_path: Path) -
     assert payload["ai_available"] is False
     assert payload["qa_available"] is False
     assert payload["retention_days"] == 3
+
+
+def test_result_endpoint_includes_collection_summary(tmp_path: Path) -> None:
+    client = make_client(tmp_path)
+    session = get_session_local()()
+    try:
+        session.add(
+            Job(
+                job_id="job_collection_summary",
+                query="风云X3 PLUS",
+                model_name="风云X3 PLUS",
+                status="completed",
+                current_stage="completed",
+                degraded=False,
+                passphrase_version="2026-W17",
+                collection_summary={
+                    "autohome": {
+                        "existing_count": 10,
+                        "new_count": 2,
+                        "total_count": 12,
+                        "pages_scanned": 3,
+                        "mode": "incremental",
+                    },
+                    "dongchedi": {
+                        "existing_count": 5,
+                        "new_count": 0,
+                        "total_count": 5,
+                        "pages_scanned": 2,
+                        "mode": "incremental",
+                    },
+                },
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    verify = client.post("/api/access/verify", json={"passphrase": "weekly-secret"})
+    assert verify.status_code == 200
+
+    response = client.get("/api/jobs/job_collection_summary/result")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["collection_summary"]["autohome"]["existing_count"] == 10
+    assert payload["collection_summary"]["autohome"]["new_count"] == 2
+    assert payload["collection_summary"]["dongchedi"]["total_count"] == 5
 
 
 def test_result_endpoint_ignores_unreadable_wordcloud_terms(tmp_path: Path) -> None:

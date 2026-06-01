@@ -3,11 +3,13 @@ from __future__ import annotations
 from io import BytesIO
 import logging
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 import zipfile
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
+from pydantic import ValidationError
 from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy.orm import Session
@@ -51,10 +53,23 @@ from app.services.stage_progress import read_stage_progress
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
 QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
+LEGACY_API_DISABLED_MESSAGE = "legacy job API disabled; use /api/tasks"
 
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _reject_legacy_creation(settings: Settings) -> None:
+    if settings.app_env != "test":
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_API_DISABLED_MESSAGE)
+
+
+def _legacy_payload(payload_data: Any) -> CreateJobRequest:
+    try:
+        return CreateJobRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=exc.errors()) from exc
 
 
 def _is_result_bundle_artifact(path: str) -> bool:
@@ -90,12 +105,14 @@ def _safe_zip_name(path: Path, seen: set[str]) -> str:
 
 @router.post("", response_model=CreateJobResponse)
 def create_job(
-    payload: CreateJobRequest,
     request: Request,
+    payload_data: Any = Body(default=None),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     queue: Queue = Depends(get_job_queue),
 ) -> CreateJobResponse:
+    _reject_legacy_creation(settings)
+    payload = _legacy_payload(payload_data)
     _ensure_session(request, settings)
 
     model_name = payload.model_name or payload.query
@@ -109,6 +126,8 @@ def create_job(
         model_name=model_name,
         status="queued",
         current_stage="queued",
+        collection_mode=payload.collection_mode,
+        collection_summary={},
         passphrase_version=settings.pass_phrase_version,
     )
     db.add(job)
@@ -237,6 +256,7 @@ def get_job_progress(
     status_to_percent = {
         "queued": 5,
         "candidate_pending": 10,
+        "checking_incremental": 12,
         "collecting_autohome": 25,
         "collecting_dcd": 40,
         "postprocessing": 55,
@@ -254,6 +274,8 @@ def get_job_progress(
     overall_percent = status_to_percent.get(job.current_stage, status_to_percent.get(job.status, 0))
     message = {
         "queued": "任务已创建，等待执行",
+        "checking_incremental": "正在检查历史语料并准备增量采集",
+        "generating_hermes_outputs": "正在生成 Hermes 报告、词云和问答索引",
         "completed": "任务已完成",
         "completed_degraded": "任务已完成，部分结果降级",
         "failed": "任务执行失败",

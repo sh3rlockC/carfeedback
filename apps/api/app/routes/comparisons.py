@@ -4,10 +4,12 @@ from io import BytesIO
 import logging
 import zipfile
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import FileResponse, Response
+from pydantic import ValidationError
 from redis.exceptions import RedisError
 from rq import Queue
 from sqlalchemy.orm import Session
@@ -41,10 +43,30 @@ from app.services.vehicle_resolver import VehicleResolver
 router = APIRouter(prefix="/api/comparisons", tags=["comparisons"])
 logger = logging.getLogger(__name__)
 QUEUE_UNAVAILABLE_MESSAGE = "任务队列暂不可用，请确认 Redis 和 worker 已启动。"
+LEGACY_API_DISABLED_MESSAGE = "legacy comparison API disabled; use /api/tasks"
 
 
 def _ensure_session(request: Request, settings: Settings) -> None:
     require_passphrase_session(request, settings)
+
+
+def _reject_legacy_creation(settings: Settings) -> None:
+    if settings.app_env != "test":
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail=LEGACY_API_DISABLED_MESSAGE)
+
+
+def _legacy_options_payload(payload_data: Any) -> ComparisonOptionsRequest:
+    try:
+        return ComparisonOptionsRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=exc.errors()) from exc
+
+
+def _legacy_comparison_payload(payload_data: Any) -> ComparisonCreateRequest:
+    try:
+        return ComparisonCreateRequest.model_validate(payload_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=exc.errors()) from exc
 
 
 def _resolve_vehicle(db: Session, settings: Settings, query: str) -> dict:
@@ -101,11 +123,13 @@ def _comparison_arcname(path: Path, comparison_root: Path, seen: set[str]) -> st
 
 @router.post("/options", response_model=ComparisonOptionsResponse)
 def comparison_options(
-    payload: ComparisonOptionsRequest,
     request: Request,
+    payload_data: Any = Body(default=None),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ) -> ComparisonOptionsResponse:
+    _reject_legacy_creation(settings)
+    payload = _legacy_options_payload(payload_data)
     _ensure_session(request, settings)
     vehicles = []
     for vehicle in payload.vehicles:
@@ -122,12 +146,14 @@ def comparison_options(
 
 @router.post("", response_model=ComparisonCreateResponse)
 def create_comparison(
-    payload: ComparisonCreateRequest,
     request: Request,
+    payload_data: Any = Body(default=None),
     db: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
     queue: Queue = Depends(get_job_queue),
 ) -> ComparisonCreateResponse:
+    _reject_legacy_creation(settings)
+    payload = _legacy_comparison_payload(payload_data)
     _ensure_session(request, settings)
 
     normalized_keys = [query_key(vehicle.query) for vehicle in payload.vehicles]

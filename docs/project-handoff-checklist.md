@@ -1,8 +1,16 @@
 # 车型口碑情报舱项目交接清单
 
-更新时间：2026-04-28
+> 2026-06-01 V3 重建状态已更新到 `docs/session-2026-06-01-carfeedback-v3-rebuild.md`。
+>
+> 当前生产替代版在服务器 `/opt/codexwork/carFeedback` 以 Compose project `carfeedback-v3` 运行，入口端口为 `80`，base path 为 `/car-user-feedback`。旧 80 入口 `koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
+>
+> V3 已接入 8 Agent 池：`autohome-1..4` 和 `dongchedi-1..4`；`main` 仅作 fallback。小米 SU7 `/api/tasks` full refresh 主链路已验证完成：汽车之家 40 页 / 400 条，懂车帝 63 页 / 938 条，任务 `task_20260601_021155_8a8fd6` 状态 `completed` 且非降级。
+>
+> 命名清理已完成：本地主目录为 `/Users/xyc/Documents/codexwork/carfeedback`，远端仓库为 `https://github.com/sh3rlockC/carfeedback.git`。服务器旧带版本后缀目录已重命名为 `/opt/codexwork/carfeedback-legacy-20260601`，不再作为执行目录。
 
-本文用于新模型、新对话或新工程师快速接手 `vehicle-koubei-web-demo`，重点覆盖当前状态、架构、排查入口、已知问题和后续优化方向。本文不保存任何 API Key、数据库密码、OpenClaw token 或访问口令明文。
+更新时间：2026-06-01
+
+本文用于新模型、新对话或新工程师快速接手 `carfeedback`，重点覆盖当前状态、架构、排查入口、已知问题和后续优化方向。本文不保存任何 API Key、数据库密码、OpenClaw token 或访问口令明文。
 
 ## 1. 项目定位
 
@@ -24,22 +32,34 @@
 当前产品形态：
 
 - Web 版优先，暂未做微信小程序。
-- 访问方式为链接加周口令，不做账号登录。
+- 当前访问方式为开放链接，不做账号登录；周口令门禁暂不恢复。
 - 本地和腾讯云单机 Docker Compose 均已跑通基础服务。
-- 云端入口由 Nginx 容器对外监听 `80`。
+- 当前生产替代版在云端通过 Docker Compose project `carfeedback-v3` 监听 `80`；旧 `koubei-20260527` 的 nginx 入口已停止。
 
 ## 2. 代码和部署位置
 
 本地项目：
 
 ```text
-/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
+/Users/xyc/Documents/codexwork/carfeedback
+```
+
+当前开发 worktree：
+
+```text
+/Users/xyc/Documents/codexwork/carfeedback-worktrees/carfeedback-v3-rebuild
 ```
 
 云端项目：
 
 ```text
-/opt/codexwork/vehicle-koubei-web-demo
+/opt/codexwork/carFeedback
+```
+
+旧目录备份：
+
+```text
+/opt/codexwork/carfeedback-legacy-20260601
 ```
 
 云端 SSH：
@@ -51,10 +71,10 @@ ssh -i ~/.ssh/vehicle_koubei_tencent ubuntu@129.211.223.252
 远端仓库：
 
 ```text
-https://github.com/sh3rlockC/vehicle-koubei-web-demo.git
+https://github.com/sh3rlockC/carfeedback.git
 ```
 
-最近关键提交：
+历史关键提交：
 
 ```text
 79efeff Add OpenClaw device auth for worker gateway calls
@@ -72,7 +92,7 @@ Docker Compose 会把项目父目录挂载到容器 `/workspace`，因此依赖�
 
 ```text
 /opt/codexwork/
-  vehicle-koubei-web-demo/
+  carFeedback/
   data/repos/
     vehicle-id-finder/
     auto-koubei-collector/
@@ -110,8 +130,8 @@ OpenClaw 服务：
 - worker 容器访问：`ws://host.docker.internal:18790`
 - agent：
   - `main`：默认兜底。
-  - `autohome`：只跑汽车之家采集。
-  - `dongchedi`：只跑懂车帝采集。
+  - `autohome-1`、`autohome-2`、`autohome-3`、`autohome-4`：汽车之家采集池。
+  - `dongchedi-1`、`dongchedi-2`、`dongchedi-3`、`dongchedi-4`：懂车帝采集池。
 
 运行原则：
 
@@ -122,15 +142,17 @@ OpenClaw 服务：
 
 ## 5. 当前云端状态
 
-2026-04-28 核对状态：
+2026-06-01 核对状态：
 
-- Docker 服务：`api/web/worker/postgres/redis/nginx` 均 healthy。
+- Docker 服务：`carfeedback-v3-api/web/worker/temporal-worker/collector/postgres/redis` 均 healthy。
+- 当前入口：`http://127.0.0.1/healthz` 返回 `ok`，`http://129.211.223.252/car-user-feedback/tasks` 和 `/car-user-feedback/api/tasks?limit=1` 返回 200。
+- 旧 80 入口：`koubei-20260527-nginx-1` 已停止；旧项目其他容器仍保留，未删除。
 - OpenClaw systemd：active。
-- OpenClaw workspace 的 `BOOTSTRAP.md` 已禁用为 `BOOTSTRAP.disabled.*.md`，避免采集 agent 被首次启动流程拦截。
-- `dongchedi` 被 bootstrap 污染的旧 session 已备份清空。
-- 已做 `dongchedi` smoke test：可直接回复 `DCD_OK`，不再被 bootstrap 拦截。
+- OpenClaw gateway：宿主机端口 `18790`。
+- OpenClaw agent 池：`autohome-1..4`、`dongchedi-1..4` 已接入；`main` 仅 fallback。
+- 小米 SU7 主链路 full refresh 已验证：汽车之家 40 页 / 400 条，懂车帝 63 页 / 938 条，任务完成且非降级。
 
-注意：禁用 bootstrap 后还没有重新跑完整车型任务验证 DCD 真实产物。
+注意：服务器 `.runtime` 保存 runtime secrets，部署同步必须排除 `.runtime`，不要从本地覆盖。
 
 ## 6. 环境变量重点
 
@@ -138,16 +160,15 @@ OpenClaw 服务：
 
 ```env
 APP_ENV=production
-BASE_URL=http://服务器IP或域名
+BASE_URL=http://服务器IP或域名/car-user-feedback
 HTTP_PORT=80
 BACKEND_ORIGIN=http://api:8000
 
 DATABASE_URL=postgresql+psycopg://...
 REDIS_URL=redis://redis:6379/0
 
-PASS_PHRASE_HASH=sha256:...
-PASS_PHRASE_VERSION=2026-Wxx
-SESSION_SECRET=...
+ACCESS_CONTROL_ENABLED=false
+NEXT_PUBLIC_ACCESS_CONTROL_ENABLED=false
 
 TAVILY_API_KEY=...
 
@@ -160,9 +181,9 @@ OPENCLAW_ADAPTER_ENABLED=true
 OPENCLAW_ADAPTER_STAGES=collecting_autohome,collecting_dcd
 OPENCLAW_GATEWAY_URL=ws://host.docker.internal:18790
 OPENCLAW_GATEWAY_TOKEN_FILE=/run/secrets/openclaw_gateway_token
-OPENCLAW_AUTOHOME_AGENT_ID=autohome
-OPENCLAW_DCD_AGENT_ID=dongchedi
-OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/vehicle-koubei-web-demo/storage/jobs
+OPENCLAW_AUTOHOME_AGENT_IDS=autohome-1,autohome-2,autohome-3,autohome-4
+OPENCLAW_DCD_AGENT_IDS=dongchedi-1,dongchedi-2,dongchedi-3,dongchedi-4
+OPENCLAW_ARTIFACT_ROOT_HOST=/opt/codexwork/carFeedback/storage/jobs
 OPENCLAW_TASK_DB_PATH=/openclaw-state/tasks/runs.sqlite
 OPENCLAW_DEVICE_IDENTITY_FILE=/openclaw-state/identity/device.json
 ```
@@ -173,7 +194,7 @@ OpenClaw agent 模型和 API Key 不在 Web Demo `.env` 中管理，位于 OpenC
 
 产品：
 
-- 周口令访问入口。
+- 开放访问入口。
 - 车型输入。
 - 汽车之家/懂车帝候选确认。
 - 候选失败时支持手动填写车系 ID。
@@ -201,7 +222,9 @@ OpenClaw agent 模型和 API Key 不在 Web Demo `.env` 中管理，位于 OpenC
 - 采集产物 contract 校验。
 - 阶段失败降级策略。
 
-## 8. 当前已知问题
+## 8. 历史问题和当前风险
+
+以下 `8.1` 到 `8.3` 是 2026-04-28 的历史问题记录，用于理解旧链路故障。2026-06-01 V3 重建后，DCD bootstrap 拦截和单平台降级并不是当前小米 SU7 full refresh 主链路的阻塞项；当前接手应以 `docs/session-2026-06-01-carfeedback-v3-rebuild.md` 的测试结果为准。
 
 ### 8.1 最新 QQ3 任务 DCD 无产物
 
@@ -291,24 +314,25 @@ ERROR: 未能从摘要 Excel 中识别到可用词项
 1. 先确认服务状态：
 
 ```bash
-cd /opt/codexwork/vehicle-koubei-web-demo
-sudo docker compose ps
+cd /opt/codexwork/carFeedback
+sudo docker compose -p carfeedback-v3 ps
 systemctl is-active openclaw-koubei.service
 curl -fsS http://127.0.0.1/healthz
+curl -fsS http://129.211.223.252/car-user-feedback/tasks
 curl -fsS http://127.0.0.1:18790/healthz
 ```
 
 2. 查最新 job：
 
 ```bash
-sudo docker compose exec -T postgres psql -U koubei -d koubei -c \
+sudo docker compose -p carfeedback-v3 exec -T postgres psql -U koubei -d koubei -c \
 "SELECT job_id, query, model_name, status, current_stage, degraded, created_at, started_at, finished_at FROM jobs ORDER BY created_at DESC LIMIT 10;"
 ```
 
 3. 查阶段状态：
 
 ```bash
-sudo docker compose exec -T postgres psql -U koubei -d koubei -c \
+sudo docker compose -p carfeedback-v3 exec -T postgres psql -U koubei -d koubei -c \
 "SELECT stage_name,status,error_code,left(coalesce(error_message,''),500),started_at,ended_at FROM job_stage_runs WHERE job_id='JOB_ID' ORDER BY started_at;"
 ```
 
@@ -321,8 +345,8 @@ find storage/jobs/JOB_ID -maxdepth 6 -type f -printf "%T@ %s %p\n" | sort -nr | 
 5. 查 worker/API 日志：
 
 ```bash
-sudo docker compose logs --tail=200 worker
-sudo docker compose logs --tail=200 api
+sudo docker compose -p carfeedback-v3 logs --tail=200 worker
+sudo docker compose -p carfeedback-v3 logs --tail=200 api
 ```
 
 6. 查 OpenClaw task：
@@ -334,8 +358,8 @@ openclaw --profile koubei tasks list --json
 7. 查对应 agent session：
 
 ```bash
-find /home/ubuntu/.openclaw-koubei/agents/dongchedi/sessions -maxdepth 1 -type f -printf "%T@ %s %p\n" | sort -nr | head
-find /home/ubuntu/.openclaw-koubei/agents/autohome/sessions -maxdepth 1 -type f -printf "%T@ %s %p\n" | sort -nr | head
+find /home/ubuntu/.openclaw-koubei/agents/dongchedi-1/sessions -maxdepth 1 -type f -printf "%T@ %s %p\n" | sort -nr | head
+find /home/ubuntu/.openclaw-koubei/agents/autohome-1/sessions -maxdepth 1 -type f -printf "%T@ %s %p\n" | sort -nr | head
 ```
 
 8. 如果 DCD 或汽车之家 OpenClaw 阶段“succeeded 但无产物”，优先查：
@@ -349,7 +373,7 @@ find /home/ubuntu/.openclaw-koubei/agents/autohome/sessions -maxdepth 1 -type f 
 ## 10. 常用本地命令
 
 ```bash
-cd /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
+cd /Users/xyc/Documents/codexwork/carfeedback
 docker compose ps
 docker compose logs --tail=200 worker
 docker compose logs --tail=200 api
@@ -376,24 +400,24 @@ openclaw --profile koubei gateway status
 
 短期：
 
-1. 修复 `result_reader.py` 单平台摘要兼容，避免结果页 500。
-2. 修复 `koubei-wordcloud` 对新摘要 sheet 的兼容。
-3. 重新跑一个新任务，验证 DCD 不再被 bootstrap 拦截。
-4. 若 DCD 仍无产物，直接在 OpenClaw workspace 手动执行 `dcd-koubei-collector` 的脚本，排除 agent prompt 执行问题。
+1. 用浏览器检查 `/car-user-feedback/tasks/new` 的“增量 / 全量”控件在桌面和移动端的实际效果。
+2. 修复汽车之家 OpenClaw progress 百分比运行中可能超过 100 的显示问题。
+3. 保留旧两个单体 agent 一段时间；确认不再需要后再删除。
+4. 观察 80 入口稳定性，再单独规划旧项目剩余容器、旧 volumes 和旧 artifact 的清理窗口。
 
 中期：
 
 1. 给 OpenClaw accepted task 增加“必须至少有一次工具调用或必须写 progress_file”的检测。
-2. 对 DCD/汽车之家采集增加超时、重试和更明确的失败日志。
+2. 对 DCD/汽车之家采集增加更明确的失败日志和前端可见诊断。
 3. 增加多用户并发队列提示、任务取消按钮和后台强制取消接口。
 4. 为结果页增加 degraded banner，清楚说明哪个平台缺失、哪些功能降级。
 
 长期：
 
-1. 建 OpenClaw agent pool，避免两个长采集任务互相阻塞。
+1. 如果多人稳定使用，考虑拆分 worker 和 OpenClaw 到独立服务器或至少独立资源限制。
 2. 把车型识别也迁入 OpenClaw `vehicle-id-finder`，但保留缓存和手动兜底。
 3. 加 HTTPS、域名、备份、日志轮转和 artifact 清理策略。
-4. 如果多人稳定使用，考虑拆分 worker 和 OpenClaw 到独立服务器或至少独立资源限制。
+4. 规划 80 端口切换和旧服务清理窗口。
 
 ## 12. 不要做的事
 
@@ -402,4 +426,3 @@ openclaw --profile koubei gateway status
 - 不要把 OpenClaw 当成总编排层；worker 仍是唯一 pipeline owner。
 - 不要只看 OpenClaw task `succeeded` 就判定采集成功；必须校验 Excel、validation JSON、progress JSON。
 - 不要在未确认路径映射时修改 artifact_root。
-

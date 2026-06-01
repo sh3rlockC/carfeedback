@@ -44,6 +44,8 @@ def create_schema(db_path: Path) -> None:
                 degraded INTEGER NOT NULL DEFAULT 0,
                 passphrase_version TEXT NOT NULL,
                 queue_job_id TEXT,
+                collection_mode TEXT NOT NULL DEFAULT 'incremental',
+                collection_summary TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT,
                 enqueued_at TEXT,
                 started_at TEXT,
@@ -129,9 +131,11 @@ def test_job_store_fetches_inputs_and_persists_stage_events(tmp_path: Path) -> N
     store = DatabaseJobStore(f"sqlite+pysqlite:///{db_path}")
 
     inputs = store.fetch_job_inputs("job_store")
+    assert inputs.query == "风云X3 PLUS"
     assert inputs.model_name == "风云X3 PLUS"
     assert inputs.autohome_series_id == "8089"
     assert inputs.dongchedi_series_id == "25398"
+    assert inputs.collection_mode == "incremental"
 
     artifact_path = tmp_path / "summary.xlsx"
     artifact_path.write_text("placeholder", encoding="utf-8")

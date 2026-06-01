@@ -1,27 +1,27 @@
 # 永久主工作树与功能工作树流程
 
-本文用于把 `vehicle-koubei-web-demo` 固化为长期主工作树，并在每次新增功能、修复问题或做实验时创建独立 Git worktree。目标是降低单个对话上下文重量，避免在稳定主目录里混杂多个开发任务。
+本文用于把 `carfeedback` 固化为长期主工作树，并在每次新增功能、修复问题或做实验时创建独立 Git worktree。目标是降低单个对话上下文重量，避免在稳定主目录里混杂多个开发任务。
 
 ## 目录约定
 
 主工作树固定为稳定入口：
 
 ```text
-/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
+/Users/xyc/Documents/codexwork/carfeedback
 ```
 
 功能工作树统一放在相邻目录：
 
 ```text
-/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo-worktrees
+/Users/xyc/Documents/codexwork/carfeedback-worktrees
 ```
 
 推荐结构：
 
 ```text
 /Users/xyc/Documents/codexwork/
-  vehicle-koubei-web-demo/                 # main，稳定版、部署版、文档入口
-  vehicle-koubei-web-demo-worktrees/
+  carfeedback/                 # main，稳定版、部署版、文档入口
+  carfeedback-worktrees/
     stability-fixes/                       # 单平台降级、词云兼容等稳定性修复
     admin-console/                         # 后台管理、改口令、取消任务
     agent-pool/                            # 多 agent 并发池
@@ -43,22 +43,22 @@ codex/cloud-hardening
 在主工作树执行：
 
 ```bash
-cd /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
-mkdir -p ../vehicle-koubei-web-demo-worktrees
+cd /Users/xyc/Documents/codexwork/carfeedback
+mkdir -p ../carfeedback-worktrees
 git fetch origin
-git worktree add ../vehicle-koubei-web-demo-worktrees/<feature-name> -b codex/<feature-name>
+git worktree add ../carfeedback-worktrees/<feature-name> -b codex/<feature-name>
 ```
 
 示例：
 
 ```bash
-git worktree add ../vehicle-koubei-web-demo-worktrees/stability-fixes -b codex/stability-fixes
+git worktree add ../carfeedback-worktrees/stability-fixes -b codex/stability-fixes
 ```
 
 如果分支已存在，用：
 
 ```bash
-git worktree add ../vehicle-koubei-web-demo-worktrees/<feature-name> codex/<feature-name>
+git worktree add ../carfeedback-worktrees/<feature-name> codex/<feature-name>
 ```
 
 ## 新对话启动模板
@@ -66,7 +66,7 @@ git worktree add ../vehicle-koubei-web-demo-worktrees/<feature-name> codex/<feat
 每次开新上下文时，把下面这段发给模型：
 
 ```text
-项目路径：/Users/xyc/Documents/codexwork/vehicle-koubei-web-demo-worktrees/<feature-name>
+项目路径：/Users/xyc/Documents/codexwork/carfeedback-worktrees/<feature-name>
 
 请先阅读：
 - README.md
@@ -75,7 +75,7 @@ git worktree add ../vehicle-koubei-web-demo-worktrees/<feature-name> codex/<feat
 - docs/worktree-workflow.md
 
 本轮只处理功能：<写清楚本轮目标>。
-不要直接改主工作树 /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo。
+不要直接改主工作树 /Users/xyc/Documents/codexwork/carfeedback。
 如果要提交，提交到当前 codex/<feature-name> 分支。
 ```
 
@@ -135,8 +135,8 @@ git push -u origin codex/<feature-name>
 确认功能合并到 `main` 后，在主工作树清理：
 
 ```bash
-cd /Users/xyc/Documents/codexwork/vehicle-koubei-web-demo
-git worktree remove ../vehicle-koubei-web-demo-worktrees/<feature-name>
+cd /Users/xyc/Documents/codexwork/carfeedback
+git worktree remove ../carfeedback-worktrees/<feature-name>
 git branch -d codex/<feature-name>
 ```
 

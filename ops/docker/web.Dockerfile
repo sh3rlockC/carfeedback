@@ -8,7 +8,11 @@ RUN npm config set registry https://registry.npmmirror.com && npm ci
 
 COPY apps/web /app
 
+ARG NEXT_PUBLIC_BASE_PATH=""
+ARG NEXT_PUBLIC_ACCESS_CONTROL_ENABLED="true"
 ENV NODE_ENV=production \
+    NEXT_PUBLIC_BASE_PATH=${NEXT_PUBLIC_BASE_PATH} \
+    NEXT_PUBLIC_ACCESS_CONTROL_ENABLED=${NEXT_PUBLIC_ACCESS_CONTROL_ENABLED} \
     PORT=3000
 
 RUN npm run build

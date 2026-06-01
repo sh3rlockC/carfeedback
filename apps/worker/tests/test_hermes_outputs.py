@@ -23,6 +23,7 @@ from worker_app.hermes_outputs import (
     _call_deepseek_json,
     _extract_json,
     _normalize_deepseek_model,
+    _normalize_rankings,
     _runtime_provider,
     extract_whitelisted_comments,
     generate_outputs,
@@ -97,6 +98,31 @@ def test_extract_whitelisted_comments_removes_private_fields(tmp_path: Path) -> 
     assert comments[0]["full_text"] == "空间大，内饰一般"
     assert comments[1]["platform"] == "懂车帝"
     assert comments[1]["full_text"] == "动力顺，车机偶发卡顿"
+
+
+def test_normalize_rankings_merges_outer_quoted_keyword_variants() -> None:
+    rankings = _normalize_rankings(
+        {
+            "keyword_rankings": {
+                "positive": [
+                    {"term": "空间宽敞", "count": 48},
+                    {"term": "「空间宽敞」", "count": 43},
+                    {"term": "动力顺", "count": 12},
+                ],
+                "negative": [
+                    {"term": "「车机卡顿」", "count": 8},
+                    {"term": "车机卡顿", "count": 5},
+                ],
+            }
+        },
+        [],
+    )
+
+    assert rankings["positive"][:2] == [
+        {"term": "空间宽敞", "count": 91},
+        {"term": "动力顺", "count": 12},
+    ]
+    assert rankings["negative"] == [{"term": "车机卡顿", "count": 13}]
 
 
 def test_extract_whitelisted_comments_builds_standard_raw_comment_json(tmp_path: Path) -> None:

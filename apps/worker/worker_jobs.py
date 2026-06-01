@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
 
 from worker_app.artifacts import ensure_job_dirs
 from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
+from worker_app.corpus import (
+    DCD_HEADERS,
+    AUTOHOME_HEADERS,
+    INCREMENTAL_MAX_SCAN_PAGES,
+    INCREMENTAL_STOP_AFTER_KNOWN_PAGES,
+    export_platform_workbook,
+    load_platform_state,
+    read_validation_incremental_stats,
+    read_workbook_rows,
+    upsert_platform_rows,
+    write_known_links_file,
+)
 from worker_app.hermes_outputs import generate_time_report_outputs
 from worker_app.job_store import ComparisonVehicleInputs, DatabaseJobStore
 from worker_app.jobs import JobContext, run_pipeline
@@ -94,14 +107,167 @@ def _copy_vehicle_downloadable_artifacts(
     vehicle_dir = output_dir / _safe_filename_part(vehicle.model_name)
     vehicle_dir.mkdir(parents=True, exist_ok=True)
     copied: list[str] = []
+    used_names: set[str] = set()
     for source_value in source_paths:
         source = Path(source_value)
         if not source.exists() or not source.name.lower().endswith((".xlsx", ".png")):
             continue
-        target = _unique_target(vehicle_dir / source.name)
-        shutil.copy2(source, target)
+        target = vehicle_dir / source.name
+        if target.name in used_names:
+            target = _unique_target(target)
+        used_names.add(target.name)
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
         copied.append(str(target))
     return copied
+
+
+def _collection_summary_template(mode: str, existing_count: int) -> dict:
+    return {
+        "existing_count": existing_count,
+        "new_count": 0,
+        "total_count": existing_count,
+        "pages_scanned": 0,
+        "mode": mode,
+        "stop_reason": None,
+    }
+
+
+def _write_incremental_progress(job_paths, collection_plan: dict[str, dict]) -> None:
+    summary = {
+        platform: {
+            "existing_count": int(plan.get("existing_count") or 0),
+            "new_count": int(plan.get("new_count") or 0),
+            "total_count": int(plan.get("total_count") or plan.get("existing_count") or 0),
+            "pages_scanned": int(plan.get("pages_scanned") or 0),
+            "mode": str(plan.get("mode") or "incremental"),
+            "stop_reason": plan.get("stop_reason"),
+        }
+        for platform, plan in collection_plan.items()
+    }
+    autohome = summary.get("autohome", {})
+    dongchedi = summary.get("dongchedi", {})
+    message = (
+        f"历史语料：汽车之家 {autohome.get('existing_count', 0)} 条，"
+        f"懂车帝 {dongchedi.get('existing_count', 0)} 条；准备"
+        f"{'增量采集' if any(item.get('mode') == 'incremental' for item in summary.values()) else '全量采集'}"
+    )
+    progress_path = job_paths.progress / "checking_incremental.progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "percent": 100,
+                "message": message,
+                "collection_summary": summary,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def prepare_collection_plan(
+    *,
+    database_url: str,
+    job_paths,
+    query: str,
+    autohome_series_id: str,
+    dongchedi_series_id: str,
+    collection_mode: str,
+) -> dict[str, dict]:
+    platform_series = {
+        "autohome": str(autohome_series_id),
+        "dongchedi": str(dongchedi_series_id),
+    }
+    plan: dict[str, dict] = {}
+    for platform, series_id in platform_series.items():
+        state = load_platform_state(database_url, query=query, platform=platform, series_id=series_id)
+        mode = "incremental" if collection_mode == "incremental" and state.existing_count > 0 else "full_refresh"
+        platform_plan = _collection_summary_template(mode, state.existing_count)
+        platform_plan["series_id"] = series_id
+        if mode == "incremental":
+            known_links_file = job_paths.inputs / f"{platform}.known-links.txt"
+            write_known_links_file(known_links_file, state.known_links)
+            platform_plan.update(
+                {
+                    "known_links_file": str(known_links_file),
+                    "known_links_count": len(state.known_links),
+                    "max_scan_pages": INCREMENTAL_MAX_SCAN_PAGES,
+                    "stop_after_known_pages": INCREMENTAL_STOP_AFTER_KNOWN_PAGES,
+                }
+            )
+        plan[platform] = platform_plan
+
+    _write_incremental_progress(job_paths, plan)
+    return plan
+
+
+def _collector_output_for_stage(job_paths, model_name: str, stage_name: str) -> tuple[str, Path, list[str]]:
+    if stage_name == "collecting_autohome":
+        return "autohome", job_paths.outputs.raw / f"ZJ{model_name}原始口碑.xlsx", AUTOHOME_HEADERS
+    if stage_name == "collecting_dcd":
+        return "dongchedi", job_paths.outputs.raw / f"DCD口碑_{model_name}.xlsx", DCD_HEADERS
+    raise ValueError(f"unsupported collector stage: {stage_name}")
+
+
+def _apply_collector_to_corpus(
+    *,
+    database_url: str,
+    job_id: str,
+    query: str,
+    model_name: str,
+    job_paths,
+    stage_name: str,
+    series_id: str,
+    collection_plan: dict[str, dict],
+) -> dict:
+    platform, output_path, headers = _collector_output_for_stage(job_paths, model_name, stage_name)
+    rows = read_workbook_rows(output_path)
+    result = upsert_platform_rows(
+        database_url=database_url,
+        query=query,
+        model_name=model_name,
+        platform=platform,
+        series_id=series_id,
+        job_id=job_id,
+        rows=rows,
+    )
+    exported_count = export_platform_workbook(
+        database_url=database_url,
+        query=query,
+        platform=platform,
+        series_id=series_id,
+        output_path=output_path,
+        headers=headers,
+    )
+    stats = read_validation_incremental_stats(output_path.with_suffix(".validation.json"))
+    updated = dict(collection_plan.get(platform) or {})
+    updated.update(
+        {
+            "new_count": result.inserted_count,
+            "total_count": exported_count,
+            "pages_scanned": int(stats.get("pages_scanned") or updated.get("pages_scanned") or 0),
+            "stop_reason": stats.get("stop_reason") or updated.get("stop_reason"),
+        }
+    )
+    collection_plan[platform] = updated
+    return updated
+
+
+def _summary_payload(collection_plan: dict[str, dict]) -> dict[str, dict]:
+    payload: dict[str, dict] = {}
+    for platform in ("autohome", "dongchedi"):
+        plan = collection_plan.get(platform) or {}
+        payload[platform] = {
+            "existing_count": int(plan.get("existing_count") or 0),
+            "new_count": int(plan.get("new_count") or 0),
+            "total_count": int(plan.get("total_count") or 0),
+            "pages_scanned": int(plan.get("pages_scanned") or 0),
+            "mode": str(plan.get("mode") or "incremental"),
+            "stop_reason": plan.get("stop_reason"),
+        }
+    return payload
 
 
 def run_job(
@@ -117,19 +283,52 @@ def run_job(
         model_name=job_inputs.model_name,
         artifact_root=artifact_root,
     )
-    job_paths = ensure_job_dirs(artifact_root, job_id)
-    stage_commands = build_stage_commands(
-        job_paths=job_paths,
-        model_name=job_inputs.model_name,
-        autohome_series_id=job_inputs.autohome_series_id,
-        dongchedi_series_id=job_inputs.dongchedi_series_id,
-    )
+
     try:
+        job_paths = ensure_job_dirs(artifact_root, job_id)
+        collection_plan = prepare_collection_plan(
+            database_url=database_url,
+            job_paths=job_paths,
+            query=job_inputs.query,
+            autohome_series_id=job_inputs.autohome_series_id,
+            dongchedi_series_id=job_inputs.dongchedi_series_id,
+            collection_mode=job_inputs.collection_mode,
+        )
+        if hasattr(store, "update_collection_summary"):
+            store.update_collection_summary(job_id, _summary_payload(collection_plan))
+        stage_commands = build_stage_commands(
+            job_paths=job_paths,
+            model_name=job_inputs.model_name,
+            autohome_series_id=job_inputs.autohome_series_id,
+            dongchedi_series_id=job_inputs.dongchedi_series_id,
+            collection_plan=collection_plan,
+        )
+        series_by_stage = {
+            "collecting_autohome": job_inputs.autohome_series_id,
+            "collecting_dcd": job_inputs.dongchedi_series_id,
+        }
+
+        def handle_event(event: dict) -> None:
+            if event.get("type") == "stage_success" and event.get("stage") in series_by_stage:
+                _apply_collector_to_corpus(
+                    database_url=database_url,
+                    job_id=job_id,
+                    query=job_inputs.query,
+                    model_name=job_inputs.model_name,
+                    job_paths=job_paths,
+                    stage_name=str(event["stage"]),
+                    series_id=series_by_stage[str(event["stage"])],
+                    collection_plan=collection_plan,
+                )
+                if hasattr(store, "update_collection_summary"):
+                    store.update_collection_summary(job_id, _summary_payload(collection_plan))
+            store.handle_pipeline_event(job_id, event)
+
         pipeline_result = run_pipeline(
             context,
             stage_commands,
             build_stage_runner(),
-            observer=lambda event: store.handle_pipeline_event(job_id, event),
+            observer=handle_event,
         )
     except Exception as exc:
         error_message = str(exc) or exc.__class__.__name__

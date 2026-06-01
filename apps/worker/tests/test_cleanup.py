@@ -95,6 +95,23 @@ def create_cleanup_schema(db_path: Path) -> None:
                 updated_at TEXT,
                 completed_at TEXT
             );
+            CREATE TABLE koubei_raw_comments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query_key TEXT NOT NULL,
+                query TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                series_id TEXT NOT NULL,
+                source_link TEXT,
+                dedupe_key TEXT NOT NULL,
+                row_json TEXT NOT NULL,
+                first_seen_job_id TEXT,
+                last_seen_job_id TEXT,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                published_at TEXT,
+                page INTEGER
+            );
             """
         )
         connection.commit()
@@ -195,6 +212,29 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
             created_at=now - timedelta(days=5),
             finished_at=now - timedelta(days=4),
         )
+        connection.execute(
+            """
+            INSERT INTO koubei_raw_comments (
+                query_key, query, model_name, platform, series_id, source_link, dedupe_key,
+                row_json, first_seen_job_id, last_seen_job_id, first_seen_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "风云x3 plus",
+                "风云X3 PLUS",
+                "风云X3 PLUS",
+                "autohome",
+                "8089",
+                "https://k.autohome.com.cn/detail/view_01old.html",
+                "link:https://k.autohome.com.cn/detail/view_01old.html",
+                '{"用户名":"tester"}',
+                "job_old",
+                "job_old",
+                as_db_datetime(now - timedelta(days=5)),
+                as_db_datetime(now - timedelta(days=5)),
+            ),
+        )
         insert_job(
             connection,
             job_id="job_recent",
@@ -246,6 +286,7 @@ def test_cleanup_removes_expired_job_data_but_keeps_metadata(tmp_path: Path) -> 
         assert connection.execute("SELECT COUNT(*) FROM job_ai_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_qa_chunks WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM job_time_reports WHERE job_id = ?", ("job_old",)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM koubei_raw_comments WHERE query_key = ?", ("风云x3 plus",)).fetchone()[0] == 1
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_recent",)).fetchone()[0] == "completed"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_running",)).fetchone()[0] == "collecting_autohome"
         assert connection.execute("SELECT status FROM jobs WHERE job_id = ?", ("job_failed_recent",)).fetchone()[0] == "failed"

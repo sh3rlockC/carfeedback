@@ -1,4 +1,6 @@
+import Link from "next/link";
 import type { ComponentPropsWithoutRef, ReactNode } from "react";
+import { withoutBasePath } from "@/lib/paths";
 
 export type StepKey = "passphrase" | "vehicle" | "candidates" | "progress" | "result";
 
@@ -18,16 +20,18 @@ export const flowSteps: StepItem[] = [
 ];
 
 export function stepForPath(pathname: string | null): StepKey {
-  if (pathname?.startsWith("/vehicle")) {
+  const normalizedPathname = withoutBasePath(pathname);
+
+  if (normalizedPathname?.startsWith("/vehicle")) {
     return "vehicle";
   }
-  if (pathname?.startsWith("/candidates")) {
+  if (normalizedPathname?.startsWith("/candidates")) {
     return "candidates";
   }
-  if (pathname?.startsWith("/progress")) {
+  if (normalizedPathname?.startsWith("/progress")) {
     return "progress";
   }
-  if (pathname?.startsWith("/result")) {
+  if (normalizedPathname?.startsWith("/result")) {
     return "result";
   }
   return "passphrase";
@@ -86,10 +90,10 @@ export function StepRail({ activeStep }: { activeStep: StepKey }) {
       {flowSteps.map((step, index) => {
         const state = index < activeIndex ? "done" : index === activeIndex ? "active" : "pending";
         return (
-          <a key={step.key} className={`step-node step-${state}`} href={step.href}>
+          <Link key={step.key} className={`step-node step-${state}`} href={step.href}>
             <span>{step.eyebrow}</span>
             <strong>{step.label}</strong>
-          </a>
+          </Link>
         );
       })}
     </nav>

@@ -1,0 +1,1 @@
+export const ACCESS_CONTROL_ENABLED_DEFAULT = process.env.NEXT_PUBLIC_ACCESS_CONTROL_ENABLED !== "false";

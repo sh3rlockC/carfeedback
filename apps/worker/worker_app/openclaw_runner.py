@@ -211,6 +211,10 @@ def _optional_command_arg(command: StageCommand, option: str) -> str | None:
         return None
 
 
+def _is_full_refresh_command(command: StageCommand) -> bool:
+    return _optional_command_arg(command, "--known-links-file") is None
+
+
 def _host_path(path: str, settings: OpenClawSettings) -> str:
     if not settings.artifact_root_host:
         return path
@@ -227,18 +231,43 @@ def _host_path(path: str, settings: OpenClawSettings) -> str:
 
 def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -> str:
     series_id = _command_arg(command, "--series-id")
+    start_page = _optional_command_arg(command, "--start-page") or "1"
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
+    is_full_refresh = _is_full_refresh_command(command)
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的汽车之家口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.collector_skill}",
             f"series_id={series_id}",
+            f"start_page={start_page}",
             f"output_path={_host_path(output_path, settings)}",
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if is_full_refresh:
+        lines.extend(
+            [
+                "collection_mode=full_refresh",
+                "page_mode=auto_detect_all_pages",
+                "command_contract=运行汽车之家 skill 附带脚本时必须传 --start-page 1 --auto-detect-pages，并让脚本自动探测最后一页。",
+                "禁止添加 --end-page 10、固定抓取 10 页、或在探测到更多页面时提前结束。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集汽车之家用户口碑，输出 Excel 到 output_path。",
@@ -247,9 +276,11 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "5. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
             "6. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "7. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
-            "8. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "8. 全量模式必须采集到自动探测的最后一页；如果接口显示 pagecount/rowcount 超过本轮页数，必须返回失败原因。",
+            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -257,11 +288,14 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
     start_page = _optional_command_arg(command, "--start-page") or "1"
     output_path = _command_arg(command, "--output")
     progress_file = _command_arg(command, "--progress-file")
+    known_links_file = _optional_command_arg(command, "--known-links-file")
+    max_scan_pages = _optional_command_arg(command, "--max-scan-pages")
+    stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     failed_pages_path = str(Path(output_path).with_suffix(".failed-pages.json"))
+    is_full_refresh = _is_full_refresh_command(command)
 
-    return "\n".join(
-        [
+    lines = [
             "请调用已安装或已加载的懂车帝口碑采集 skill，并严格按以下 contract 输出。",
             f"skill={settings.dcd_collector_skill}",
             f"series_id={series_id}",
@@ -270,6 +304,27 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+    ]
+    if is_full_refresh:
+        lines.extend(
+            [
+                "collection_mode=full_refresh",
+                "page_mode=auto_detect_all_pages",
+                "command_contract=运行懂车帝 skill 附带脚本时必须省略 --end-page，让脚本自动探测最后一页。",
+                "validation_requirement=input.end_page_auto_detected=true；如果 page_meta 最后一页 has_more=true，不能报告完成。",
+                "禁止添加 --end-page 10、固定抓取 10 页、或在 total_count/has_more 表明还有更多页面时提前结束。",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"known_links_file={_host_path(known_links_file, settings)}",
+                f"max_scan_pages={max_scan_pages or '10'}",
+                f"stop_after_known_pages={stop_after_known_pages or '2'}",
+            ]
+        )
+    lines.extend(
+        [
             "要求：",
             "1. 不要创建子代理、不要另起新对话；在当前任务中同步执行脚本并等待完成。",
             "2. 采集懂车帝用户口碑，输出 Excel 到 output_path。",
@@ -279,9 +334,11 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "6. 启动后必须立即创建 progress_file，初始 percent 可为 0 或 1，并写入可读 message。",
             "7. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "8. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
-            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "9. 全量模式必须采集到自动探测的最后一页；如果 total_count/has_more 表明还有更多页面，必须返回失败原因。",
+            "10. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
+    return "\n".join(lines)
 
 
 def _build_collector_message(command: StageCommand, settings: OpenClawSettings) -> str:
@@ -363,6 +420,7 @@ def _read_related_openclaw_failure(
     *,
     settings: OpenClawSettings,
     markers: list[str],
+    not_before_created_at: int | None = None,
 ) -> dict[str, str] | None:
     if not settings.task_db_path or not markers:
         return None
@@ -373,6 +431,10 @@ def _read_related_openclaw_failure(
 
     where_clause = " OR ".join("task LIKE ?" for _ in markers)
     params = [f"%{marker}%" for marker in markers]
+    created_after_clause = ""
+    if not_before_created_at is not None:
+        created_after_clause = "AND created_at >= ?"
+        params.append(not_before_created_at)
     try:
         with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
             db.row_factory = sqlite3.Row
@@ -382,6 +444,7 @@ def _read_related_openclaw_failure(
                 FROM task_runs
                 WHERE status IN ('failed', 'timed_out', 'cancelled', 'lost')
                   AND ({where_clause})
+                  {created_after_clause}
                 ORDER BY ended_at DESC NULLS LAST, last_event_at DESC NULLS LAST
                 LIMIT 1
                 """,
@@ -404,6 +467,7 @@ def _read_related_openclaw_status_counts(
     *,
     settings: OpenClawSettings,
     markers: list[str],
+    not_before_created_at: int | None = None,
 ) -> dict[str, int] | None:
     if not settings.task_db_path or not markers:
         return None
@@ -414,6 +478,10 @@ def _read_related_openclaw_status_counts(
 
     where_clause = " OR ".join("task LIKE ?" for _ in markers)
     params = [f"%{marker}%" for marker in markers]
+    created_after_clause = ""
+    if not_before_created_at is not None:
+        created_after_clause = "AND created_at >= ?"
+        params.append(not_before_created_at)
     try:
         with sqlite3.connect(f"file:{task_db_path}?mode=ro", uri=True, timeout=1) as db:
             db.row_factory = sqlite3.Row
@@ -421,7 +489,8 @@ def _read_related_openclaw_status_counts(
                 f"""
                 SELECT status, COUNT(*) AS count
                 FROM task_runs
-                WHERE {where_clause}
+                WHERE ({where_clause})
+                  {created_after_clause}
                 GROUP BY status
                 """,
                 params,
@@ -432,6 +501,69 @@ def _read_related_openclaw_status_counts(
     if not rows:
         return None
     return {str(row["status"] or ""): int(row["count"] or 0) for row in rows}
+
+
+def _response_accepted_at(response: dict[str, Any] | None) -> int | None:
+    if not response:
+        return None
+    for key in ("acceptedAt", "accepted_at", "createdAt", "created_at"):
+        value = response.get(key)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+    return None
+
+
+def _read_validation_payload(command: StageCommand) -> dict[str, Any] | None:
+    try:
+        validation_path = Path(_command_arg(command, "--output")).with_suffix(".validation.json")
+    except StageExecutionError:
+        return None
+    if not validation_path.exists():
+        return None
+    try:
+        payload = json.loads(validation_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _validate_full_refresh_dcd_output(command: StageCommand, payload: dict[str, Any]) -> None:
+    input_payload = payload.get("input")
+    if isinstance(input_payload, dict) and input_payload.get("end_page_auto_detected") is False:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="OPENCLAW_PARTIAL_COLLECTION",
+            message=(
+                "DCD full refresh completed with input.end_page_auto_detected=false; "
+                "this usually means OpenClaw added a manual page cap such as --end-page 10."
+            ),
+        )
+
+    page_meta = payload.get("page_meta")
+    if not isinstance(page_meta, list):
+        return
+    valid_meta = [item for item in page_meta if isinstance(item, dict)]
+    if not valid_meta:
+        return
+    last_meta = max(valid_meta, key=lambda item: int(item.get("page") or 0))
+    if last_meta.get("has_more") is True:
+        raise StageExecutionError(
+            stage=command.name,
+            error_code="OPENCLAW_PARTIAL_COLLECTION",
+            message="DCD full refresh stopped while validation page_meta still reports has_more=true.",
+        )
+
+
+def _validate_collector_output_contract(command: StageCommand) -> None:
+    if not _is_full_refresh_command(command):
+        return
+    payload = _read_validation_payload(command)
+    if payload is None:
+        return
+    if command.name == "collecting_dcd":
+        _validate_full_refresh_dcd_output(command, payload)
 
 
 class OpenClawGatewayClient:
@@ -588,6 +720,7 @@ def run_collector_via_openclaw(
     *,
     settings: OpenClawSettings,
     gateway_client: OpenClawGatewayClientProtocol | None = None,
+    assigned_agent_id: str | None = None,
 ) -> StageResult:
     if command.name not in {"collecting_autohome", "collecting_dcd"}:
         return run_stage_command(command, job_paths, progress_sink)
@@ -596,7 +729,7 @@ def run_collector_via_openclaw(
     stderr_log = job_paths.logs / f"{command.name}.openclaw.stderr.log"
     client = gateway_client or OpenClawGatewayClient()
     session_id = f"vehicle-koubei-{job_paths.root.name}-{command.name}"
-    agent_id = settings.agent_id_for_stage(command.name)
+    agent_id = assigned_agent_id or settings.agent_id_for_stage(command.name)
     try:
         response = client.call_agent(
             _build_collector_message(command, settings),
@@ -617,8 +750,8 @@ def run_collector_via_openclaw(
     _write_stage_log(stdout_log, json.dumps(response, ensure_ascii=False, indent=2))
     _write_stage_log(stderr_log, "")
 
-    if response.get("status") == "accepted":
-        _wait_for_expected_artifacts(command, settings, response=response)
+    _wait_for_expected_artifacts(command, settings, response=response)
+    _validate_collector_output_contract(command)
 
     artifact_paths, output_metadata = _collect_existing_artifacts(command, "")
     output_metadata.update(
@@ -643,6 +776,7 @@ def run_autohome_via_openclaw(
     *,
     settings: OpenClawSettings,
     gateway_client: OpenClawGatewayClientProtocol | None = None,
+    assigned_agent_id: str | None = None,
 ) -> StageResult:
     return run_collector_via_openclaw(
         command,
@@ -650,6 +784,7 @@ def run_autohome_via_openclaw(
         progress_sink,
         settings=settings,
         gateway_client=gateway_client,
+        assigned_agent_id=assigned_agent_id,
     )
 
 
@@ -657,6 +792,7 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
     task_id = str(response.get("taskId") or response.get("task_id") or "") if response else ""
     run_id = str(response.get("runId") or response.get("run_id") or response.get("sourceId") or "") if response else ""
     related_markers = _openclaw_task_markers(command, settings)
+    related_not_before_created_at = _response_accepted_at(response)
     deadline = time.monotonic() + max(settings.timeout_seconds, 1)
     while True:
         missing = [artifact for artifact in command.expected_artifacts if not Path(artifact).exists()]
@@ -672,7 +808,11 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
                 message=error_detail,
             )
 
-        related_failure = _read_related_openclaw_failure(settings=settings, markers=related_markers)
+        related_failure = _read_related_openclaw_failure(
+            settings=settings,
+            markers=related_markers,
+            not_before_created_at=related_not_before_created_at,
+        )
         if related_failure:
             error_detail = related_failure["error"] or f"Related OpenClaw task ended with status={related_failure['status']}"
             raise StageExecutionError(
@@ -681,7 +821,11 @@ def _wait_for_expected_artifacts(command: StageCommand, settings: OpenClawSettin
                 message=error_detail,
             )
 
-        related_status_counts = _read_related_openclaw_status_counts(settings=settings, markers=related_markers)
+        related_status_counts = _read_related_openclaw_status_counts(
+            settings=settings,
+            markers=related_markers,
+            not_before_created_at=related_not_before_created_at,
+        )
         active_statuses = {"accepted", "created", "pending", "queued", "running", "scheduled"}
         if related_status_counts and not (set(related_status_counts) & active_statuses):
             raise StageExecutionError(
@@ -708,6 +852,7 @@ def build_stage_runner(
     *,
     settings: OpenClawSettings | None = None,
     direct_runner: StageRunnerCallable = run_stage_command,
+    assigned_agent_id: str | None = None,
 ) -> StageRunnerCallable:
     settings = settings or OpenClawSettings.from_env()
     enabled_stages = set(settings.stages)
@@ -717,7 +862,13 @@ def build_stage_runner(
         # and keeps local execution for every stage not explicitly routed here.
         if settings.enabled and command.name in enabled_stages:
             if command.name in {"collecting_autohome", "collecting_dcd"}:
-                return run_collector_via_openclaw(command, job_paths, progress_sink, settings=settings)
+                return run_collector_via_openclaw(
+                    command,
+                    job_paths,
+                    progress_sink,
+                    settings=settings,
+                    assigned_agent_id=assigned_agent_id,
+                )
         return direct_runner(command, job_paths, progress_sink)
 
     return runner

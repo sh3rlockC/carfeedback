@@ -13,9 +13,10 @@ def resolve_workspace_path(workspace_root: Path, value: str) -> Path:
 
 def discover_manifest_path(source_path: Path | None = None, workspace_root: Path | None = None) -> Path:
     if workspace_root is not None:
-        workspace_candidate = (workspace_root / "vehicle-koubei-web-demo" / "config" / "dependencies.yaml").resolve()
-        if workspace_candidate.exists():
-            return workspace_candidate
+        for project_dir in ("", "carfeedback", "carFeedback"):
+            workspace_candidate = (workspace_root / project_dir / "config" / "dependencies.yaml").resolve()
+            if workspace_candidate.exists():
+                return workspace_candidate
 
     file_path = (source_path or Path(__file__)).resolve()
     for parent in file_path.parents:
@@ -24,7 +25,7 @@ def discover_manifest_path(source_path: Path | None = None, workspace_root: Path
             return manifest_candidate
 
     fallback_root = (workspace_root or Path.cwd()).expanduser().resolve()
-    return (fallback_root / "vehicle-koubei-web-demo" / "config" / "dependencies.yaml").resolve()
+    return (fallback_root / "carfeedback" / "config" / "dependencies.yaml").resolve()
 
 
 def load_dependency_map(manifest_path: Path, workspace_root: Path) -> dict[str, dict[str, Any]]:
