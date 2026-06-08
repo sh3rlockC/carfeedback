@@ -133,6 +133,20 @@ def test_openclaw_settings_routes_both_collectors_by_default(monkeypatch: pytest
     assert settings.stages == ("collecting_autohome", "collecting_dcd")
 
 
+def test_openclaw_settings_defaults_to_memory_conservative_browser_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENCLAW_BROWSER_ARGS", raising=False)
+    monkeypatch.delenv("OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES", raising=False)
+    monkeypatch.delenv("OPENCLAW_DCD_BLOCK_RESOURCE_TYPES", raising=False)
+
+    settings = OpenClawSettings.from_env()
+
+    assert "--disable-dev-shm-usage" in settings.browser_args
+    assert "--renderer-process-limit=4" in settings.browser_args
+    assert "--single-process" not in settings.browser_args
+    assert settings.autohome_block_resource_types == ("image", "media", "font")
+    assert settings.dcd_block_resource_types == ()
+
+
 def test_openclaw_gateway_connect_sends_device_identity_when_available(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,6 +410,9 @@ def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tm
     assert "page_mode=auto_detect_all_pages" in message
     assert "--auto-detect-pages" in message
     assert "禁止添加 --end-page 10" in message
+    assert "browser_args=--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions" in message
+    assert "block_resource_types=image,media,font" in message
+    assert "--single-process" not in message
     assert "series_id=8089" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "ZJ测试车原始口碑.xlsx") in message
     assert str(host_root / "job_openclaw" / "progress" / "collecting_autohome.progress.json") in message
@@ -457,6 +474,9 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     assert "page_mode=auto_detect_all_pages" in message
     assert "禁止添加 --end-page 10" in message
     assert "end_page_auto_detected=true" in message
+    assert "browser_args=--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions" in message
+    assert "block_resource_types=" not in message
+    assert "--single-process" not in message
     assert "series_id=25545" in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.xlsx") in message
     assert str(host_root / "job_openclaw" / "outputs" / "raw" / "DCD口碑_测试车.failed-pages.json") in message

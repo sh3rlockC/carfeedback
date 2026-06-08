@@ -913,6 +913,93 @@ def test_wait_for_collection_runs_timeout_fails_pending_runs_and_releases_agent(
     assert store.running_agent_ids_by_platform() == {}
 
 
+def test_wait_for_collection_runs_fails_stalled_progress_and_releases_agent(tmp_path: Path, monkeypatch) -> None:
+    from worker_app.collector_models import CollectorRunStatus
+
+    db_path = tmp_path / "worker.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    run = store.create_or_join_collection_run(
+        platform="autohome",
+        query_key="测试车",
+        model_name="测试车",
+        series_id="8089",
+        mode="full_refresh",
+        task_id="task_1",
+    )
+    claimed = store.claim_collection_run_with_agent(run.run_id, "autohome-1")
+    assert claimed is not None
+
+    class FakeCollectorClient:
+        cancelled_run_ids: list[str] = []
+
+        def __init__(self, base_url: str, timeout_seconds: float = 30.0) -> None:
+            assert base_url == "http://collector.test"
+
+        def get_run(self, run_id: str):
+            return CollectorRunStatus(
+                run_id=run_id,
+                platform="autohome",
+                status="running",
+                progress_current=398,
+                progress_total=1000,
+            )
+
+        def cancel_run(self, run_id: str):
+            self.cancelled_run_ids.append(run_id)
+            return CollectorRunStatus(
+                run_id=run_id,
+                platform="autohome",
+                status="cancel_requested",
+                progress_current=398,
+                progress_total=1000,
+            )
+
+    monotonic_values = iter([0.0, 0.0, 4.0])
+
+    def fake_monotonic() -> float:
+        return next(monotonic_values, 4.0)
+
+    monkeypatch.setenv("AUTOHOME_COLLECTOR_SERVICE_URL", "http://collector.test")
+    monkeypatch.setenv("COLLECTOR_WAIT_TIMEOUT_SECONDS", "4")
+    monkeypatch.setenv("COLLECTOR_WAIT_POLL_SECONDS", "0")
+    monkeypatch.setenv("COLLECTOR_PROGRESS_STALL_TIMEOUT_SECONDS", "3")
+    monkeypatch.setattr(temporal_activities, "CollectorClient", FakeCollectorClient)
+    monkeypatch.setattr(temporal_activities, "_monotonic", fake_monotonic)
+    activity = TaskActivities(database_url=f"sqlite+pysqlite:///{db_path}")
+
+    result = asyncio.run(activity.wait_for_collection_runs({"task_id": "task_1", "run_ids": [run.run_id]}))
+
+    reloaded = store.load_collection_run(run.run_id)
+    assert result["pending_platforms"] == []
+    assert result["failed_platforms"] == [
+        {
+            "platform": "autohome",
+            "run_id": run.run_id,
+            "failure_category": "collector_progress_stalled",
+            "retryable": True,
+        }
+    ]
+    assert reloaded.status == "failed"
+    assert reloaded.failure_category == "collector_progress_stalled"
+    assert FakeCollectorClient.cancelled_run_ids == [run.run_id]
+    assert store.running_agent_ids_by_platform() == {}
+
+    connection = sqlite3.connect(db_path)
+    try:
+        event = connection.execute(
+            "SELECT payload_json FROM collector_events WHERE run_id = ? AND event_type = 'collector_progress_stalled'",
+            (run.run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert event is not None
+    payload = json.loads(event[0])
+    assert payload["progress_current"] == 398
+    assert payload["cancel_requested"] is True
+
+
 def test_wait_for_collection_runs_submits_and_polls_collector_service(tmp_path: Path, monkeypatch) -> None:
     from worker_app.collector_models import CollectorRunStatus
 

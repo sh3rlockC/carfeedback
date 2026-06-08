@@ -21,6 +21,13 @@ from worker_app.runner import _classify_error, _collect_existing_artifacts, _wri
 from worker_app.stages import StageCommand, StageExecutionError
 
 
+DEFAULT_OPENCLAW_BROWSER_ARGS = (
+    "--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions "
+    "--disable-background-networking --disable-sync --mute-audio --no-first-run "
+    "--no-default-browser-check --renderer-process-limit=4"
+)
+
+
 @dataclass(frozen=True)
 class OpenClawSettings:
     enabled: bool = False
@@ -38,6 +45,9 @@ class OpenClawSettings:
     artifact_root_host: str | None = None
     task_db_path: str | None = None
     device_identity_file: str = "/openclaw-state/identity/device.json"
+    browser_args: str = DEFAULT_OPENCLAW_BROWSER_ARGS
+    autohome_block_resource_types: tuple[str, ...] = ("image", "media", "font")
+    dcd_block_resource_types: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls) -> "OpenClawSettings":
@@ -57,6 +67,12 @@ class OpenClawSettings:
             artifact_root_host=os.getenv("OPENCLAW_ARTIFACT_ROOT_HOST") or None,
             task_db_path=os.getenv("OPENCLAW_TASK_DB_PATH") or None,
             device_identity_file=os.getenv("OPENCLAW_DEVICE_IDENTITY_FILE", cls.device_identity_file),
+            browser_args=_browser_args(os.getenv("OPENCLAW_BROWSER_ARGS", cls.browser_args)),
+            autohome_block_resource_types=_env_list(
+                "OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES",
+                cls.autohome_block_resource_types,
+            ),
+            dcd_block_resource_types=_env_list("OPENCLAW_DCD_BLOCK_RESOURCE_TYPES", cls.dcd_block_resource_types),
         )
 
     def agent_id_for_stage(self, stage_name: str) -> str:
@@ -99,6 +115,10 @@ def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
         return default
     values = tuple(item.strip() for item in raw.split(",") if item.strip())
     return values or default
+
+
+def _browser_args(value: str) -> str:
+    return " ".join(part for part in value.split() if part != "--single-process")
 
 
 def _base64url(data: bytes) -> str:
@@ -248,7 +268,10 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             f"output_path={_host_path(output_path, settings)}",
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+            f"browser_args={settings.browser_args}",
     ]
+    if settings.autohome_block_resource_types:
+        lines.append(f"block_resource_types={','.join(settings.autohome_block_resource_types)}")
     if is_full_refresh:
         lines.extend(
             [
@@ -277,7 +300,8 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "6. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "7. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
             "8. 全量模式必须采集到自动探测的最后一页；如果接口显示 pagecount/rowcount 超过本轮页数，必须返回失败原因。",
-            "9. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "9. 启动浏览器时必须应用 browser_args；如 skill 支持请求拦截，必须拦截 block_resource_types 中的资源类型。",
+            "10. 不要使用单进程浏览器模式；如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
@@ -304,7 +328,10 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             f"validation_json_path={_host_path(validation_path, settings)}",
             f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
             f"progress_file={_host_path(progress_file, settings)}",
+            f"browser_args={settings.browser_args}",
     ]
+    if settings.dcd_block_resource_types:
+        lines.append(f"block_resource_types={','.join(settings.dcd_block_resource_types)}")
     if is_full_refresh:
         lines.extend(
             [
@@ -335,7 +362,8 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "7. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "8. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
             "9. 全量模式必须采集到自动探测的最后一页；如果 total_count/has_more 表明还有更多页面，必须返回失败原因。",
-            "10. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "10. 启动浏览器时必须应用 browser_args，不要使用单进程浏览器模式。",
+            "11. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
