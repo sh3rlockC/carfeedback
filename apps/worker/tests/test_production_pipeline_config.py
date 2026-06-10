@@ -39,6 +39,7 @@ def test_compose_passes_openclaw_resource_gate_and_browser_controls() -> None:
     }
     browser_expected = {
         "OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}",
+        "OPENCLAW_AUTOHOME_DIRECT_ENABLED: ${OPENCLAW_AUTOHOME_DIRECT_ENABLED:-false}",
         "OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES: ${OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES:-image,media,font}",
         "OPENCLAW_DCD_BLOCK_RESOURCE_TYPES: ${OPENCLAW_DCD_BLOCK_RESOURCE_TYPES:-}",
     }

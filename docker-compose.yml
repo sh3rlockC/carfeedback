@@ -120,6 +120,7 @@ services:
       OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-4000}
       OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-512}
       OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}
+      OPENCLAW_AUTOHOME_DIRECT_ENABLED: ${OPENCLAW_AUTOHOME_DIRECT_ENABLED:-false}
       OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES: ${OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES:-image,media,font}
       OPENCLAW_DCD_BLOCK_RESOURCE_TYPES: ${OPENCLAW_DCD_BLOCK_RESOURCE_TYPES:-}
       OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
@@ -174,6 +175,7 @@ services:
       OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-4000}
       OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-512}
       OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}
+      OPENCLAW_AUTOHOME_DIRECT_ENABLED: ${OPENCLAW_AUTOHOME_DIRECT_ENABLED:-false}
       OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES: ${OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES:-image,media,font}
       OPENCLAW_DCD_BLOCK_RESOURCE_TYPES: ${OPENCLAW_DCD_BLOCK_RESOURCE_TYPES:-}
       OPENCLAW_AUTOHOME_AGENT_IDS: ${OPENCLAW_AUTOHOME_AGENT_IDS:-autohome-1,autohome-2,autohome-3,autohome-4}
@@ -248,6 +250,7 @@ services:
       OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-4000}
       OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-512}
       OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}
+      OPENCLAW_AUTOHOME_DIRECT_ENABLED: ${OPENCLAW_AUTOHOME_DIRECT_ENABLED:-false}
       OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES: ${OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES:-image,media,font}
       OPENCLAW_DCD_BLOCK_RESOURCE_TYPES: ${OPENCLAW_DCD_BLOCK_RESOURCE_TYPES:-}
       OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}
@@ -302,6 +305,7 @@ services:
       OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-4000}
       OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-512}
       OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}
+      OPENCLAW_AUTOHOME_DIRECT_ENABLED: ${OPENCLAW_AUTOHOME_DIRECT_ENABLED:-false}
       OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES: ${OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES:-image,media,font}
       OPENCLAW_DCD_BLOCK_RESOURCE_TYPES: ${OPENCLAW_DCD_BLOCK_RESOURCE_TYPES:-}
       OPENCLAW_COLLECTOR_SKILL: ${OPENCLAW_COLLECTOR_SKILL:-sh3rlockC/auto-koubei-collector}

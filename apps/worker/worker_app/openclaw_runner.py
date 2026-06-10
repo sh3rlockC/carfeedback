@@ -48,6 +48,7 @@ class OpenClawSettings:
     browser_args: str = DEFAULT_OPENCLAW_BROWSER_ARGS
     autohome_block_resource_types: tuple[str, ...] = ("image", "media", "font")
     dcd_block_resource_types: tuple[str, ...] = ()
+    autohome_direct_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "OpenClawSettings":
@@ -73,6 +74,7 @@ class OpenClawSettings:
                 cls.autohome_block_resource_types,
             ),
             dcd_block_resource_types=_env_list("OPENCLAW_DCD_BLOCK_RESOURCE_TYPES", cls.dcd_block_resource_types),
+            autohome_direct_enabled=_env_bool("OPENCLAW_AUTOHOME_DIRECT_ENABLED", default=cls.autohome_direct_enabled),
         )
 
     def agent_id_for_stage(self, stage_name: str) -> str:
@@ -105,8 +107,11 @@ class OpenClawGatewayClientProtocol(Protocol):
 StageRunnerCallable = Callable[[StageCommand, JobPaths, ProgressSink], StageResult]
 
 
-def _env_bool(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_list(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -259,16 +264,43 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
     stop_after_known_pages = _optional_command_arg(command, "--stop-after-known-pages")
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     is_full_refresh = _is_full_refresh_command(command)
+    output_host_path = _host_path(output_path, settings)
+    validation_host_path = _host_path(validation_path, settings)
+    progress_host_path = _host_path(progress_file, settings)
+    workspace_path = "/opt/codexwork/openclaw-koubei-runtime/workspace"
+    if is_full_refresh:
+        skill_command = (
+            f"cd {workspace_path} && python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py "
+            f"--series-id {series_id} --start-page {start_page} --auto-detect-pages "
+            f"--output '{output_host_path}' --workdir {workspace_path} --progress-file '{progress_host_path}'"
+        )
+    else:
+        skill_command = (
+            f"cd {workspace_path} && python3 skills/auto-koubei-collector/scripts/export_autohome_koubei.py "
+            f"--series-id {series_id} --start-page {start_page} --output '{output_host_path}' "
+            f"--workdir {workspace_path} --progress-file '{progress_host_path}' "
+            f"--known-links-file '{_host_path(known_links_file or '', settings)}' "
+            f"--max-scan-pages {max_scan_pages or '10'} --stop-after-known-pages {stop_after_known_pages or '2'}"
+        )
 
     lines = [
-            "请调用已安装或已加载的汽车之家口碑采集 skill，并严格按以下 contract 输出。",
-            f"skill={settings.collector_skill}",
-            f"series_id={series_id}",
-            f"start_page={start_page}",
-            f"output_path={_host_path(output_path, settings)}",
-            f"validation_json_path={_host_path(validation_path, settings)}",
-            f"progress_file={_host_path(progress_file, settings)}",
-            f"browser_args={settings.browser_args}",
+        "你是一个汽车口碑收集专家，负责稳定采集真实用户口碑并生成可校验产物。",
+        "执行优先级：",
+        "1. 第一优先级：调用当前已挂载的汽车之家口碑采集 Skill；不要重写采集器，不要改代码，不要使用 write/edit/apply_patch，不要创建 .py/.sh/.js 临时脚本。",
+        "2. 如果 Skill 入口确实无法运行，才允许进入汽车之家 API-first 兜底采集；兜底仍然只能在当前任务中直接执行，不要创建临时脚本。",
+        "3. 如果 Skill 和 API-first 兜底都失败，直接返回失败原因；不要伪造数据，不要把 0 行 Excel 报告为成功。",
+        "平台兜底约束：只能使用汽车之家移动 AJAX 接口 getserieskoubeilistbytag，不要回退到旧 PC snapshot、detail/view 链接解析或页面肉眼判断。",
+        f"接口参考：https://k.m.autohome.com.cn/ajax/serieskoubei/getserieskoubeilistbytag?seriesId={series_id}&specId=0&gradeEnum=0&pageIndex=1&pageSize=20&year=0&order=0&v=20240410",
+        "如果接口 rowcount > 0 但最终有效行为 0，必须失败为 empty_data/source_parser_empty。",
+        "当前任务 contract：",
+        f"skill={settings.collector_skill}",
+        f"skill_command={skill_command}",
+        f"series_id={series_id}",
+        f"start_page={start_page}",
+        f"output_path={output_host_path}",
+        f"validation_json_path={validation_host_path}",
+        f"progress_file={progress_host_path}",
+        f"browser_args={settings.browser_args}",
     ]
     if settings.autohome_block_resource_types:
         lines.append(f"block_resource_types={','.join(settings.autohome_block_resource_types)}")
@@ -300,8 +332,8 @@ def _build_autohome_message(command: StageCommand, settings: OpenClawSettings) -
             "6. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "7. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
             "8. 全量模式必须采集到自动探测的最后一页；如果接口显示 pagecount/rowcount 超过本轮页数，必须返回失败原因。",
-            "9. 启动浏览器时必须应用 browser_args；如 skill 支持请求拦截，必须拦截 block_resource_types 中的资源类型。",
-            "10. 不要使用单进程浏览器模式；如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "9. 优先使用 Skill 的现有入口；只有 Skill 现有代码明确需要浏览器时才应用 browser_args；如 Skill 支持请求拦截，必须拦截 block_resource_types 中的资源类型。",
+            "10. 不要使用单进程浏览器模式；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
@@ -318,17 +350,46 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
     validation_path = str(Path(output_path).with_suffix(".validation.json"))
     failed_pages_path = str(Path(output_path).with_suffix(".failed-pages.json"))
     is_full_refresh = _is_full_refresh_command(command)
+    output_host_path = _host_path(output_path, settings)
+    validation_host_path = _host_path(validation_path, settings)
+    failed_pages_host_path = _host_path(failed_pages_path, settings)
+    progress_host_path = _host_path(progress_file, settings)
+    workspace_path = "/opt/codexwork/openclaw-koubei-runtime/workspace"
+    if is_full_refresh:
+        skill_command = (
+            f"cd {workspace_path} && python3 skills/dcd-koubei-collector/scripts/export_dcd_koubei.py "
+            f"--series-id {series_id} --start-page {start_page} --output '{output_host_path}' "
+            f"--progress-file '{progress_host_path}' --quiet"
+        )
+    else:
+        skill_command = (
+            f"cd {workspace_path} && python3 skills/dcd-koubei-collector/scripts/export_dcd_koubei.py "
+            f"--series-id {series_id} --start-page {start_page} --output '{output_host_path}' "
+            f"--progress-file '{progress_host_path}' --quiet "
+            f"--known-links-file '{_host_path(known_links_file or '', settings)}' "
+            f"--max-scan-pages {max_scan_pages or '10'} --stop-after-known-pages {stop_after_known_pages or '2'}"
+        )
 
     lines = [
-            "请调用已安装或已加载的懂车帝口碑采集 skill，并严格按以下 contract 输出。",
-            f"skill={settings.dcd_collector_skill}",
-            f"series_id={series_id}",
-            f"start_page={start_page}",
-            f"output_path={_host_path(output_path, settings)}",
-            f"validation_json_path={_host_path(validation_path, settings)}",
-            f"failed_pages_json_path={_host_path(failed_pages_path, settings)}",
-            f"progress_file={_host_path(progress_file, settings)}",
-            f"browser_args={settings.browser_args}",
+        "你是一个汽车口碑收集专家，负责稳定采集真实用户口碑并生成可校验产物。",
+        "执行优先级：",
+        "1. 第一优先级：调用当前已挂载的懂车帝口碑采集 Skill；不要重写采集器，不要改代码，不要使用 write/edit/apply_patch，不要创建 .py/.sh/.js 临时脚本。",
+        "2. 如果 Skill 入口确实无法运行，才允许进入懂车帝 HTML/API-first 兜底采集；兜底仍然只能在当前任务中直接执行，不要创建临时脚本。",
+        "3. 如果 Skill 和兜底都失败，直接返回失败原因；不要伪造数据，不要把 0 行 Excel 报告为成功。",
+        "平台兜底约束：只能读取懂车帝页面 HTML 内的 __NEXT_DATA__，解析 props.pageProps.reviewListData.review_list。",
+        f"兜底 URL 格式：https://www.dongchedi.com/auto/series/score/{series_id}-x-S0-x-x-x-{{page}}",
+        "不要使用 Playwright/Selenium/Chrome/滚动/OCR/DOM 浏览器流程替代当前 Skill。",
+        "当前任务 contract：",
+        f"skill={settings.dcd_collector_skill}",
+        f"skill_command={skill_command}",
+        f"series_id={series_id}",
+        f"start_page={start_page}",
+        f"output_path={output_host_path}",
+        f"validation_json_path={validation_host_path}",
+        f"failed_pages_json_path={failed_pages_host_path}",
+        f"progress_file={progress_host_path}",
+        "incremental_argument_contract=增量参数如 --known-links-file、--max-scan-pages、--stop-after-known-pages 只有在当前挂载 Skill 的 --help 明确支持时才允许使用。",
+        "如果当前挂载 Skill 不支持这些参数，必须返回 contract mismatch，不要编辑脚本。",
     ]
     if settings.dcd_block_resource_types:
         lines.append(f"block_resource_types={','.join(settings.dcd_block_resource_types)}")
@@ -362,8 +423,7 @@ def _build_dcd_message(command: StageCommand, settings: OpenClawSettings) -> str
             "7. 每完成一个页面或阶段都必须刷新 progress_file，至少包含 percent 或 overall.percent。",
             "8. 只有 output_path、validation_json_path、progress_file 产物都存在后才报告完成。",
             "9. 全量模式必须采集到自动探测的最后一页；如果 total_count/has_more 表明还有更多页面，必须返回失败原因。",
-            "10. 启动浏览器时必须应用 browser_args，不要使用单进程浏览器模式。",
-            "11. 如果失败，明确返回失败原因；不要输出密钥、token 或其它本地凭据。",
+            "10. 不要启动浏览器，不要使用单进程浏览器模式；不要输出密钥、token 或其它本地凭据。",
         ]
     )
     return "\n".join(lines)
@@ -890,6 +950,8 @@ def build_stage_runner(
         # and keeps local execution for every stage not explicitly routed here.
         if settings.enabled and command.name in enabled_stages:
             if command.name in {"collecting_autohome", "collecting_dcd"}:
+                if command.name == "collecting_autohome" and settings.autohome_direct_enabled:
+                    return direct_runner(command, job_paths, progress_sink)
                 return run_collector_via_openclaw(
                     command,
                     job_paths,

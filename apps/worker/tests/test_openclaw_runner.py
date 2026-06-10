@@ -133,6 +133,22 @@ def test_openclaw_settings_routes_both_collectors_by_default(monkeypatch: pytest
     assert settings.stages == ("collecting_autohome", "collecting_dcd")
 
 
+def test_openclaw_settings_disables_autohome_direct_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENCLAW_AUTOHOME_DIRECT_ENABLED", raising=False)
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.autohome_direct_enabled is False
+
+
+def test_openclaw_settings_can_enable_autohome_direct_explicitly(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_DIRECT_ENABLED", "true")
+
+    settings = OpenClawSettings.from_env()
+
+    assert settings.autohome_direct_enabled is True
+
+
 def test_openclaw_settings_defaults_to_memory_conservative_browser_args(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENCLAW_BROWSER_ARGS", raising=False)
     monkeypatch.delenv("OPENCLAW_AUTOHOME_BLOCK_RESOURCE_TYPES", raising=False)
@@ -340,13 +356,71 @@ def test_build_stage_runner_passes_assigned_agent_id_to_collector_adapter(
     monkeypatch.setattr(openclaw_runner, "run_collector_via_openclaw", fake_run_collector_via_openclaw)
 
     runner = build_stage_runner(
-        settings=OpenClawSettings(enabled=True, stages=("collecting_autohome",)),
+        settings=OpenClawSettings(
+            enabled=True,
+            stages=("collecting_autohome",),
+            autohome_direct_enabled=False,
+        ),
         assigned_agent_id="autohome-2",
     )
     result = runner(stage, job_paths, progress_sink)
 
     assert result.status == "success"
     assert captured["agent_id"] == "autohome-2"
+
+
+def test_build_stage_runner_routes_autohome_to_openclaw_by_default_when_stage_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    captured: dict[str, str] = {}
+
+    def fake_run_collector_via_openclaw(command, _job_paths, _progress_sink, *, settings, assigned_agent_id=None):
+        captured["stage"] = command.name
+        return StageResult(status="success", artifact_paths=["openclaw"])
+
+    monkeypatch.setattr(openclaw_runner, "run_collector_via_openclaw", fake_run_collector_via_openclaw)
+
+    runner = build_stage_runner(
+        settings=OpenClawSettings(enabled=True, stages=("collecting_autohome", "collecting_dcd")),
+    )
+    result = runner(stage, job_paths, progress_sink)
+
+    assert result.status == "success"
+    assert result.artifact_paths == ["openclaw"]
+    assert captured == {"stage": "collecting_autohome"}
+
+
+def test_build_stage_runner_keeps_autohome_direct_when_explicitly_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = make_autohome_stage(tmp_path)
+    job_paths = ensure_job_dirs(tmp_path / "jobs", "job_openclaw")
+    progress_sink = ProgressSink(job_id="job_openclaw", progress_path=job_paths.progress / "progress.json", stages=[stage.name])
+    calls: list[str] = []
+
+    def direct_runner(command, _job_paths, _progress_sink):
+        calls.append(command.name)
+        return StageResult(status="success", artifact_paths=["direct"])
+
+    def unexpected_openclaw(*_args, **_kwargs):
+        raise AssertionError("autohome direct should only run when explicitly enabled")
+
+    monkeypatch.setattr(openclaw_runner, "run_collector_via_openclaw", unexpected_openclaw)
+
+    runner = build_stage_runner(
+        settings=OpenClawSettings(enabled=True, stages=("collecting_autohome",), autohome_direct_enabled=True),
+        direct_runner=direct_runner,
+    )
+    result = runner(stage, job_paths, progress_sink)
+
+    assert result.status == "success"
+    assert result.artifact_paths == ["direct"]
+    assert calls == ["collecting_autohome"]
 
 
 def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tmp_path: Path) -> None:
@@ -402,6 +476,16 @@ def test_run_autohome_via_openclaw_calls_gateway_agent_and_collects_artifacts(tm
     assert captured["params"]["timeout"] == 1800
     message = captured["message"]
     assert "sh3rlockC/auto-koubei-collector" in message
+    assert "你是一个汽车口碑收集专家" in message
+    assert "第一优先级" in message
+    assert "不要重写采集器" in message
+    assert "write/edit/apply_patch" in message
+    assert "不要创建 .py/.sh/.js 临时脚本" in message
+    assert "skills/auto-koubei-collector/scripts/export_autohome_koubei.py" in message
+    assert "getserieskoubeilistbytag" in message
+    assert "rowcount > 0" in message
+    assert "empty_data/source_parser_empty" in message
+    assert "不要把 0 行 Excel 报告为成功" in message
     assert "不要创建子代理" in message
     assert "启动后必须立即创建 progress_file" in message
     assert "每完成一个页面或阶段都必须刷新 progress_file" in message
@@ -466,6 +550,16 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     assert captured["stage_name"] == "collecting_dcd"
     assert captured["session_id"] == "vehicle-koubei-job_openclaw-collecting_dcd"
     assert "sh3rlockC/dcd-koubei-collector" in message
+    assert "你是一个汽车口碑收集专家" in message
+    assert "第一优先级" in message
+    assert "不要重写采集器" in message
+    assert "write/edit/apply_patch" in message
+    assert "不要创建 .py/.sh/.js 临时脚本" in message
+    assert "skills/dcd-koubei-collector/scripts/export_dcd_koubei.py" in message
+    assert "__NEXT_DATA__" in message
+    assert "props.pageProps.reviewListData.review_list" in message
+    assert "不要使用 Playwright/Selenium/Chrome/滚动/OCR/DOM" in message
+    assert "contract mismatch" in message
     assert "不要创建子代理" in message
     assert "启动后必须立即创建 progress_file" in message
     assert "每完成一个页面或阶段都必须刷新 progress_file" in message
@@ -474,7 +568,7 @@ def test_run_collector_via_openclaw_supports_dcd_collection_contract(tmp_path: P
     assert "page_mode=auto_detect_all_pages" in message
     assert "禁止添加 --end-page 10" in message
     assert "end_page_auto_detected=true" in message
-    assert "browser_args=--no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions" in message
+    assert "browser_args=" not in message
     assert "block_resource_types=" not in message
     assert "--single-process" not in message
     assert "series_id=25545" in message
