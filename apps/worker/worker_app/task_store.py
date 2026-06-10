@@ -1166,6 +1166,13 @@ class TaskStore:
             busy.setdefault(str(row["platform"]), set()).add(str(row["agent_id"]))
         return busy
 
+    def count_running_collection_runs(self) -> int:
+        with self.engine.begin() as conn:
+            count = conn.execute(
+                text("SELECT COUNT(*) FROM collection_runs WHERE status = 'running'")
+            ).scalar_one()
+        return int(count or 0)
+
     def mark_collection_run_waiting_agent(self, run_id: str) -> CollectionRunRecord:
         now = utc_now_iso()
         with self.engine.begin() as conn:

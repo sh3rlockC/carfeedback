@@ -160,6 +160,33 @@ def seed_vehicle(db_path: Path, *, task_id: str, position: int, query: str, mode
         connection.close()
 
 
+def test_count_running_collection_runs_counts_all_platform_runs(tmp_path: Path) -> None:
+    db_path = tmp_path / "store.db"
+    create_schema(db_path)
+    seed_task(db_path, "task_1")
+    store = TaskStore(f"sqlite+pysqlite:///{db_path}")
+    runs = [
+        store.create_or_join_collection_run(
+            platform="autohome",
+            query_key=f"测试车-{index}",
+            model_name=f"测试车{index}",
+            series_id=f"80{index}",
+            mode="incremental",
+            task_id="task_1",
+        )
+        for index in range(4)
+    ]
+
+    assert store.count_running_collection_runs() == 0
+
+    store.claim_collection_run_with_agent(runs[0].run_id, "autohome-1")
+    store.claim_collection_run_with_agent(runs[1].run_id, "autohome-2")
+    store.fail_collection_run(runs[2].run_id, failure_category="worker_error")
+    store.mark_collection_run_waiting_agent(runs[3].run_id)
+
+    assert store.count_running_collection_runs() == 2
+
+
 def test_load_task_returns_task_with_sorted_vehicles(tmp_path: Path) -> None:
     db_path = tmp_path / "worker.db"
     create_schema(db_path)

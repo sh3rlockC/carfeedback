@@ -5,6 +5,7 @@ from collections import Counter
 from datetime import UTC, datetime
 import json
 import os
+import sqlite3
 import sys
 import threading
 from pathlib import Path
@@ -35,6 +36,7 @@ from worker_app.task_eta import estimate_queue_seconds, eta_reason_for_platform
 from worker_app.task_scheduler import QueuedRun, plan_dispatch_order
 from worker_app.task_store import TaskStore, utc_now_iso
 from worker_app.temporal_activities import TaskActivities
+import worker_app.temporal_activities as temporal_activities
 from worker_app.temporal_workflows import run_single_vehicle_task
 
 
@@ -449,6 +451,85 @@ def test_dispatch_collection_runs_assigns_distinct_v3_pool_agents(tmp_path: Path
     }
     stored_runs = store.load_collection_runs([run_1.run_id, run_2.run_id])
     assert [run.agent_id for run in stored_runs] == ["autohome-1", "autohome-2"]
+
+
+def test_dispatch_waits_when_openclaw_resource_gate_blocks_burst_run(tmp_path: Path, monkeypatch) -> None:
+    from worker_app.openclaw_resource_gate import ResourceSnapshot
+
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'dispatch.db'}"
+    store = TaskStore(database_url)
+    task_id = store.create_task(
+        task_type="single",
+        display_name="测试车",
+        vehicles=[{"query": "测试车", "model_name": "测试车"}],
+    ).task_id
+    existing_runs = [
+        store.create_or_join_collection_run(
+            task_id=task_id,
+            platform="autohome",
+            query_key=f"测试车-{index}",
+            model_name=f"测试车{index}",
+            series_id=f"80{index}",
+            mode="incremental",
+        )
+        for index in range(3)
+    ]
+    for index, run in enumerate(existing_runs, start=1):
+        assert store.claim_collection_run_with_agent(run.run_id, f"autohome-{index}") is not None
+    queued = store.create_or_join_collection_run(
+        task_id=task_id,
+        platform="autohome",
+        query_key="测试车-4",
+        model_name="测试车4",
+        series_id="804",
+        mode="incremental",
+    )
+    submitted_run_ids: list[str] = []
+
+    class CapturingCollectorClient:
+        def submit_run(self, request):
+            submitted_run_ids.append(request.run_id)
+            return CollectorRunStatus(
+                run_id=request.run_id,
+                platform=request.platform,
+                status="running",
+                progress_current=0,
+                progress_total=1,
+            )
+
+    activities = TaskActivities(database_url)
+    monkeypatch.setenv("OPENCLAW_AUTOHOME_AGENT_IDS", "autohome-1,autohome-2,autohome-3,autohome-4")
+    monkeypatch.setenv("OPENCLAW_MAX_ACTIVE_COLLECTIONS", "3")
+    monkeypatch.setenv("OPENCLAW_BURST_ACTIVE_COLLECTIONS", "4")
+    monkeypatch.setenv("OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB", "3500")
+    monkeypatch.setenv("OPENCLAW_MAX_SWAP_USED_MB", "768")
+    monkeypatch.setattr(
+        temporal_activities,
+        "read_openclaw_resource_snapshot",
+        lambda: ResourceSnapshot(mem_available_mb=3400, swap_used_mb=100),
+    )
+    monkeypatch.setattr(activities, "_collector_client", lambda platform: CapturingCollectorClient())
+
+    asyncio.run(activities._dispatch_pending_collection_runs(task_id, [queued.run_id]))
+
+    reloaded = store.load_collection_run(queued.run_id)
+    assert submitted_run_ids == []
+    assert reloaded.status == "waiting_agent"
+    assert reloaded.agent_id is None
+
+    connection = sqlite3.connect(tmp_path / "dispatch.db")
+    try:
+        event = connection.execute(
+            "SELECT payload_json FROM collector_events WHERE run_id = ? AND event_type = 'resource_wait'",
+            (queued.run_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert event is not None
+    payload = json.loads(event[0])
+    assert payload["reason"] == "burst_memory_low"
+    assert payload["active_collections"] == 3
+    assert payload["mem_available_mb"] == 3400
 
 
 def test_dispatch_collection_runs_submits_claimed_runs_concurrently(tmp_path: Path, monkeypatch) -> None:

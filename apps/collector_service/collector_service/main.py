@@ -32,6 +32,17 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resource_guard_enabled() -> bool:
+    return _env_bool("COLLECTOR_SERVICE_RESOURCE_GUARD_ENABLED", False)
+
+
 def reset_runs_for_tests() -> None:
     with _lock:
         _runs.clear()
@@ -128,6 +139,47 @@ def _failure_category(error: BaseException) -> str:
     return "worker_error"
 
 
+def _collector_resource_decision(request: CollectorRunRequest):
+    from worker_app.openclaw_resource_gate import (
+        OpenClawResourceSettings,
+        decide_openclaw_admission,
+        read_openclaw_resource_snapshot,
+    )
+    from worker_app.task_store import TaskStore
+
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is required for collector resource guard")
+
+    store = TaskStore(database_url)
+    # The worker has already marked this run as running before submitting it to
+    # the collector service. Subtract it so the second-stage guard evaluates the
+    # capacity needed to start this run now, not a phantom extra run.
+    active_collections = max(store.count_running_collection_runs() - 1, 0)
+    return decide_openclaw_admission(
+        active_collections=active_collections,
+        snapshot=read_openclaw_resource_snapshot(),
+        settings=OpenClawResourceSettings.from_env(),
+    )
+
+
+def _fail_db_collection_run_for_resource_pressure(request: CollectorRunRequest) -> dict[str, Any]:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if not database_url:
+        return {"db_run_failed": False, "db_error_message": "DATABASE_URL is not configured"}
+    try:
+        from worker_app.task_store import TaskStore
+
+        TaskStore(database_url).fail_collection_run(request.run_id, failure_category="resource_pressure")
+        return {"db_run_failed": True}
+    except Exception as exc:
+        return {
+            "db_run_failed": False,
+            "db_error_code": getattr(exc, "error_code", exc.__class__.__name__),
+            "db_error_message": str(exc) or exc.__class__.__name__,
+        }
+
+
 def _wait_for_result_artifacts(result: dict[str, Any]) -> dict[str, Any]:
     output_path = str(result.get("output_path") or "").strip()
     artifact_paths = [str(path) for path in result.get("artifact_paths") or [] if path]
@@ -163,6 +215,54 @@ def _append_event(status: CollectorRunStatus, event_type: str, message: str, pay
 
 
 def _execute_run(request: CollectorRunRequest) -> None:
+    with _lock:
+        status = _runs.get(request.run_id)
+        if status is None or status.status == "cancel_requested":
+            if status is not None:
+                status.status = "cancelled"
+                _append_event(status, "run_cancelled", "Collector run cancelled before start.")
+            return
+
+    if _resource_guard_enabled():
+        try:
+            decision = _collector_resource_decision(request)
+        except BaseException as exc:
+            with _lock:
+                status = _runs[request.run_id]
+                status.status = "failed"
+                status.failure_category = _failure_category(exc)
+                _append_event(
+                    status,
+                    "run_failed",
+                    "Collector resource guard failed.",
+                    {
+                        "error_code": getattr(exc, "error_code", exc.__class__.__name__),
+                        "error_message": str(exc) or exc.__class__.__name__,
+                        "failure_category": status.failure_category,
+                    },
+                )
+            return
+        if not decision.allowed:
+            payload = {
+                "task_id": request.task_id,
+                "platform": request.platform,
+                "mode": request.mode,
+                "series_id": request.series_id,
+                **decision.event_payload(),
+                **_fail_db_collection_run_for_resource_pressure(request),
+            }
+            with _lock:
+                status = _runs[request.run_id]
+                status.status = "failed"
+                status.failure_category = "resource_pressure"
+                _append_event(
+                    status,
+                    "resource_pressure",
+                    "Collector run deferred because host memory or swap watermarks are unhealthy.",
+                    payload,
+                )
+            return
+
     with _lock:
         status = _runs.get(request.run_id)
         if status is None or status.status == "cancel_requested":

@@ -15,7 +15,9 @@ AUTO_RETRY_FAILURES = {
     "empty_data",
     "collector_missing_result",
     "collector_pending_timeout",
+    "collector_progress_stalled",
     "rate_limited",
+    "resource_pressure",
 }
 STOP_RETRY_FAILURES = {
     "series_not_found",

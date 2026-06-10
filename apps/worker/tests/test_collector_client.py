@@ -173,6 +173,11 @@ def test_auto_retry_failures_are_retryable(category: str) -> None:
     assert is_stop_retry_failure(category) is False
 
 
+def test_resource_pressure_is_retryable() -> None:
+    assert should_auto_retry_failure("resource_pressure") is True
+    assert is_stop_retry_failure("resource_pressure") is False
+
+
 @pytest.mark.parametrize("category", sorted(STOP_RETRY_FAILURES))
 def test_stop_retry_failures_are_not_retryable(category: str) -> None:
     assert should_auto_retry_failure(category) is False

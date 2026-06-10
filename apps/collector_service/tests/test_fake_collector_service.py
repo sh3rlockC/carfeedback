@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -187,6 +188,41 @@ def test_runner_failure_is_recorded_with_failure_category(monkeypatch):
     assert body["status"] == "failed"
     assert body["failure_category"] == "worker_error"
     assert body["events"][-1]["event_type"] == "run_failed"
+
+
+def test_resource_pressure_blocks_before_runner_starts(monkeypatch):
+    called = []
+
+    def fake_collector(request):
+        called.append(request.run_id)
+        return {"output_path": "/tmp/should-not-run.xlsx"}
+
+    blocked = SimpleNamespace(
+        allowed=False,
+        event_payload=lambda: {
+            "reason": "memory_low",
+            "active_collections": 2,
+            "effective_limit": 2,
+            "mem_available_mb": 2500,
+            "swap_used_mb": 100,
+        },
+    )
+
+    monkeypatch.setattr("collector_service.main.run_collector", fake_collector)
+    monkeypatch.setattr("collector_service.main._collector_resource_decision", lambda _request: blocked, raising=False)
+    monkeypatch.setenv("COLLECTOR_SERVICE_INLINE", "true")
+    monkeypatch.setenv("COLLECTOR_SERVICE_RESOURCE_GUARD_ENABLED", "true")
+    client = make_client(monkeypatch)
+
+    response = client.post("/runs", json=run_request("run-resource-pressure"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert called == []
+    assert body["status"] == "failed"
+    assert body["failure_category"] == "resource_pressure"
+    assert body["events"][-1]["event_type"] == "resource_pressure"
+    assert body["events"][-1]["payload"]["reason"] == "memory_low"
 
 
 def test_duplicate_run_id_with_different_request_returns_conflict(monkeypatch):

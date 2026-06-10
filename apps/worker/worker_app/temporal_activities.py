@@ -18,6 +18,11 @@ from worker_app.collector_client import CollectorClient, should_auto_retry_failu
 from worker_app.collector_models import CollectorRunRequest, CollectorRunStatus
 from worker_app.comparison_outputs import VehicleSnapshot, generate_comparison_outputs
 from worker_app.job_store import ComparisonVehicleInputs, DatabaseJobStore
+from worker_app.openclaw_resource_gate import (
+    OpenClawResourceSettings,
+    decide_openclaw_admission,
+    read_openclaw_resource_snapshot,
+)
 from worker_app.task_store import CollectionRunRecord, TaskRecord, TaskStore, TaskVehicleRecord
 
 
@@ -38,6 +43,7 @@ FAILED_STATUSES = {"failed", "cancelled", "cancel_requested"}
 ACTIVE_STATUSES = {"queued", "waiting_agent", "running", "retry_wait"}
 DEFAULT_COLLECTOR_WAIT_POLL_SECONDS = 5.0
 DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS = 2400.0
+DEFAULT_COLLECTOR_PROGRESS_STALL_TIMEOUT_SECONDS = 900.0
 DEFAULT_COMPARISON_VEHICLE_WAIT_TIMEOUT_SECONDS = 2400.0
 DEFAULT_COMPARISON_VEHICLE_WAIT_POLL_SECONDS = 5.0
 PLATFORM_LABELS = {
@@ -54,6 +60,10 @@ def _env_float(name: str, default: float) -> float:
         return float(value)
     except ValueError:
         return default
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -636,21 +646,32 @@ class TaskActivities:
                 },
             )
 
-    def _claim_run_agent(self, store: TaskStore, run: CollectionRunRecord) -> CollectionRunRecord | None:
+    def _claim_run_agent(self, store: TaskStore, run: CollectionRunRecord) -> tuple[CollectionRunRecord | None, dict[str, Any] | None]:
+        active_collections = store.count_running_collection_runs()
+        snapshot = read_openclaw_resource_snapshot()
+        decision = decide_openclaw_admission(
+            active_collections=active_collections,
+            snapshot=snapshot,
+            settings=OpenClawResourceSettings.from_env(),
+        )
+        if not decision.allowed:
+            store.mark_collection_run_waiting_agent(run.run_id)
+            return None, decision.event_payload()
+
         configured_agents = platform_agent_ids_from_env()
         platform_agents = configured_agents.get(run.platform, [])
         if not platform_agents:
-            return store.start_collection_run(run.run_id, agent_id=f"collector-service:{run.platform}")
+            return store.start_collection_run(run.run_id, agent_id=f"collector-service:{run.platform}"), None
 
         busy_agents = store.running_agent_ids_by_platform()
         agent_id = choose_available_agent(run.platform, configured_agents, busy_agents)
         if agent_id is None:
             store.mark_collection_run_waiting_agent(run.run_id)
-            return None
+            return None, None
         claimed = store.claim_collection_run_with_agent(run.run_id, agent_id)
         if claimed is None:
             store.mark_collection_run_waiting_agent(run.run_id)
-        return claimed
+        return claimed, None
 
     def _claim_collection_run_for_dispatch(
         self,
@@ -660,9 +681,20 @@ class TaskActivities:
         task_id: str | None = None,
     ) -> tuple[CollectionRunRecord, str | None] | None:
         owner_task_id = task_id or (queued_run.shared_by_task_ids[0] if queued_run.shared_by_task_ids else None)
-        started = self._claim_run_agent(store, queued_run)
+        started, wait_payload = self._claim_run_agent(store, queued_run)
         if started is None:
-            if queued_run.status != "waiting_agent":
+            if wait_payload is not None and queued_run.status != "waiting_agent":
+                store.record_collector_event(
+                    queued_run.run_id,
+                    "resource_wait",
+                    {
+                        "task_id": owner_task_id,
+                        "platform": queued_run.platform,
+                        "message": "OpenClaw collector dispatch is waiting for host memory or concurrency capacity.",
+                        **wait_payload,
+                    },
+                )
+            elif queued_run.status != "waiting_agent":
                 store.record_collector_event(
                     queued_run.run_id,
                     "collector_waiting_agent",
@@ -749,11 +781,12 @@ class TaskActivities:
                 )
             )
 
-    def _poll_collection_run(self, run: CollectionRunRecord, *, task_id: str | None = None) -> None:
+    def _poll_collection_run(self, run: CollectionRunRecord, *, task_id: str | None = None) -> CollectorRunStatus | None:
         owner_task_id = task_id or (run.shared_by_task_ids[0] if run.shared_by_task_ids else None)
         try:
             status = self._collector_client(run.platform).get_run(run.run_id)
             self._apply_collector_status(run, status, owner_task_id=owner_task_id, event_type="collector_status_polled")
+            return status
         except Exception as exc:
             failure_category = self._collector_error_failure_category(exc)
             store = self._store()
@@ -769,15 +802,70 @@ class TaskActivities:
                     "error_message": str(exc) or exc.__class__.__name__,
                 },
             )
+            return None
 
-    async def _poll_running_collection_runs(self, task_id: str | None, run_ids: list[str]) -> None:
+    async def _poll_running_collection_runs(self, task_id: str | None, run_ids: list[str]) -> dict[str, CollectorRunStatus]:
         if not self.database_url:
-            return
+            return {}
         running = [run for run in self._store().load_collection_runs(run_ids) if run.status == "running"]
         if running:
-            await asyncio.gather(
+            statuses = await asyncio.gather(
                 *(asyncio.to_thread(self._poll_collection_run, run, task_id=task_id) for run in running)
             )
+            return {status.run_id: status for status in statuses if status is not None}
+        return {}
+
+    def _fail_stalled_collection_run(
+        self,
+        run_id: str,
+        *,
+        task_id: str | None,
+        status: CollectorRunStatus,
+        stall_timeout_seconds: float,
+        stalled_seconds: float,
+    ) -> None:
+        store = self._store()
+        current = store.load_collection_run(run_id)
+        if current is None or current.status != "running":
+            return
+        cancel_payload: dict[str, Any] = {"cancel_requested": False}
+        try:
+            cancel_status = self._collector_client(current.platform).cancel_run(run_id)
+            cancel_payload.update(
+                {
+                    "cancel_requested": True,
+                    "cancel_status": cancel_status.status,
+                }
+            )
+        except Exception as exc:
+            cancel_payload.update(
+                {
+                    "cancel_error_code": getattr(exc, "error_code", exc.__class__.__name__),
+                    "cancel_error_message": str(exc) or exc.__class__.__name__,
+                }
+            )
+        failed = store.fail_collection_run(
+            run_id,
+            failure_category="collector_progress_stalled",
+            resume_cursor=status.resume_cursor,
+        )
+        store.record_collector_event(
+            run_id,
+            "collector_progress_stalled",
+            {
+                "task_id": task_id,
+                "platform": failed.platform,
+                "agent_id": current.agent_id,
+                "failure_category": "collector_progress_stalled",
+                "message": "Collector run progress did not advance before stall timeout.",
+                "collector_status": status.status,
+                "progress_current": status.progress_current,
+                "progress_total": status.progress_total,
+                "stall_timeout_seconds": stall_timeout_seconds,
+                "stalled_seconds": stalled_seconds,
+                **cancel_payload,
+            },
+        )
 
     def _record_single_task_download_artifacts(self, payload: dict[str, Any]) -> None:
         if not self.database_url:
@@ -1621,15 +1709,40 @@ class TaskActivities:
         run_ids = [str(run_id) for run_id in payload.get("run_ids", [])]
         timeout_seconds = max(0.0, _env_float("COLLECTOR_WAIT_TIMEOUT_SECONDS", DEFAULT_COLLECTOR_WAIT_TIMEOUT_SECONDS))
         poll_seconds = max(0.0, _env_float("COLLECTOR_WAIT_POLL_SECONDS", DEFAULT_COLLECTOR_WAIT_POLL_SECONDS))
-        deadline = time.monotonic() + timeout_seconds
+        stall_timeout_seconds = max(
+            0.0,
+            _env_float("COLLECTOR_PROGRESS_STALL_TIMEOUT_SECONDS", DEFAULT_COLLECTOR_PROGRESS_STALL_TIMEOUT_SECONDS),
+        )
+        deadline = _monotonic() + timeout_seconds
+        progress_state: dict[str, tuple[tuple[int, int | None], float]] = {}
         self._mark_task_running(task_id)
         while True:
             await self._dispatch_pending_collection_runs(task_id, run_ids)
-            await self._poll_running_collection_runs(task_id, run_ids)
+            polled_statuses = await self._poll_running_collection_runs(task_id, run_ids) or {}
+            now = _monotonic()
+            if stall_timeout_seconds > 0:
+                for run_id, status in polled_statuses.items():
+                    if status.status != "running":
+                        progress_state.pop(run_id, None)
+                        continue
+                    progress_signature = (status.progress_current, status.progress_total)
+                    previous = progress_state.get(run_id)
+                    if previous is None or previous[0] != progress_signature:
+                        progress_state[run_id] = (progress_signature, now)
+                        continue
+                    stalled_seconds = now - previous[1]
+                    if stalled_seconds >= stall_timeout_seconds:
+                        self._fail_stalled_collection_run(
+                            run_id,
+                            task_id=task_id,
+                            status=status,
+                            stall_timeout_seconds=stall_timeout_seconds,
+                            stalled_seconds=stalled_seconds,
+                        )
             result = self._collection_run_results(run_ids)
             if not result["pending_platforms"]:
                 return result
-            remaining_seconds = deadline - time.monotonic()
+            remaining_seconds = deadline - now
             if remaining_seconds <= 0:
                 self._fail_pending_collection_runs(run_ids, task_id=task_id)
                 return self._collection_run_results(run_ids)
