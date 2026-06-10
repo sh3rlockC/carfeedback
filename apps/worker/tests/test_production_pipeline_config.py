@@ -28,11 +28,14 @@ def test_compose_passes_collector_wait_controls_to_worker_services() -> None:
 
 def test_compose_passes_openclaw_resource_gate_and_browser_controls() -> None:
     worker_expected = {
-        "OPENCLAW_MAX_ACTIVE_COLLECTIONS: ${OPENCLAW_MAX_ACTIVE_COLLECTIONS:-3}",
-        "OPENCLAW_BURST_ACTIVE_COLLECTIONS: ${OPENCLAW_BURST_ACTIVE_COLLECTIONS:-4}",
-        "OPENCLAW_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_MIN_MEM_AVAILABLE_MB:-2500}",
-        "OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-3500}",
-        "OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-768}",
+        "OPENCLAW_MAX_ACTIVE_COLLECTIONS: ${OPENCLAW_MAX_ACTIVE_COLLECTIONS:-2}",
+        "OPENCLAW_BURST_ACTIVE_COLLECTIONS: ${OPENCLAW_BURST_ACTIVE_COLLECTIONS:-3}",
+        "OPENCLAW_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_MIN_MEM_AVAILABLE_MB:-3000}",
+        "OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB: ${OPENCLAW_BURST_MIN_MEM_AVAILABLE_MB:-4000}",
+        "OPENCLAW_MAX_SWAP_USED_MB: ${OPENCLAW_MAX_SWAP_USED_MB:-512}",
+    }
+    collector_expected = worker_expected | {
+        "COLLECTOR_SERVICE_RESOURCE_GUARD_ENABLED: ${COLLECTOR_SERVICE_RESOURCE_GUARD_ENABLED:-true}",
     }
     browser_expected = {
         "OPENCLAW_BROWSER_ARGS: ${OPENCLAW_BROWSER_ARGS:---no-sandbox --disable-dev-shm-usage --disable-gpu --disable-extensions --disable-background-networking --disable-sync --mute-audio --no-first-run --no-default-browser-check --renderer-process-limit=4}",
@@ -47,5 +50,5 @@ def test_compose_passes_openclaw_resource_gate_and_browser_controls() -> None:
 
     for service in ("autohome-collector", "dongchedi-collector"):
         block = _compose_service_block(service)
-        for line in browser_expected:
+        for line in collector_expected | browser_expected:
             assert line in block
